@@ -119,12 +119,11 @@
 #' is a directory path/URI or vector of file paths/URIs, otherwise ignored.
 #' These may include `format` to indicate the file format, or other
 #' format-specific options (see [read_csv_arrow()], [read_parquet()] and [read_feather()] on how to specify these).
-#' @inheritParams dataset_factory
 #' @return A [Dataset] R6 object. Use `dplyr` methods on it to query the data,
 #' or call [`$NewScan()`][Scanner] to construct a query directly.
 #' @export
 #' @seealso `vignette("dataset", package = "arrow")`
-#' @include arrow-object.R
+#' @include arrow-package.R
 #' @examplesIf arrow_with_dataset() & arrow_with_parquet()
 #' # Set up directory for examples
 #' tf <- tempfile()
@@ -179,7 +178,6 @@ open_dataset <- function(sources,
                          hive_style = NA,
                          unify_schemas = NULL,
                          format = c("parquet", "arrow", "ipc", "feather", "csv", "tsv", "text"),
-                         factory_options = list(),
                          ...) {
   stop_if_no_datasets()
 
@@ -214,7 +212,6 @@ open_dataset <- function(sources,
     format = format,
     schema = schema,
     hive_style = hive_style,
-    factory_options = factory_options,
     ...
   )
   tryCatch(
@@ -437,4 +434,11 @@ stop_if_no_datasets <- function() {
   if (!arrow_with_dataset()) {
     stop("This build of the arrow package does not support Datasets", call. = FALSE)
   }
+}
+
+#' Add filename to the dataset
+#'
+#' @export
+add_filenames <- function(){
+  Expression$field_ref("__filename")
 }
