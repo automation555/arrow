@@ -16,10 +16,11 @@
 // under the License.
 
 #include "./arrow_types.h"
-#include "./safe-call-into-r.h"
+#if defined(ARROW_R_WITH_ARROW)
 
 #include <functional>
 #include <thread>
+#include "./safe-call-into-r.h"
 
 MainRThread& GetMainRThread() {
   static MainRThread main_r_thread;
@@ -84,3 +85,5 @@ std::string TestSafeCallIntoR(cpp11::function r_fun_that_returns_a_string,
     cpp11::stop("Unknown `opt`");
   }
 }
+
+#endif

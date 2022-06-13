@@ -99,10 +99,6 @@ describe(`Table`, () => {
         expect(new Table().numRows).toBe(0);
     });
 
-    test(`empty table produces an empty iterator`, () => {
-        expect([...new Table()]).toHaveLength(0);
-    });
-
     describe(`constructor`, () => {
         test(`creates an empty Table with Columns`, () => {
             let i32 = new Vector([makeData({ type: new Int32 })]);

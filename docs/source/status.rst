@@ -20,9 +20,8 @@ Implementation Status
 =====================
 
 The following tables summarize the features available in the various official
-Arrow libraries. All libraries currently follow version 1.0.0 of the Arrow
-format. See :doc:`versioning` for details about versioning. Unless otherwise stated,
-the Python, R, Ruby and C/GLib libraries follow the C++ Arrow library.
+Arrow libraries.  Unless otherwise stated, the Python, R, Ruby and C/GLib
+libraries follow the C++ Arrow library.
 
 Data Types
 ==========
@@ -91,7 +90,7 @@ Data Types
 | Data type         | C++   | Java  | Go    | JavaScript | C#    | Rust  | Julia |
 | (special)         |       |       |       |            |       |       |       |
 +===================+=======+=======+=======+============+=======+=======+=======+
-| Dictionary        | ✓     | ✓ (1) | ✓     | ✓ (1)      | ✓ (1) | ✓ (1) | ✓     |
+| Dictionary        | ✓     | ✓ (1) |       | ✓ (1)      | ✓ (1) | ✓ (1) | ✓     |
 +-------------------+-------+-------+-------+------------+-------+-------+-------+
 | Extension         | ✓     | ✓     | ✓     |            |       |       | ✓     |
 +-------------------+-------+-------+-------+------------+-------+-------+-------+
@@ -119,9 +118,9 @@ IPC Format
 +-----------------------------+-------+-------+-------+------------+-------+-------+-------+
 | Dictionaries                | ✓     | ✓     | ✓     | ✓          |  ✓    |  ✓    | ✓     |
 +-----------------------------+-------+-------+-------+------------+-------+-------+-------+
-| Replacement dictionaries    | ✓     | ✓     | ✓     |            |       |       | ✓     |
+| Replacement dictionaries    | ✓     | ✓     |       |            |       |       | ✓     |
 +-----------------------------+-------+-------+-------+------------+-------+-------+-------+
-| Delta dictionaries          | ✓ (1) |       | ✓ (1) |            |  ✓    |       | ✓     |
+| Delta dictionaries          | ✓ (1) |       |       |            |  ✓    |       | ✓     |
 +-----------------------------+-------+-------+-------+------------+-------+-------+-------+
 | Tensors                     | ✓     |       |       |            |       |       |       |
 +-----------------------------+-------+-------+-------+------------+-------+-------+-------+

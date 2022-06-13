@@ -17,6 +17,7 @@
 
 #include "./arrow_types.h"
 
+#if defined(ARROW_R_WITH_ARROW)
 #include <arrow/type.h>
 
 namespace cpp11 {
@@ -514,3 +515,5 @@ std::shared_ptr<arrow::DataType> MapType__item_type(
 bool MapType__keys_sorted(const std::shared_ptr<arrow::MapType>& type) {
   return type->keys_sorted();
 }
+
+#endif

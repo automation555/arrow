@@ -17,6 +17,8 @@
 
 #include "./arrow_types.h"
 
+#if defined(ARROW_R_WITH_ARROW)
+
 #include <thread>
 
 #include <arrow/array.h>
@@ -192,3 +194,5 @@ void arrow__RegisterRExtensionType(const std::shared_ptr<arrow::DataType>& type)
 void arrow__UnregisterRExtensionType(std::string type_name) {
   StopIfNotOk(arrow::UnregisterExtensionType(type_name));
 }
+
+#endif
