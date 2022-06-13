@@ -25,7 +25,10 @@ test_that("abs()", {
 
   compare_dplyr_binding(
     .input %>%
-      transmute(abs = abs(x)) %>%
+      transmute(
+        abs = abs(x),
+        abs_base = base::abs(x)
+      ) %>%
       collect(),
     df
   )
@@ -36,7 +39,10 @@ test_that("sign()", {
 
   compare_dplyr_binding(
     .input %>%
-      transmute(sign = sign(x)) %>%
+      transmute(
+        sign = sign(x),
+        sign2 = base::sign(x)
+      ) %>%
       collect(),
     df
   )
@@ -49,9 +55,13 @@ test_that("ceiling(), floor(), trunc(), round()", {
     .input %>%
       mutate(
         c = ceiling(x),
+        c2 = base::ceiling(x),
         f = floor(x),
+        f2 = base::floor(x),
         t = trunc(x),
-        r = round(x)
+        t2 = base::trunc(x),
+        r = round(x),
+        r2 = base::round(x)
       ) %>%
       collect(),
     df
@@ -141,7 +151,7 @@ test_that("log functions", {
 
   compare_dplyr_binding(
     .input %>%
-      mutate(y = log(x)) %>%
+      mutate(y = base::log(x)) %>%
       collect(),
     df
   )
@@ -196,7 +206,7 @@ test_that("log functions", {
       filter(x != 1) %>%
       mutate(
         y = log(x, base = x),
-        z = log(2, base = x)
+        z = base::log(2, base = x)
       ) %>%
       collect(),
     df
@@ -223,28 +233,40 @@ test_that("log functions", {
 
   compare_dplyr_binding(
     .input %>%
-      mutate(y = logb(x)) %>%
+      mutate(
+        y = logb(x),
+        z = base::logb(x)
+      ) %>%
       collect(),
     df
   )
 
   compare_dplyr_binding(
     .input %>%
-      mutate(y = log1p(x)) %>%
+      mutate(
+        y = log1p(x),
+        z = base::log1p(x)
+      ) %>%
       collect(),
     df
   )
 
   compare_dplyr_binding(
     .input %>%
-      mutate(y = log2(x)) %>%
+      mutate(
+        y = log2(x),
+        z = base::log2(x)
+      ) %>%
       collect(),
     df
   )
 
   compare_dplyr_binding(
     .input %>%
-      mutate(y = log10(x)) %>%
+      mutate(
+        y = log10(x),
+        z = base::log10(x)
+      ) %>%
       collect(),
     df
   )
@@ -255,35 +277,50 @@ test_that("trig functions", {
 
   compare_dplyr_binding(
     .input %>%
-      mutate(y = sin(x)) %>%
+      mutate(
+        y = sin(x),
+        z = base::sin(x)
+      ) %>%
       collect(),
     df
   )
 
   compare_dplyr_binding(
     .input %>%
-      mutate(y = cos(x)) %>%
+      mutate(
+        y = cos(x),
+        z = base::cos(x)
+      ) %>%
       collect(),
     df
   )
 
   compare_dplyr_binding(
     .input %>%
-      mutate(y = tan(x)) %>%
+      mutate(
+        y = tan(x),
+        z = base::tan(x)
+      ) %>%
       collect(),
     df
   )
 
   compare_dplyr_binding(
     .input %>%
-      mutate(y = asin(x)) %>%
+      mutate(
+        y = asin(x),
+        z = base::asin(x)
+      ) %>%
       collect(),
     df
   )
 
   compare_dplyr_binding(
     .input %>%
-      mutate(y = acos(x)) %>%
+      mutate(
+        y = acos(x),
+        z = base::acos(x)
+      ) %>%
       collect(),
     df
   )

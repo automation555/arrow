@@ -28,57 +28,25 @@ register_bindings_datetime <- function() {
 }
 
 register_bindings_datetime_utility <- function() {
-  register_binding("strptime", function(x,
-                                        format = "%Y-%m-%d %H:%M:%S",
-                                        tz = "",
+  register_binding("base::strptime", function(x, format = "%Y-%m-%d %H:%M:%S", tz = NULL,
                                         unit = "ms") {
     # Arrow uses unit for time parsing, strptime() does not.
     # Arrow has no default option for strptime (format, unit),
     # we suggest following format = "%Y-%m-%d %H:%M:%S", unit = MILLI/1L/"ms",
     # (ARROW-12809)
 
-    unit <- make_valid_time_unit(
-      unit,
-      c(valid_time64_units, valid_time32_units)
-    )
-
-    output <- build_expr(
-      "strptime",
-      x,
-      options =
-        list(
-          format = format,
-          unit = unit,
-          error_is_null = TRUE
-        )
-    )
-
-    if (tz == "") {
-      tz <- Sys.timezone()
+    # ParseTimestampStrptime currently ignores the timezone information (ARROW-12820).
+    # Stop if tz is provided.
+    if (is.character(tz)) {
+      arrow_not_supported("Time zone argument")
     }
 
-    # if a timestamp does not contain timezone information (i.e. it is
-    # "timezone-naive") we can attach timezone information (i.e. convert it into
-    # a "timezone-aware" timestamp) with `assume_timezone`
-    # if we want to cast to a different timezone, we can only do it for
-    # timezone-aware timestamps, not for timezone-naive ones
-    if (!is.null(tz)) {
-      output <- build_expr(
-        "assume_timezone",
-        output,
-        options =
-          list(
-            timezone = tz
-          )
-      )
-    }
-    output
+    unit <- make_valid_time_unit(unit, c(valid_time64_units, valid_time32_units))
+
+    build_expr("strptime", x, options = list(format = format, unit = unit, error_is_null = TRUE))
   })
 
-  register_binding("strftime", function(x,
-                                        format = "",
-                                        tz = "",
-                                        usetz = FALSE) {
+  register_binding("base::strftime", function(x, format = "", tz = "", usetz = FALSE) {
     if (usetz) {
       format <- paste(format, "%Z")
     }
@@ -95,7 +63,7 @@ register_bindings_datetime_utility <- function() {
     Expression$create("strftime", ts, options = list(format = format, locale = check_time_locale()))
   })
 
-  register_binding("format_ISO8601", function(x, usetz = FALSE, precision = NULL, ...) {
+  register_binding("lubridate::format_ISO8601", function(x, usetz = FALSE, precision = NULL, ...) {
     ISO8601_precision_map <-
       list(
         y = "%Y",
@@ -126,7 +94,7 @@ register_bindings_datetime_utility <- function() {
     Expression$create("strftime", x, options = list(format = format, locale = "C"))
   })
 
-  register_binding("is.Date", function(x) {
+  register_binding("lubridate::is.Date", function(x) {
     inherits(x, "Date") ||
       (inherits(x, "Expression") && x$type_id() %in% Type[c("DATE32", "DATE64")])
   })
@@ -135,27 +103,29 @@ register_bindings_datetime_utility <- function() {
     inherits(x, c("POSIXt", "POSIXct", "POSIXlt", "Date")) ||
       (inherits(x, "Expression") && x$type_id() %in% Type[c("TIMESTAMP", "DATE32", "DATE64")])
   }
-  register_binding("is.instant", is_instant_binding)
-  register_binding("is.timepoint", is_instant_binding)
+  register_binding("lubridate::is.instant", is_instant_binding)
+  register_binding("lubridate::is.timepoint", is_instant_binding)
 
-  register_binding("is.POSIXct", function(x) {
+  register_binding("lubridate::is.POSIXct", function(x) {
     inherits(x, "POSIXct") ||
       (inherits(x, "Expression") && x$type_id() %in% Type[c("TIMESTAMP")])
   })
 
-  register_binding("date", function(x) {
+  register_binding("lubridate::date", function(x) {
     build_expr("cast", x, options = list(to_type = date32()))
   })
 }
 
 register_bindings_datetime_components <- function() {
-  register_binding("second", function(x) {
+  register_binding("lubridate::second", function(x) {
     Expression$create("add", Expression$create("second", x), Expression$create("subsecond", x))
   })
 
-  register_binding("wday", function(x, label = FALSE, abbr = TRUE,
-                                    week_start = getOption("lubridate.week.start", 7),
-                                    locale = Sys.getlocale("LC_TIME")) {
+  register_binding("lubridate::wday", function(x,
+                                               label = FALSE,
+                                               abbr = TRUE,
+                                               week_start = getOption("lubridate.week.start", 7),
+                                               locale = Sys.getlocale("LC_TIME")) {
     if (label) {
       if (abbr) {
         format <- "%a"
@@ -168,11 +138,11 @@ register_bindings_datetime_components <- function() {
     Expression$create("day_of_week", x, options = list(count_from_zero = FALSE, week_start = week_start))
   })
 
-  register_binding("week", function(x) {
+  register_binding("lubridate::week", function(x) {
     (call_binding("yday", x) - 1) %/% 7 + 1
   })
 
-  register_binding("month", function(x,
+  register_binding("lubridate::month", function(x,
                                      label = FALSE,
                                      abbr = TRUE,
                                      locale = Sys.getlocale("LC_TIME")) {
@@ -207,14 +177,14 @@ register_bindings_datetime_components <- function() {
     build_expr("month", x)
   })
 
-  register_binding("am", function(x) {
+  register_binding("lubridate::am", function(x) {
     hour <- Expression$create("hour", x)
     hour < 12
   })
-  register_binding("pm", function(x) {
+  register_binding("lubridate::pm", function(x) {
     !call_binding("am", x)
   })
-  register_binding("tz", function(x) {
+  register_binding("lubridate::tz", function(x) {
     if (!call_binding("is.POSIXct", x)) {
       abort(
         paste0(
@@ -227,7 +197,7 @@ register_bindings_datetime_components <- function() {
 
     x$type()$timezone()
   })
-  register_binding("semester", function(x, with_year = FALSE) {
+  register_binding("lubridate::semester", function(x, with_year = FALSE) {
     month <- call_binding("month", x)
     semester <- call_binding("if_else", month <= 6, 1L, 2L)
     if (with_year) {
@@ -240,7 +210,7 @@ register_bindings_datetime_components <- function() {
 }
 
 register_bindings_datetime_conversion <- function() {
-  register_binding("make_datetime", function(year = 1970L,
+  register_binding("lubridate::make_datetime", function(year = 1970L,
                                              month = 1L,
                                              day = 1L,
                                              hour = 0L,
@@ -258,12 +228,12 @@ register_bindings_datetime_conversion <- function() {
     build_expr("strptime", x, options = list(format = "%Y-%m-%d-%H-%M-%S", unit = 0L))
   })
 
-  register_binding("make_date", function(year = 1970L, month = 1L, day = 1L) {
+  register_binding("lubridate::make_date", function(year = 1970L, month = 1L, day = 1L) {
     x <- call_binding("make_datetime", year, month, day)
     build_expr("cast", x, options = cast_options(to_type = date32()))
   })
 
-  register_binding("ISOdatetime", function(year,
+  register_binding("base::ISOdatetime", function(year,
                                            month,
                                            day,
                                            hour,
@@ -282,7 +252,7 @@ register_bindings_datetime_conversion <- function() {
     call_binding("make_datetime", year, month, day, hour, min, sec, tz)
   })
 
-  register_binding("ISOdate", function(year,
+  register_binding("base::ISOdate", function(year,
                                        month,
                                        day,
                                        hour = 12,
@@ -292,7 +262,7 @@ register_bindings_datetime_conversion <- function() {
     call_binding("make_datetime", year, month, day, hour, min, sec, tz)
   })
 
-  register_binding("as.Date", function(x,
+  register_binding("base::as.Date", function(x,
                                        format = NULL,
                                        tryFormats = "%Y-%m-%d",
                                        origin = "1970-01-01",
@@ -315,7 +285,7 @@ register_bindings_datetime_conversion <- function() {
     )
   })
 
-  register_binding("as_date", function(x,
+  register_binding("lubridate::as_date", function(x,
                                        format = NULL,
                                        origin = "1970-01-01",
                                        tz = NULL) {
@@ -335,7 +305,7 @@ register_bindings_datetime_conversion <- function() {
     )
   })
 
-  register_binding("as_datetime", function(x,
+  register_binding("lubridate::as_datetime", function(x,
                                            origin = "1970-01-01",
                                            tz = "UTC",
                                            format = NULL) {
@@ -358,7 +328,7 @@ register_bindings_datetime_conversion <- function() {
     build_expr("assume_timezone", output, options = list(timezone = tz))
   })
 
-  register_binding("decimal_date", function(date) {
+  register_binding("lubridate::decimal_date", function(date) {
     y <- build_expr("year", date)
     start <- call_binding("make_datetime", year = y, tz = "UTC")
     sofar <- call_binding("difftime", date, start, units = "secs")
@@ -371,7 +341,7 @@ register_bindings_datetime_conversion <- function() {
     y + sofar$cast(int64()) / total
   })
 
-  register_binding("date_decimal", function(decimal, tz = "UTC") {
+  register_binding("lubridate::date_decimal", function(decimal, tz = "UTC") {
     y <- build_expr("floor", decimal)
 
     start <- call_binding("make_datetime", year = y, tz = tz)
@@ -390,7 +360,7 @@ register_bindings_datetime_conversion <- function() {
 }
 
 register_bindings_duration <- function() {
-  register_binding("difftime", function(time1,
+  register_binding("base::difftime", function(time1,
                                         time2,
                                         tz,
                                         units = "secs") {
@@ -431,7 +401,7 @@ register_bindings_duration <- function() {
     subtract_output <- build_expr("-", time1, time2)
     build_expr("cast", subtract_output, options = cast_options(to_type = duration("s")))
   })
-  register_binding("as.difftime", function(x,
+  register_binding("base::as.difftime", function(x,
                                            format = "%X",
                                            units = "secs") {
     # windows doesn't seem to like "%X"
@@ -467,7 +437,7 @@ register_bindings_duration <- function() {
 }
 
 register_bindings_duration_constructor <- function() {
-  register_binding("make_difftime", function(num = NULL,
+  register_binding("lubridate::make_difftime", function(num = NULL,
                                              units = "secs",
                                              ...) {
     if (units != "secs") {
@@ -512,48 +482,23 @@ register_bindings_duration_helpers <- function() {
     )
   }
 
-  register_binding("dpicoseconds", function(x = 1) {
+  register_binding("lubridate::dpicoseconds", function(x = 1) {
     abort("Duration in picoseconds not supported in Arrow.")
   })
 }
 
 register_bindings_datetime_parsers <- function() {
-  register_binding("parse_date_time", function(x,
+  register_binding("lubridate::parse_date_time", function(x,
                                                orders,
                                                tz = "UTC") {
 
     # each order is translated into possible formats
     formats <- build_formats(orders)
 
-    x <- x$cast(string())
-
     # make all separators (non-letters and non-numbers) into "-"
     x <- call_binding("gsub", "[^A-Za-z0-9]", "-", x)
     # collapse multiple separators into a single one
     x <- call_binding("gsub", "-{2,}", "-", x)
-
-    # we need to transform `x` when orders are `ym`, `my`, and `yq`
-    # for `ym` and `my` orders we add a day ("01")
-    augmented_x <- NULL
-    if (any(orders %in% c("ym", "my"))) {
-      augmented_x <- call_binding("paste0", x, "-01")
-    }
-
-    # for `yq` we need to transform the quarter into the start month (lubridate
-    # behaviour) and then add 01 to parse to the first day of the quarter
-    augmented_x2 <- NULL
-    if (any(orders == "yq")) {
-      # extract everything that comes after the `-` separator, i.e. the quarter
-      # (e.g. 4 from 2022-4)
-      quarter_x <- call_binding("gsub", "^.*?-", "", x)
-      # we should probably error if quarter is not in 1:4
-      # extract everything that comes before the `-`, i.e. the year (e.g. 2002
-      # in 2002-4)
-      year_x <- call_binding("gsub", "-.*$", "", x)
-      quarter_x <- quarter_x$cast(int32())
-      month_x <- (quarter_x - 1) * 3 + 1
-      augmented_x2 <- call_binding("paste0", year_x, "-", month_x, "-01")
-    }
 
     # TODO figure out how to parse strings that have no separators
     # https://issues.apache.org/jira/browse/ARROW-16446
@@ -561,62 +506,15 @@ register_bindings_datetime_parsers <- function() {
     # tricky given the possible combinations between dmy formats + locale
 
     # build a list of expressions for each format
-    parse_attempt_expressions <- map(
-      formats,
-      ~ build_expr(
+    parse_attempt_expressions <- list()
+
+    for (i in seq_along(formats)) {
+      parse_attempt_expressions[[i]] <- build_expr(
         "strptime",
         x,
-        options = list(
-          format = .x,
-          unit = 0L,
-          error_is_null = TRUE
-        )
-      )
-    )
-
-    # build separate expression lists of parsing attempts for the orders that
-    # need an augmented `x`
-    # list for attempts when orders %in% c("ym", "my")
-    parse_attempt_exp_augmented_x <- list()
-
-    if (!is.null(augmented_x)) {
-      parse_attempt_exp_augmented_x <- map(
-        formats,
-        ~ build_expr(
-          "strptime",
-          augmented_x,
-          options = list(
-            format = .x,
-            unit = 0L,
-            error_is_null = TRUE
-          )
-        )
+        options = list(format = formats[[i]], unit = 0L, error_is_null = TRUE)
       )
     }
-
-    # list for attempts when orders %in% c("yq")
-    parse_attempt_exp_augmented_x2 <- list()
-    if (!is.null(augmented_x2)) {
-      parse_attempt_exp_augmented_x2 <- map(
-        formats,
-        ~ build_expr(
-          "strptime",
-          augmented_x2,
-          options = list(
-            format = .x,
-            unit = 0L,
-            error_is_null = TRUE
-          )
-        )
-      )
-    }
-
-    # combine all attempts expressions in prep for coalesce
-    parse_attempt_expressions <- c(
-      parse_attempt_expressions,
-      parse_attempt_exp_augmented_x,
-      parse_attempt_exp_augmented_x2
-    )
 
     coalesce_output <- build_expr("coalesce", args = parse_attempt_expressions)
 
@@ -631,7 +529,7 @@ register_bindings_datetime_parsers <- function() {
 
   })
 
-  ymd_parser_vec <- c("ymd", "ydm", "mdy", "myd", "dmy", "dym", "ym", "my", "yq")
+  ymd_parser_vec <- c("ymd", "ydm", "mdy", "myd", "dmy", "dym")
 
   ymd_parser_map_factory <- function(order) {
     force(order)
@@ -648,42 +546,8 @@ register_bindings_datetime_parsers <- function() {
   }
 
   for (ymd_order in ymd_parser_vec) {
-    register_binding(ymd_order, ymd_parser_map_factory(ymd_order))
+    register_binding(
+      paste0("lubridate::", ymd_order),
+      ymd_parser_map_factory(ymd_order))
   }
-
-  register_binding("fast_strptime", function(x,
-                                             format,
-                                             tz = "UTC",
-                                             lt = FALSE,
-                                             cutoff_2000 = 68L) {
-    # `lt` controls the output `lt = TRUE` returns a POSIXlt (which doesn't play
-    # well with mutate, for example)
-    if (lt) {
-      arrow_not_supported("`lt = TRUE` argument")
-    }
-
-    # TODO revisit once https://issues.apache.org/jira/browse/ARROW-16596 is done
-    if (cutoff_2000 != 68L) {
-      arrow_not_supported("`cutoff_2000` != 68L argument")
-    }
-
-    parse_attempt_expressions <- list()
-
-    parse_attempt_expressions <- map(
-      format,
-      ~ build_expr(
-        "strptime",
-        x,
-        options = list(
-          format = .x,
-          unit = 0L,
-          error_is_null = TRUE
-        )
-      )
-    )
-
-    coalesce_output <- build_expr("coalesce", args = parse_attempt_expressions)
-
-    build_expr("assume_timezone", coalesce_output, options = list(timezone = tz))
-  })
 }

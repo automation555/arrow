@@ -198,7 +198,7 @@ test_that("Negative scalar values", {
 test_that("filter() with between()", {
   compare_dplyr_binding(
     .input %>%
-      filter(between(dbl, 1, 2)) %>%
+      filter(dplyr::between(dbl, 1, 2)) %>%
       collect(),
     tbl
   )
@@ -245,7 +245,7 @@ test_that("filter() with string ops", {
   skip_if_not_available("utf8proc")
   compare_dplyr_binding(
     .input %>%
-      filter(dbl > 2, str_length(verses) > 25) %>%
+      filter(dbl > 2, stringr::str_length(verses) > 25) %>%
       collect(),
     tbl
   )
