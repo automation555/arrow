@@ -29,7 +29,6 @@
 #include "arrow/compute/exec/key_hash.h"
 #include "arrow/compute/exec/task_util.h"
 #include "arrow/compute/kernels/row_encoder.h"
-#include "arrow/util/tracing_internal.h"
 
 namespace arrow {
 namespace compute {
@@ -58,7 +57,7 @@ class HashJoinBasicImpl : public HashJoinImpl {
     }
   }
 
-  Status InputFinished(size_t thread_index, int side) override {
+  Status InputFinished(int side) override {
     if (cancelled_) {
       return Status::Cancelled("Hash join cancelled");
     }
@@ -71,7 +70,7 @@ class HashJoinBasicImpl : public HashJoinImpl {
         left_side_finished_ = true;
       }
       if (proceed) {
-        RETURN_NOT_OK(OnLeftSideAndQueueFinished(thread_index));
+        RETURN_NOT_OK(OnLeftSideAndQueueFinished());
       }
     } else {
       bool proceed;
@@ -81,18 +80,18 @@ class HashJoinBasicImpl : public HashJoinImpl {
         right_side_finished_ = true;
       }
       if (proceed) {
-        RETURN_NOT_OK(OnRightSideFinished(thread_index));
+        RETURN_NOT_OK(OnRightSideFinished());
       }
     }
     return Status::OK();
   }
 
-  Status Init(ExecContext* ctx, JoinType join_type, bool use_sync_execution,
-              size_t /*num_threads*/, HashJoinSchema* schema_mgr,
-              std::vector<JoinKeyCmp> key_cmp, Expression filter,
-              OutputBatchCallback output_batch_callback,
+  Status Init(ExecContext* ctx, JoinType join_type, size_t num_threads,
+              HashJoinSchema* schema_mgr, std::vector<JoinKeyCmp> key_cmp,
+              Expression filter, OutputBatchCallback output_batch_callback,
               FinishedCallback finished_callback,
-              TaskScheduler::ScheduleImpl schedule_task_callback,
+              RegisterTaskGroupCallback register_task_group_callback,
+              StartTaskGroupCallback start_task_group_callback,
               HashJoinImpl* pushdown_target, std::vector<int> column_map) override {
     // TODO(ARROW-15732)
     // Each side of join might have an IO thread being called from.
@@ -113,6 +112,9 @@ class HashJoinBasicImpl : public HashJoinImpl {
     output_batch_callback_ = std::move(output_batch_callback);
     finished_callback_ = std::move(finished_callback);
     local_states_.resize(num_threads_);
+    register_task_group_callback_ = std::move(register_task_group_callback);
+    start_task_group_callback_ = std::move(start_task_group_callback);
+
     for (size_t i = 0; i < local_states_.size(); ++i) {
       local_states_[i].is_initialized = false;
       local_states_[i].is_has_match_initialized = false;
@@ -134,12 +136,11 @@ class HashJoinBasicImpl : public HashJoinImpl {
     left_queue_bloom_finished_ = false;
     left_queue_probe_finished_ = false;
 
-    scheduler_ = TaskScheduler::Make();
     if (pushdown_target_) {
       bloom_filter_ = arrow::internal::make_unique<BlockedBloomFilter>();
       bloom_filter_builder_ = BloomFilterBuilder::Make(
-          use_sync_execution ? BloomFilterBuildStrategy::SINGLE_THREADED
-                             : BloomFilterBuildStrategy::PARALLEL);
+          num_threads_ == 1 ? BloomFilterBuildStrategy::SINGLE_THREADED
+                            : BloomFilterBuildStrategy::PARALLEL);
     }
 
     RegisterBuildBloomFilter();
@@ -147,25 +148,19 @@ class HashJoinBasicImpl : public HashJoinImpl {
     RegisterBloomFilterQueuedBatches();
     RegisterProbeQueuedBatches();
     RegisterScanHashTable();
-    scheduler_->RegisterEnd();
-
-    RETURN_NOT_OK(scheduler_->StartScheduling(
-        0 /*thread index*/, std::move(schedule_task_callback),
-        static_cast<int>(2 * num_threads_) /*concurrent tasks*/, use_sync_execution));
-
     return Status::OK();
   }
 
-  void Abort(TaskScheduler::AbortContinuationImpl pos_abort_callback) override {
+  void Abort(AbortContinuationImpl pos_abort_callback) override {
     EVENT(span_, "Abort");
     END_SPAN(span_);
     cancelled_ = true;
-    scheduler_->Abort(std::move(pos_abort_callback));
+    pos_abort_callback();
   }
 
   // Called by a downstream node after they have constructed a bloom filter
   // that this node can use to filter inputs.
-  Status PushBloomFilter(size_t thread_index, std::unique_ptr<BlockedBloomFilter> filter,
+  Status PushBloomFilter(std::unique_ptr<BlockedBloomFilter> filter,
                          std::vector<int> column_map) override {
     bool proceed;
     {
@@ -182,7 +177,7 @@ class HashJoinBasicImpl : public HashJoinImpl {
         num_batches = left_batches_.size();
         bloom_filters_ready_ = true;
       }
-      RETURN_NOT_OK(BloomFilterQueuedBatches(thread_index, num_batches));
+      RETURN_NOT_OK(BloomFilterQueuedBatches(num_batches));
     }
     return Status::OK();
   }
@@ -793,9 +788,9 @@ class HashJoinBasicImpl : public HashJoinImpl {
   Status BuildBloomFilter_on_finished(size_t thread_index) {
     if (cancelled_) return Status::Cancelled("Hash join cancelled");
     ARROW_DCHECK(pushdown_target_);
-    RETURN_NOT_OK(pushdown_target_->PushBloomFilter(
-        thread_index, std::move(bloom_filter_), std::move(column_map_)));
-    return BuildHashTable(thread_index);
+    RETURN_NOT_OK(pushdown_target_->PushBloomFilter(std::move(bloom_filter_),
+                                                    std::move(column_map_)));
+    return BuildHashTable();
   }
 
   Status BuildHashTable_on_finished(size_t thread_index) {
@@ -814,13 +809,12 @@ class HashJoinBasicImpl : public HashJoinImpl {
       proceed = !has_hash_table_ && left_queue_bloom_finished_;
       has_hash_table_ = true;
     }
-    if (proceed) RETURN_NOT_OK(ProbeQueuedBatches(thread_index));
-
+    if (proceed) RETURN_NOT_OK(ProbeQueuedBatches());
     return Status::OK();
   }
 
   void RegisterBuildBloomFilter() {
-    task_group_bloom_ = scheduler_->RegisterTaskGroup(
+    task_group_bloom_ = register_task_group_callback_(
         [this](size_t thread_index, int64_t task_id) -> Status {
           return BuildBloomFilter_exec_task(thread_index, task_id);
         },
@@ -830,7 +824,7 @@ class HashJoinBasicImpl : public HashJoinImpl {
   }
 
   void RegisterBuildHashTable() {
-    task_group_build_ = scheduler_->RegisterTaskGroup(
+    task_group_build_ = register_task_group_callback_(
         [this](size_t thread_index, int64_t task_id) -> Status {
           return BuildHashTable_exec_task(thread_index, task_id);
         },
@@ -839,18 +833,16 @@ class HashJoinBasicImpl : public HashJoinImpl {
         });
   }
 
-  Status BuildBloomFilter(size_t thread_index) {
+  Status BuildBloomFilter() {
     RETURN_NOT_OK(bloom_filter_builder_->Begin(
         num_threads_, ctx_->cpu_info()->hardware_flags(), ctx_->memory_pool(),
         right_input_row_count_, right_batches_.size(), bloom_filter_.get()));
 
-    return scheduler_->StartTaskGroup(thread_index, task_group_bloom_,
-                                      right_batches_.size());
+    return start_task_group_callback_(task_group_bloom_, right_batches_.size());
   }
 
-  Status BuildHashTable(size_t thread_index) {
-    return scheduler_->StartTaskGroup(thread_index, task_group_build_,
-                                      BuildHashTable_num_tasks());
+  Status BuildHashTable() {
+    return start_task_group_callback_(task_group_build_, BuildHashTable_num_tasks());
   }
 
   Status BloomFilterQueuedBatches_exec_task(size_t thread_index, int64_t task_id) {
@@ -877,12 +869,12 @@ class HashJoinBasicImpl : public HashJoinImpl {
       proceed = !left_queue_bloom_finished_ && has_hash_table_;
       left_queue_bloom_finished_ = true;
     }
-    if (proceed) return ProbeQueuedBatches(thread_index);
+    if (proceed) return ProbeQueuedBatches();
     return Status::OK();
   }
 
   void RegisterBloomFilterQueuedBatches() {
-    task_group_bloom_filter_queued_ = scheduler_->RegisterTaskGroup(
+    task_group_bloom_filter_queued_ = register_task_group_callback_(
         [this](size_t thread_index, int64_t task_id) -> Status {
           return BloomFilterQueuedBatches_exec_task(thread_index, task_id);
         },
@@ -891,9 +883,8 @@ class HashJoinBasicImpl : public HashJoinImpl {
         });
   }
 
-  Status BloomFilterQueuedBatches(size_t thread_index, size_t num_batches) {
-    return scheduler_->StartTaskGroup(thread_index, task_group_bloom_filter_queued_,
-                                      num_batches);
+  Status BloomFilterQueuedBatches(size_t num_batches) {
+    return start_task_group_callback_(task_group_bloom_filter_queued_, num_batches);
   }
 
   int64_t ProbeQueuedBatches_num_tasks() {
@@ -922,14 +913,14 @@ class HashJoinBasicImpl : public HashJoinImpl {
       left_queue_probe_finished_ = true;
     }
     if (proceed) {
-      RETURN_NOT_OK(OnLeftSideAndQueueFinished(thread_index));
+      RETURN_NOT_OK(OnLeftSideAndQueueFinished());
     }
 
     return Status::OK();
   }
 
   void RegisterProbeQueuedBatches() {
-    task_group_queued_ = scheduler_->RegisterTaskGroup(
+    task_group_queued_ = register_task_group_callback_(
         [this](size_t thread_index, int64_t task_id) -> Status {
           return ProbeQueuedBatches_exec_task(thread_index, task_id);
         },
@@ -938,9 +929,8 @@ class HashJoinBasicImpl : public HashJoinImpl {
         });
   }
 
-  Status ProbeQueuedBatches(size_t thread_index) {
-    return scheduler_->StartTaskGroup(thread_index, task_group_queued_,
-                                      ProbeQueuedBatches_num_tasks());
+  Status ProbeQueuedBatches() {
+    return start_task_group_callback_(task_group_queued_, ProbeQueuedBatches_num_tasks());
   }
 
   int64_t ScanHashTable_num_tasks() {
@@ -1008,7 +998,7 @@ class HashJoinBasicImpl : public HashJoinImpl {
   }
 
   void RegisterScanHashTable() {
-    task_group_scan_ = scheduler_->RegisterTaskGroup(
+    task_group_scan_ = register_task_group_callback_(
         [this](size_t thread_index, int64_t task_id) -> Status {
           return ScanHashTable_exec_task(thread_index, task_id);
         },
@@ -1017,10 +1007,9 @@ class HashJoinBasicImpl : public HashJoinImpl {
         });
   }
 
-  Status ScanHashTable(size_t thread_index) {
+  Status ScanHashTable() {
     MergeHasMatch();
-    return scheduler_->StartTaskGroup(thread_index, task_group_scan_,
-                                      ScanHashTable_num_tasks());
+    return start_task_group_callback_(task_group_scan_, ScanHashTable_num_tasks());
   }
 
   Result<bool> QueueBatchIfNeeded(size_t thread_index, int side, ExecBatch& batch) {
@@ -1050,17 +1039,15 @@ class HashJoinBasicImpl : public HashJoinImpl {
     }
   }
 
-  Status OnRightSideFinished(size_t thread_index) {
+  Status OnRightSideFinished() {
     if (pushdown_target_ == nullptr) {
-      return BuildHashTable(thread_index);
+      return BuildHashTable();
     } else {
-      return BuildBloomFilter(thread_index);
+      return BuildBloomFilter();
     }
   }
 
-  Status OnLeftSideAndQueueFinished(size_t thread_index) {
-    return ScanHashTable(thread_index);
-  }
+  Status OnLeftSideAndQueueFinished() { return ScanHashTable(); }
 
   void InitHasMatchIfNeeded(ThreadLocalState* local_state) {
     if (local_state->is_has_match_initialized) {
@@ -1106,7 +1093,6 @@ class HashJoinBasicImpl : public HashJoinImpl {
   HashJoinSchema* schema_mgr_;
   std::vector<JoinKeyCmp> key_cmp_;
   Expression filter_;
-  std::unique_ptr<TaskScheduler> scheduler_;
   int task_group_bloom_;
   int task_group_build_;
   int task_group_bloom_filter_queued_;
@@ -1117,6 +1103,8 @@ class HashJoinBasicImpl : public HashJoinImpl {
   //
   OutputBatchCallback output_batch_callback_;
   FinishedCallback finished_callback_;
+  RegisterTaskGroupCallback register_task_group_callback_;
+  StartTaskGroupCallback start_task_group_callback_;
 
   // Thread local runtime state
   //
