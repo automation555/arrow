@@ -314,7 +314,7 @@ cdef class Function(_Weakrefable):
         return self.base_func.num_kernels()
 
     def call(self, args, FunctionOptions options=None,
-             MemoryPool memory_pool=None, length=None):
+             MemoryPool memory_pool=None):
         """
         Call the function on the given arguments.
 
@@ -328,34 +328,23 @@ cdef class Function(_Weakrefable):
             the right concrete options type.
         memory_pool : pyarrow.MemoryPool, optional
             If not passed, will allocate memory from the default memory pool.
-        length : int, optional
-            Batch size for execution, for nullary (no argument) functions. If
-            not passed, will be inferred from passed data.
         """
         cdef:
             const CFunctionOptions* c_options = NULL
             CMemoryPool* pool = maybe_unbox_memory_pool(memory_pool)
             CExecContext c_exec_ctx = CExecContext(pool)
-            CExecBatch c_batch
+            vector[CDatum] c_args
             CDatum result
 
-        _pack_compute_args(args, &c_batch.values)
+        _pack_compute_args(args, &c_args)
 
         if options is not None:
             c_options = options.get_options()
 
-        if length is not None:
-            c_batch.length = length
-            with nogil:
-                result = GetResultValue(
-                    self.base_func.Execute(c_batch, c_options, &c_exec_ctx)
-                )
-        else:
-            with nogil:
-                result = GetResultValue(
-                    self.base_func.Execute(c_batch.values, c_options,
-                                           &c_exec_ctx)
-                )
+        with nogil:
+            result = GetResultValue(
+                self.base_func.Execute(c_args, c_options, &c_exec_ctx)
+            )
 
         return wrap_datum(result)
 
@@ -535,7 +524,7 @@ def list_functions():
     return _global_func_registry.list_functions()
 
 
-def call_function(name, args, options=None, memory_pool=None, length=None):
+def call_function(name, args, options=None, memory_pool=None):
     """
     Call a named function.
 
@@ -552,13 +541,9 @@ def call_function(name, args, options=None, memory_pool=None, length=None):
         options provided to the function.
     memory_pool : MemoryPool, optional
         memory pool to use for allocations during function execution.
-    length : int, optional
-        Batch size for execution, for nullary (no argument) functions. If not
-        passed, inferred from data.
     """
     func = _global_func_registry.get_function(name)
-    return func.call(args, options=options, memory_pool=memory_pool,
-                     length=length)
+    return func.call(args, options=options, memory_pool=memory_pool)
 
 
 cdef class FunctionOptions(_Weakrefable):
@@ -897,13 +882,11 @@ cdef CCalendarUnit unwrap_round_temporal_unit(unit) except *:
 
 
 cdef class _RoundTemporalOptions(FunctionOptions):
-    def _set_options(self, multiple, unit, week_starts_monday,
-                     ceil_is_strictly_greater, calendar_based_origin):
+    def _set_options(self, multiple, unit, week_starts_monday):
         self.wrapped.reset(
             new CRoundTemporalOptions(
                 multiple, unwrap_round_temporal_unit(unit),
-                week_starts_monday, ceil_is_strictly_greater,
-                calendar_based_origin)
+                week_starts_monday)
         )
 
 
@@ -922,41 +905,10 @@ class RoundTemporalOptions(_RoundTemporalOptions):
         "nanosecond".
     week_starts_monday : bool, default True
         If True, weeks start on Monday; if False, on Sunday.
-    ceil_is_strictly_greater : bool, default False
-        If True, ceil returns a rounded value that is strictly greater than the
-        input. For example: ceiling 1970-01-01T00:00:00 to 3 hours would
-        yield 1970-01-01T03:00:00 if set to True and 1970-01-01T00:00:00
-        if set to False.
-        This applies to the ceil_temporal function only.
-    calendar_based_origin : bool, default False
-        By default, the origin is 1970-01-01T00:00:00. By setting this to True,
-        rounding origin will be beginning of one less precise calendar unit.
-        E.g.: rounding to hours will use beginning of day as origin.
-
-        By default time is rounded to a multiple of units since
-        1970-01-01T00:00:00. By setting calendar_based_origin to true,
-        time will be rounded to number of units since the last greater
-        calendar unit.
-        For example: rounding to multiple of days since the beginning of the
-        month or to hours since the beginning of the day.
-        Exceptions: week and quarter are not used as greater units,
-        therefore days will be rounded to the beginning of the month not
-        week. Greater unit of week is a year.
-        Note that ceiling and rounding might change sorting order of an array
-        near greater unit change. For example rounding YYYY-mm-dd 23:00:00 to
-        5 hours will ceil and round to YYYY-mm-dd+1 01:00:00 and floor to
-        YYYY-mm-dd 20:00:00. On the other hand YYYY-mm-dd+1 00:00:00 will
-        ceil, round and floor to YYYY-mm-dd+1 00:00:00. This can break the
-        order of an already ordered array.
-
     """
 
-    def __init__(self, multiple=1, unit="day", *, week_starts_monday=True,
-                 ceil_is_strictly_greater=False,
-                 calendar_based_origin=False):
-        self._set_options(multiple, unit, week_starts_monday,
-                          ceil_is_strictly_greater,
-                          calendar_based_origin)
+    def __init__(self, multiple=1, unit="day", week_starts_monday=True):
+        self._set_options(multiple, unit, week_starts_monday)
 
 
 cdef class _RoundToMultipleOptions(FunctionOptions):
@@ -1796,34 +1748,6 @@ class PartitionNthOptions(_PartitionNthOptions):
         self._set_options(pivot, null_placement)
 
 
-cdef class _CumulativeSumOptions(FunctionOptions):
-    def _set_options(self, start, skip_nulls):
-        if not isinstance(start, Scalar):
-            try:
-                start = lib.scalar(start)
-            except Exception:
-                _raise_invalid_function_option(
-                    start, "`start` type for CumulativeSumOptions", TypeError)
-
-        self.wrapped.reset(new CCumulativeSumOptions((<Scalar> start).unwrap(), skip_nulls))
-
-
-class CumulativeSumOptions(_CumulativeSumOptions):
-    """
-    Options for `cumulative_sum` function.
-
-    Parameters
-    ----------
-    start : Scalar, default 0.0
-        Starting value for sum computation
-    skip_nulls : bool, default False
-        When false, the first encountered null is propagated.
-    """
-
-    def __init__(self, start=0.0, *, skip_nulls=False):
-        self._set_options(start, skip_nulls)
-
-
 cdef class _ArraySortOptions(FunctionOptions):
     def _set_options(self, order, null_placement):
         self.wrapped.reset(new CArraySortOptions(
@@ -1882,6 +1806,8 @@ class SortOptions(_SortOptions):
 cdef class _SelectKOptions(FunctionOptions):
     def _set_options(self, k, sort_keys):
         cdef vector[CSortKey] c_sort_keys
+        if sort_keys is None:
+            raise ValueError("select_k options requires a non-empty `sort_keys`")
         for name, order in sort_keys:
             c_sort_keys.push_back(
                 CSortKey(tobytes(name), unwrap_sort_order(order))
@@ -2022,10 +1948,10 @@ class Utf8NormalizeOptions(_Utf8NormalizeOptions):
 
 
 cdef class _RandomOptions(FunctionOptions):
-    def _set_options(self, initializer):
+    def _set_options(self, length, initializer):
         if initializer == 'system':
             self.wrapped.reset(new CRandomOptions(
-                CRandomOptions.FromSystemRandom()))
+                CRandomOptions.FromSystemRandom(length)))
             return
 
         if not isinstance(initializer, int):
@@ -2039,7 +1965,7 @@ cdef class _RandomOptions(FunctionOptions):
         if initializer < 0:
             initializer += 2**64
         self.wrapped.reset(new CRandomOptions(
-            CRandomOptions.FromSeed(initializer)))
+            CRandomOptions.FromSeed(length, initializer)))
 
 
 class RandomOptions(_RandomOptions):
@@ -2048,6 +1974,8 @@ class RandomOptions(_RandomOptions):
 
     Parameters
     ----------
+    length : int
+        Number of random values to generate.
     initializer : int or str
         How to initialize the underlying random generator.
         If an integer is given, it is used as a seed.
@@ -2056,8 +1984,8 @@ class RandomOptions(_RandomOptions):
         Other values are invalid.
     """
 
-    def __init__(self, *, initializer='system'):
-        self._set_options(initializer)
+    def __init__(self, length, *, initializer='system'):
+        self._set_options(length, initializer)
 
 
 def _group_by(args, keys, aggregations):
@@ -2110,15 +2038,15 @@ cdef class Expression(_Weakrefable):
 
     >>> import pyarrow.compute as pc
     >>> (pc.field("a") < pc.scalar(3)) | (pc.field("b") > 7)
-    <pyarrow.compute.Expression ((a < 3) or (b > 7))>
-    >>> pc.field('a') != 3
+    <pyarrow.compute.Expression ((a < 3:int64) or (b > 7:int64))>
+    >>> ds.field('a') != 3
     <pyarrow.compute.Expression (a != 3)>
-    >>> pc.field('a').isin([1, 2, 3])
-    <pyarrow.compute.Expression is_in(a, {value_set=int64:[
+    >>> ds.field('a').isin([1, 2, 3])
+    <pyarrow.compute.Expression (a is in [
       1,
       2,
       3
-    ], skip_nulls=false})>
+    ])>
     """
 
     def __init__(self):
@@ -2397,8 +2325,8 @@ cdef class ScalarUdfContext:
 cdef inline CFunctionDoc _make_function_doc(dict func_doc) except *:
     """
     Helper function to generate the FunctionDoc
-    This function accepts a dictionary and expects the
-    summary(str), description(str) and arg_names(List[str]) keys.
+    This function accepts a dictionary and expects the 
+    summary(str), description(str) and arg_names(List[str]) keys. 
     """
     cdef:
         CFunctionDoc f_doc
@@ -2442,11 +2370,11 @@ def _get_scalar_udf_context(memory_pool, batch_length):
 def register_scalar_function(func, function_name, function_doc, in_types,
                              out_type):
     """
-    Register a user-defined scalar function.
+    Register a user-defined scalar function. 
 
     A scalar function is a function that executes elementwise
     operations on arrays or scalars, i.e. a scalar function must
-    be computed row-by-row with no state where each output row
+    be computed row-by-row with no state where each output row 
     is computed only from its corresponding input row.
     In other words, all argument arrays have the same length,
     and the output array is of the same length as the arguments.
@@ -2468,7 +2396,7 @@ def register_scalar_function(func, function_name, function_doc, in_types,
         varargs. The last in_type will be the type of all varargs
         arguments.
     function_name : str
-        Name of the function. This name must be globally unique.
+        Name of the function. This name must be globally unique. 
     function_doc : dict
         A dictionary object with keys "summary" (str),
         and "description" (str).
@@ -2484,30 +2412,30 @@ def register_scalar_function(func, function_name, function_doc, in_types,
 
     Examples
     --------
-    >>> import pyarrow as pa
+
     >>> import pyarrow.compute as pc
-    >>>
+    >>> 
     >>> func_doc = {}
     >>> func_doc["summary"] = "simple udf"
     >>> func_doc["description"] = "add a constant to a scalar"
-    >>>
+    >>> 
     >>> def add_constant(ctx, array):
     ...     return pc.add(array, 1, memory_pool=ctx.memory_pool)
-    >>>
+    >>> 
     >>> func_name = "py_add_func"
     >>> in_types = {"array": pa.int64()}
     >>> out_type = pa.int64()
     >>> pc.register_scalar_function(add_constant, func_name, func_doc,
     ...                   in_types, out_type)
-    >>>
+    >>> 
     >>> func = pc.get_function(func_name)
     >>> func.name
     'py_add_func'
     >>> answer = pc.call_function(func_name, [pa.array([20])])
     >>> answer
-    <pyarrow.lib.Int64Array object at ...>
+    <pyarrow.lib.Int64Array object at 0x10c22e700>
     [
-      21
+    21
     ]
     """
     cdef:
