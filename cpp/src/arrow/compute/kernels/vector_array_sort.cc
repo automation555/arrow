@@ -112,10 +112,8 @@ inline void VisitRawValuesInline(const ArrayType& values,
                                  VisitorNotNull&& visitor_not_null,
                                  VisitorNull&& visitor_null) {
   const auto data = values.raw_values();
-  auto validity_buf = values.data()->buffers[0];
-  const uint8_t* bitmap = validity_buf == nullptr ? nullptr : validity_buf->data();
   VisitBitBlocksVoid(
-      bitmap, values.offset(), values.length(),
+      values.null_bitmap(), values.offset(), values.length(),
       [&](int64_t i) { visitor_not_null(data[i]); }, [&]() { visitor_null(); });
 }
 
@@ -125,15 +123,14 @@ inline void VisitRawValuesInline(const BooleanArray& values,
                                  VisitorNull&& visitor_null) {
   if (values.null_count() != 0) {
     const uint8_t* data = values.data()->GetValues<uint8_t>(1, 0);
-    const uint8_t* bitmap = values.data()->buffers[0]->data();
     VisitBitBlocksVoid(
-        bitmap, values.offset(), values.length(),
+        values.null_bitmap(), values.offset(), values.length(),
         [&](int64_t i) { visitor_not_null(bit_util::GetBit(data, values.offset() + i)); },
         [&]() { visitor_null(); });
   } else {
     // Can avoid GetBit() overhead in the no-nulls case
     VisitBitBlocksVoid(
-        values.data()->buffers[1]->data(), values.offset(), values.length(),
+        values.data()->buffers[1], values.offset(), values.length(),
         [&](int64_t i) { visitor_not_null(true); }, [&]() { visitor_not_null(false); });
   }
 }
@@ -171,6 +168,52 @@ class ArrayCompareSorter {
             return rhs < lhs;
           });
     }
+    return p;
+  }
+};
+
+template <>
+class ArrayCompareSorter<DictionaryType> {
+ public:
+  NullPartitionResult operator()(uint64_t* indices_begin, uint64_t* indices_end,
+                                 const Array& array, int64_t offset,
+                                 const ArraySortOptions& options) {
+    const auto& dict_array = checked_cast<const DictionaryArray&>(array);
+
+    const auto& indices = dict_array.indices();
+    const auto& values = dict_array.dictionary();
+
+    const auto p = PartitionNulls<DictionaryArray, StablePartitioner>(
+        indices_begin, indices_end, dict_array, offset, options.null_placement);
+
+    auto indices_array =
+        CallFunction("array_sort_indices", {values}, &options).ValueOrDie().make_array();
+    const auto& indices_values = checked_cast<const UInt64Array&>(*indices_array);
+
+    std::vector<uint64_t> sort_order(indices_values.length());
+    uint64_t cur = 0;
+    auto cur_idx = GetViewType<UInt64Type>::LogicalValue(indices_values.GetView(cur));
+    auto cur_val = values->GetScalar(cur_idx);
+    for (int i = 0; i < indices_values.length(); i++) {
+      auto tmp_idx = GetViewType<UInt64Type>::LogicalValue(indices_values.GetView(i));
+      auto tmp_val = values->GetScalar(tmp_idx);
+      if (cur_val != tmp_val) {
+        cur = i;
+        cur_val = tmp_val;
+      }
+      sort_order[tmp_idx] = cur;
+    }
+
+    std::stable_sort(
+        p.non_nulls_begin, p.non_nulls_end,
+        [&indices, &sort_order, &offset](uint64_t left, uint64_t right) {
+          const auto lhs =
+              std::stoull(indices->GetScalar(left - offset).ValueOrDie()->ToString());
+          const auto rhs =
+              std::stoull(indices->GetScalar(right - offset).ValueOrDie()->ToString());
+          return sort_order[lhs] < sort_order[rhs];
+        });
+
     return p;
   }
 };
@@ -409,7 +452,8 @@ struct ArraySorter<Type, enable_if_t<is_integer_type<Type>::value &&
 template <typename Type>
 struct ArraySorter<
     Type, enable_if_t<is_floating_type<Type>::value || is_base_binary_type<Type>::value ||
-                      is_fixed_size_binary_type<Type>::value>> {
+                      is_fixed_size_binary_type<Type>::value ||
+                      is_dictionary_type<Type>::value>> {
   ArrayCompareSorter<Type> impl;
 };
 
@@ -477,35 +521,42 @@ void AddArraySortingKernels(VectorKernel base, VectorFunction* func) {
 
   // duration type
   base.signature = KernelSignature::Make({InputType::Array(Type::DURATION)}, uint64());
-  base.exec = GenerateNumericOld<ExecTemplate, UInt64Type>(*int64());
+  base.exec = GenerateNumeric<ExecTemplate, UInt64Type>(*int64());
   DCHECK_OK(func->AddKernel(base));
 
   for (const auto& ty : NumericTypes()) {
     auto physical_type = GetPhysicalType(ty);
     base.signature = KernelSignature::Make({InputType::Array(ty)}, uint64());
-    base.exec = GenerateNumericOld<ExecTemplate, UInt64Type>(*physical_type);
+    base.exec = GenerateNumeric<ExecTemplate, UInt64Type>(*physical_type);
     DCHECK_OK(func->AddKernel(base));
   }
   for (const auto& ty : TemporalTypes()) {
     auto physical_type = GetPhysicalType(ty);
     base.signature = KernelSignature::Make({InputType::Array(ty->id())}, uint64());
-    base.exec = GenerateNumericOld<ExecTemplate, UInt64Type>(*physical_type);
+    base.exec = GenerateNumeric<ExecTemplate, UInt64Type>(*physical_type);
     DCHECK_OK(func->AddKernel(base));
   }
   for (const auto id : {Type::DECIMAL128, Type::DECIMAL256}) {
     base.signature = KernelSignature::Make({InputType::Array(id)}, uint64());
-    base.exec = GenerateDecimalOld<ExecTemplate, UInt64Type>(id);
+    base.exec = GenerateDecimal<ExecTemplate, UInt64Type>(id);
     DCHECK_OK(func->AddKernel(base));
   }
   for (const auto& ty : BaseBinaryTypes()) {
     auto physical_type = GetPhysicalType(ty);
     base.signature = KernelSignature::Make({InputType::Array(ty)}, uint64());
-    base.exec = GenerateVarBinaryBaseOld<ExecTemplate, UInt64Type>(*physical_type);
+    base.exec = GenerateVarBinaryBase<ExecTemplate, UInt64Type>(*physical_type);
     DCHECK_OK(func->AddKernel(base));
   }
   base.signature =
       KernelSignature::Make({InputType::Array(Type::FIXED_SIZE_BINARY)}, uint64());
   base.exec = ExecTemplate<UInt64Type, FixedSizeBinaryType>::Exec;
+  DCHECK_OK(func->AddKernel(base));
+}
+
+template <template <typename...> class ExecTemplate>
+void AddDictArraySortingKernels(VectorKernel base, VectorFunction* func) {
+  base.signature = KernelSignature::Make({InputType::Array(Type::DICTIONARY)}, uint64());
+  base.exec = ExecTemplate<UInt64Type, DictionaryType>::Exec;
   DCHECK_OK(func->AddKernel(base));
 }
 
@@ -562,6 +613,7 @@ void RegisterVectorArraySort(FunctionRegistry* registry) {
       GetDefaultArraySortOptions());
   base.init = ArraySortIndicesState::Init;
   AddArraySortingKernels<ArraySortIndices>(base, array_sort_indices.get());
+  AddDictArraySortingKernels<ArraySortIndices>(base, array_sort_indices.get());
   DCHECK_OK(registry->AddFunction(std::move(array_sort_indices)));
 
   // partition_nth_indices has a parameter so needs its init function
