@@ -37,11 +37,6 @@ namespace internal {
 
 Executor::~Executor() = default;
 
-// By default we do nothing here.  Subclasses that expect to be allocated
-// with static storage duration should override this and ensure any threads respect the
-// lifetime of these resources.
-void Executor::KeepAlive(std::shared_ptr<Resource> resource) {}
-
 namespace {
 
 struct Task {
@@ -50,9 +45,37 @@ struct Task {
   Executor::StopCallback stop_callback;
 };
 
+// As capacity changes a thread's position in the thread pool's
+// worker list may change so we can't rely on that being a stable
+// index.  Instead each worker checks out an index when they start
+// and releases it when they finish.
+//
+// This class is not thread safe and should be protected by a mutex
+class IndexCheckout {
+ public:
+  // Checks out a free index or allocates a new one
+  int CheckoutIndex() {
+    for (std::size_t i = 0; i < taken_.size(); i++) {
+      if (!taken_[i]) {
+        taken_[i] = true;
+        return static_cast<int>(i);
+      }
+    }
+    taken_.push_back(true);
+    return taken_.size() - 1;
+  }
+
+  // Releases an index to be reused by future threads
+  void Release(int index) { taken_[index] = false; }
+
+ private:
+  std::vector<bool> taken_;
+};
+
 }  // namespace
 
 struct SerialExecutor::State {
+  std::thread::id worker_id;
   std::deque<Task> task_queue;
   std::mutex mutex;
   std::condition_variable wait_for_tasks;
@@ -145,10 +168,14 @@ void SerialExecutor::Unpause() {
   }
 }
 
+void SerialExecutor::InitTls() { state_->worker_id = std::this_thread::get_id(); }
+void SerialExecutor::ClearTls() { state_->worker_id = {}; }
+
 void SerialExecutor::RunLoop() {
   // This is called from the SerialExecutor's main thread, so the
   // state is guaranteed to be kept alive.
   std::unique_lock<std::mutex> lk(state_->mutex);
+  state_->worker_id = std::this_thread::get_id();
 
   // If paused we break out immediately.  If finished we only break out
   // when all work is done.
@@ -178,8 +205,16 @@ void SerialExecutor::RunLoop() {
       return state_->paused || state_->finished || !state_->task_queue.empty();
     });
   }
+  state_->worker_id = {};
 }
 
+bool SerialExecutor::OwnsThisThread() const {
+  return state_->worker_id == std::this_thread::get_id();
+}
+
+// The thread index will always be 0 even though the calling thread may change
+// during the iteration of an async generator.
+int SerialExecutor::GetThreadIndex() const { return OwnsThisThread() ? 0 : -1; }
 struct ThreadPool::State {
   State() = default;
 
@@ -206,14 +241,29 @@ struct ThreadPool::State {
   bool please_shutdown_ = false;
   bool quick_shutdown_ = false;
 
-  std::vector<std::shared_ptr<Resource>> kept_alive_resources_;
+  IndexCheckout index_checkout_;
 };
+
+thread_local ThreadPool* tl_current_thread_pool_ = nullptr;
+thread_local int tl_current_worker_index = -1;
+
+bool ThreadPool::OwnsThisThread() const { return tl_current_thread_pool_ == this; }
+
+int ThreadPool::GetThreadIndex() const {
+  if (ARROW_PREDICT_TRUE(OwnsThisThread())) {
+    return tl_current_worker_index;
+  } else {
+    return -1;
+  }
+}
 
 // The worker loop is an independent function so that it can keep running
 // after the ThreadPool is destroyed.
 static void WorkerLoop(std::shared_ptr<ThreadPool::State> state,
                        std::list<std::thread>::iterator it) {
   std::unique_lock<std::mutex> lock(state->mutex_);
+
+  tl_current_worker_index = state->index_checkout_.CheckoutIndex();
 
   // Since we hold the lock, `it` now points to the correct thread object
   // (LaunchWorkersUnlocked has exited)
@@ -265,6 +315,8 @@ static void WorkerLoop(std::shared_ptr<ThreadPool::State> state,
     state->cv_.wait(lock);
   }
   DCHECK_GE(state->tasks_queued_or_running_, 0);
+  state->index_checkout_.Release(tl_current_worker_index);
+  tl_current_worker_index = -1;
 
   // We're done.  Move our thread object to the trashcan of finished
   // workers.  This has two motivations:
@@ -403,10 +455,6 @@ void ThreadPool::CollectFinishedWorkersUnlocked() {
   state_->finished_workers_.clear();
 }
 
-thread_local ThreadPool* current_thread_pool_ = nullptr;
-
-bool ThreadPool::OwnsThisThread() { return current_thread_pool_ == this; }
-
 void ThreadPool::LaunchWorkersUnlocked(int threads) {
   std::shared_ptr<State> state = sp_state_;
 
@@ -414,8 +462,9 @@ void ThreadPool::LaunchWorkersUnlocked(int threads) {
     state_->workers_.emplace_back();
     auto it = --(state_->workers_.end());
     *it = std::thread([this, state, it] {
-      current_thread_pool_ = this;
+      tl_current_thread_pool_ = this;
       WorkerLoop(state, it);
+      tl_current_thread_pool_ = nullptr;
     });
   }
 }
@@ -424,22 +473,6 @@ Status ThreadPool::SpawnReal(TaskHints hints, FnOnce<void()> task, StopToken sto
                              StopCallback&& stop_callback) {
   {
     ProtectAgainstFork();
-#ifdef ARROW_WITH_OPENTELEMETRY
-    // Wrap the task to propagate a parent tracing span to it
-    // This task-wrapping needs to be done before we grab the mutex because the
-    // first call to OT (whatever that happens to be) will attempt to grab this mutex
-    // when calling KeepAlive to keep the OT infrastructure alive.
-    struct {
-      void operator()() {
-        auto scope = ::arrow::internal::tracing::GetTracer()->WithActiveSpan(activeSpan);
-        std::move(func)();
-      }
-      FnOnce<void()> func;
-      opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> activeSpan;
-    } wrapper{std::forward<FnOnce<void()>>(task),
-              ::arrow::internal::tracing::GetTracer()->GetCurrentSpan()};
-    task = std::move(wrapper);
-#endif
     std::lock_guard<std::mutex> lock(state_->mutex_);
     if (state_->please_shutdown_) {
       return Status::Invalid("operation forbidden during or after shutdown");
@@ -451,17 +484,24 @@ Status ThreadPool::SpawnReal(TaskHints hints, FnOnce<void()> task, StopToken sto
       // We can still spin up more workers so spin up a new worker
       LaunchWorkersUnlocked(/*threads=*/1);
     }
+#ifdef ARROW_WITH_OPENTELEMETRY
+    // Wrap the task to propagate a parent tracing span to it
+    struct {
+      void operator()() {
+        auto scope = ::arrow::internal::tracing::GetTracer()->WithActiveSpan(activeSpan);
+        std::move(func)();
+      }
+      FnOnce<void()> func;
+      opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> activeSpan;
+    } wrapper{std::forward<FnOnce<void()>>(task),
+              ::arrow::internal::tracing::GetTracer()->GetCurrentSpan()};
+    task = std::move(wrapper);
+#endif
     state_->pending_tasks_.push_back(
         {std::move(task), std::move(stop_token), std::move(stop_callback)});
   }
   state_->cv_.notify_one();
   return Status::OK();
-}
-
-void ThreadPool::KeepAlive(std::shared_ptr<Executor::Resource> resource) {
-  // Seems unlikely but we might as well guard against concurrent calls to KeepAlive
-  std::lock_guard<std::mutex> lk(state_->mutex_);
-  state_->kept_alive_resources_.push_back(std::move(resource));
 }
 
 Result<std::shared_ptr<ThreadPool>> ThreadPool::Make(int threads) {
