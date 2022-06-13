@@ -28,57 +28,25 @@ register_bindings_datetime <- function() {
 }
 
 register_bindings_datetime_utility <- function() {
-  register_binding("strptime", function(x,
-                                        format = "%Y-%m-%d %H:%M:%S",
-                                        tz = "",
+  register_binding("strptime", function(x, format = "%Y-%m-%d %H:%M:%S", tz = NULL,
                                         unit = "ms") {
     # Arrow uses unit for time parsing, strptime() does not.
     # Arrow has no default option for strptime (format, unit),
     # we suggest following format = "%Y-%m-%d %H:%M:%S", unit = MILLI/1L/"ms",
     # (ARROW-12809)
 
-    unit <- make_valid_time_unit(
-      unit,
-      c(valid_time64_units, valid_time32_units)
-    )
-
-    output <- build_expr(
-      "strptime",
-      x,
-      options =
-        list(
-          format = format,
-          unit = unit,
-          error_is_null = TRUE
-        )
-    )
-
-    if (tz == "") {
-      tz <- Sys.timezone()
+    # ParseTimestampStrptime currently ignores the timezone information (ARROW-12820).
+    # Stop if tz is provided.
+    if (is.character(tz)) {
+      arrow_not_supported("Time zone argument")
     }
 
-    # if a timestamp does not contain timezone information (i.e. it is
-    # "timezone-naive") we can attach timezone information (i.e. convert it into
-    # a "timezone-aware" timestamp) with `assume_timezone`
-    # if we want to cast to a different timezone, we can only do it for
-    # timezone-aware timestamps, not for timezone-naive ones
-    if (!is.null(tz)) {
-      output <- build_expr(
-        "assume_timezone",
-        output,
-        options =
-          list(
-            timezone = tz
-          )
-      )
-    }
-    output
+    unit <- make_valid_time_unit(unit, c(valid_time64_units, valid_time32_units))
+
+    build_expr("strptime", x, options = list(format = format, unit = unit, error_is_null = TRUE))
   })
 
-  register_binding("strftime", function(x,
-                                        format = "",
-                                        tz = "",
-                                        usetz = FALSE) {
+  register_binding("strftime", function(x, format = "", tz = "", usetz = FALSE) {
     if (usetz) {
       format <- paste(format, "%Z")
     }
@@ -311,7 +279,8 @@ register_bindings_datetime_conversion <- function() {
       x = x,
       format = format,
       tryFormats = tryFormats,
-      origin = origin
+      origin = origin,
+      coalesce = FALSE
     )
   })
 
@@ -331,7 +300,8 @@ register_bindings_datetime_conversion <- function() {
     binding_as_date(
       x = x,
       format = format,
-      origin = origin
+      origin = origin,
+      coalesce = TRUE
     )
   })
 
@@ -521,9 +491,12 @@ register_bindings_datetime_parsers <- function() {
   register_binding("parse_date_time", function(x,
                                                orders,
                                                tz = "UTC") {
-
     # each order is translated into possible formats
     formats <- build_formats(orders)
+
+    if (!inherits(x, "Expression")) {
+      x <- Expression$scalar(x)
+    }
 
     x <- x$cast(string())
 
