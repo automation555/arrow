@@ -359,16 +359,8 @@ cdef extern from "parquet/api/reader.h" namespace "parquet" nogil:
         c_bool is_buffered_stream_enabled() const
         void enable_buffered_stream()
         void disable_buffered_stream()
-
         void set_buffer_size(int64_t buf_size)
         int64_t buffer_size() const
-
-        void set_thrift_string_size_limit(int32_t size)
-        int32_t thrift_string_size_limit() const
-
-        void set_thrift_container_size_limit(int32_t size)
-        int32_t thrift_container_size_limit() const
-
         void file_decryption_properties(shared_ptr[CFileDecryptionProperties]
                                         decryption)
         shared_ptr[CFileDecryptionProperties] file_decryption_properties() \
@@ -575,7 +567,8 @@ cdef shared_ptr[ArrowWriterProperties] _create_arrow_writer_properties(
     coerce_timestamps=*,
     allow_truncated_timestamps=*,
     writer_engine_version=*,
-    use_compliant_nested_type=*) except *
+    use_compliant_nested_type=*,
+    store_schema=*) except *
 
 cdef class ParquetSchema(_Weakrefable):
     cdef:

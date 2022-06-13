@@ -239,7 +239,7 @@ cdef class ParquetLogicalType(_Weakrefable):
         -------
         json : str
             JSON representation of type, with at least a field called 'Type'
-            which contains the type name. If the type is parameterized, such
+            which contains the type name. If the type is parameterized, such 
             as a decimal with scale and precision, will contain those as fields
             as well.
         """
@@ -444,7 +444,7 @@ cdef class ColumnChunkMetaData(_Weakrefable):
         """
         Type of compression used for column (str).
 
-        One of 'UNCOMPRESSED', 'SNAPPY', 'GZIP', 'LZO', 'BROTLI', 'LZ4', 'ZSTD',
+        One of 'UNCOMPRESSED', 'SNAPPY', 'GZIP', 'LZO', 'BROTLI', 'LZ4', 'ZSTD', 
         or 'UNKNOWN'.
         """
         return compression_name_from_enum(self.metadata.compression())
@@ -714,7 +714,7 @@ cdef class FileMetaData(_Weakrefable):
         """
         Parquet format version used in file (str, such as '1.0', '2.4').
 
-        If version is missing or unparsable, will default to assuming '2.4'.
+        If version is missing or unparsable, will default to assuming '1.0'.
         """
         cdef ParquetVersion version = self._metadata.version()
         if version == ParquetVersion_V1:
@@ -726,9 +726,9 @@ cdef class FileMetaData(_Weakrefable):
         elif version == ParquetVersion_V2_6:
             return '2.6'
         else:
-            warnings.warn('Unrecognized file version, assuming 2.4: {}'
+            warnings.warn('Unrecognized file version, assuming 1.0: {}'
                           .format(version))
-            return '2.4'
+            return '1.0'
 
     @property
     def created_by(self):
@@ -1167,13 +1167,11 @@ cdef class ParquetReader(_Weakrefable):
         self.pool = maybe_unbox_memory_pool(memory_pool)
         self._metadata = None
 
-    def open(self, object source not None, *, bint use_memory_map=True,
+    def open(self, object source not None, bint use_memory_map=True,
              read_dictionary=None, FileMetaData metadata=None,
              int buffer_size=0, bint pre_buffer=False,
              coerce_int96_timestamp_unit=None,
-             FileDecryptionProperties decryption_properties=None,
-             thrift_string_size_limit=None,
-             thrift_container_size_limit=None):
+             FileDecryptionProperties decryption_properties=None):
         cdef:
             shared_ptr[CRandomAccessFile] rd_handle
             shared_ptr[CFileMetaData] c_metadata
@@ -1194,18 +1192,6 @@ cdef class ParquetReader(_Weakrefable):
             properties.disable_buffered_stream()
         else:
             raise ValueError('Buffer size must be larger than zero')
-
-        if thrift_string_size_limit is not None:
-            if thrift_string_size_limit <= 0:
-                raise ValueError("thrift_string_size_limit "
-                                 "must be larger than zero")
-            properties.set_thrift_string_size_limit(thrift_string_size_limit)
-        if thrift_container_size_limit is not None:
-            if thrift_container_size_limit <= 0:
-                raise ValueError("thrift_container_size_limit "
-                                 "must be larger than zero")
-            properties.set_thrift_container_size_limit(
-                thrift_container_size_limit)
 
         if decryption_properties is not None:
             properties.file_decryption_properties(
@@ -1435,6 +1421,13 @@ cdef class ParquetReader(_Weakrefable):
                          .ReadColumn(column_index, &out))
         return pyarrow_wrap_chunked_array(out)
 
+    def read_schema_field(self, int field_index):
+        cdef shared_ptr[CChunkedArray] out
+        with nogil:
+            check_status(self.reader.get()
+                         .ReadSchemaField(field_index, &out))
+        return pyarrow_wrap_chunked_array(out)
+
 
 cdef shared_ptr[WriterProperties] _create_writer_properties(
         use_dictionary=None,
@@ -1593,7 +1586,8 @@ cdef shared_ptr[ArrowWriterProperties] _create_arrow_writer_properties(
         coerce_timestamps=None,
         allow_truncated_timestamps=False,
         writer_engine_version=None,
-        use_compliant_nested_type=False) except *:
+        use_compliant_nested_type=False,
+        store_schema=True) except *:
     """Arrow writer properties"""
     cdef:
         shared_ptr[ArrowWriterProperties] arrow_properties
@@ -1601,7 +1595,8 @@ cdef shared_ptr[ArrowWriterProperties] _create_arrow_writer_properties(
 
     # Store the original Arrow schema so things like dictionary types can
     # be automatically reconstructed
-    arrow_props.store_schema()
+    if store_schema:
+        arrow_props.store_schema()
 
     # int96 support
 
@@ -1673,6 +1668,7 @@ cdef class ParquetWriter(_Weakrefable):
         FileEncryptionProperties encryption_properties
         int64_t write_batch_size
         int64_t dictionary_pagesize_limit
+        object store_schema
 
     def __cinit__(self, where, Schema schema, use_dictionary=None,
                   compression=None, version=None,
@@ -1690,7 +1686,8 @@ cdef class ParquetWriter(_Weakrefable):
                   use_compliant_nested_type=False,
                   encryption_properties=None,
                   write_batch_size=None,
-                  dictionary_pagesize_limit=None):
+                  dictionary_pagesize_limit=None,
+                  store_schema=True):
         cdef:
             shared_ptr[WriterProperties] properties
             shared_ptr[ArrowWriterProperties] arrow_properties
@@ -1727,7 +1724,8 @@ cdef class ParquetWriter(_Weakrefable):
             coerce_timestamps=coerce_timestamps,
             allow_truncated_timestamps=allow_truncated_timestamps,
             writer_engine_version=writer_engine_version,
-            use_compliant_nested_type=use_compliant_nested_type
+            use_compliant_nested_type=use_compliant_nested_type,
+            store_schema=store_schema,
         )
 
         pool = maybe_unbox_memory_pool(memory_pool)
