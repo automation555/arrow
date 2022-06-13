@@ -19,7 +19,7 @@ args <- commandArgs(TRUE)
 VERSION <- args[1]
 dst_dir <- paste0("libarrow/arrow-", VERSION)
 
-arrow_repo <- paste0(getOption("arrow.dev_repo", "https://arrow-r-nightly.s3.amazonaws.com"), "/libarrow/")
+arrow_repo <- paste0(getOption("arrow.dev_repo", "https://nightlies.apache.org/arrow/r"), "/libarrow/")
 
 options(.arrow.cleanup = character()) # To collect dirs to rm on exit
 on.exit(unlink(getOption(".arrow.cleanup")))
@@ -213,7 +213,7 @@ read_system_release <- function() {
 
 find_available_binary <- function(os) {
   # Download a csv that maps one to the other, columns "actual" and "use_this"
-  u <- "https://raw.githubusercontent.com/ursa-labs/arrow-r-nightly/master/linux/distro-map.csv"
+  u <- "https://raw.githubusercontent.com/apache/arrow/master/r/tools/distro-map.csv"
   lookup <- try(utils::read.csv(u, stringsAsFactors = FALSE), silent = quietly)
   if (!inherits(lookup, "try-error") && os %in% lookup$actual) {
     new <- lookup$use_this[lookup$actual == os]
