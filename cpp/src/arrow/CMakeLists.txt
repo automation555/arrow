@@ -158,7 +158,6 @@ set(ARROW_SRCS
     builder.cc
     buffer.cc
     chunked_array.cc
-    chunk_resolver.cc
     compare.cc
     config.cc
     datum.cc
@@ -393,6 +392,7 @@ if(ARROW_COMPUTE)
        compute/exec/key_encode.cc
        compute/exec/key_hash.cc
        compute/exec/key_map.cc
+       compute/exec/options.cc
        compute/exec/order_by_impl.cc
        compute/exec/partition_util.cc
        compute/exec/options.cc
@@ -406,7 +406,6 @@ if(ARROW_COMPUTE)
        compute/function.cc
        compute/function_internal.cc
        compute/kernel.cc
-       compute/light_array.cc
        compute/registry.cc
        compute/kernels/aggregate_basic.cc
        compute/kernels/aggregate_mode.cc
@@ -437,7 +436,6 @@ if(ARROW_COMPUTE)
        compute/kernels/scalar_validity.cc
        compute/kernels/util_internal.cc
        compute/kernels/vector_array_sort.cc
-       compute/kernels/vector_cumulative_ops.cc
        compute/kernels/vector_hash.cc
        compute/kernels/vector_nested.cc
        compute/kernels/vector_replace.cc
@@ -622,15 +620,10 @@ if(ARROW_TESTING)
                 DEPENDENCIES
                 arrow_test_dependencies
                 SHARED_LINK_LIBS
-                arrow::flatbuffers
-                rapidjson::rapidjson
                 arrow_shared
                 GTest::gtest
                 STATIC_LINK_LIBS
-                arrow::flatbuffers
-                rapidjson::rapidjson
-                arrow_static
-                GTest::gtest)
+                arrow_static)
 
   add_custom_target(arrow_testing)
   add_dependencies(arrow_testing ${ARROW_TESTING_LIBRARIES})
@@ -736,7 +729,7 @@ if(ARROW_COMPUTE)
   add_subdirectory(compute)
 endif()
 
-if(ARROW_SUBSTRAIT)
+if(ARROW_ENGINE)
   add_subdirectory(engine)
 endif()
 
@@ -754,6 +747,20 @@ endif()
 
 if(ARROW_FLIGHT)
   add_subdirectory(flight)
+
+  if(ARROW_WITH_UCX)
+    add_subdirectory(flight/transport/ucx)
+  endif()
+endif()
+
+if(ARROW_FLIGHT_SQL)
+  add_subdirectory(flight/sql)
+endif()
+
+if(ARROW_FLIGHT
+   AND ARROW_FLIGHT_SQL
+   AND ARROW_BUILD_INTEGRATION)
+  add_subdirectory(flight/integration_tests)
 endif()
 
 if(ARROW_HIVESERVER2)

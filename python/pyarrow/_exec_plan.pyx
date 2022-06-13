@@ -27,11 +27,10 @@ from cython.operator cimport dereference as deref, preincrement as inc
 from pyarrow.includes.common cimport *
 from pyarrow.includes.libarrow cimport *
 from pyarrow.includes.libarrow_dataset cimport *
-from pyarrow.lib cimport (Table, check_status, pyarrow_unwrap_table, pyarrow_wrap_table)
-from pyarrow.lib import tobytes
+from pyarrow.lib cimport (Table, pyarrow_unwrap_table, pyarrow_wrap_table)
+from pyarrow.lib import tobytes, _pc
 from pyarrow._compute cimport Expression, _true
 from pyarrow._dataset cimport Dataset
-from pyarrow._dataset import InMemoryDataset
 
 Initialize()  # Initialise support for Datasets in ExecPlan
 
@@ -46,7 +45,7 @@ cdef execplan(inputs, output_type, vector[CDeclaration] plan, c_bool use_threads
         The sources from which the ExecPlan should fetch data.
         In most cases this is only one, unless the first node of the
         plan is able to get data from multiple different sources.
-    output_type : Table or InMemoryDataset
+    output_type : Table or Dataset
         In which format the output should be provided.
     plan : vector[CDeclaration]
         The nodes of the plan that should be applied to the sources
@@ -56,6 +55,7 @@ cdef execplan(inputs, output_type, vector[CDeclaration] plan, c_bool use_threads
     """
     cdef:
         CExecutor *c_executor
+        shared_ptr[CThreadPool] c_executor_sptr
         shared_ptr[CExecContext] c_exec_context
         shared_ptr[CExecPlan] c_exec_plan
         vector[CDeclaration] c_decls
@@ -63,9 +63,8 @@ cdef execplan(inputs, output_type, vector[CDeclaration] plan, c_bool use_threads
         vector[CExecNode*] c_final_node_vec
         CExecNode *c_node
         CTable* c_table
-        shared_ptr[CTable] c_in_table
         shared_ptr[CTable] c_out_table
-        shared_ptr[CTableSourceNodeOptions] c_tablesourceopts
+        shared_ptr[CSourceNodeOptions] c_sourceopts
         shared_ptr[CScanNodeOptions] c_scanopts
         shared_ptr[CExecNodeOptions] c_input_node_opts
         shared_ptr[CSinkNodeOptions] c_sinkopts
@@ -73,12 +72,12 @@ cdef execplan(inputs, output_type, vector[CDeclaration] plan, c_bool use_threads
         shared_ptr[CRecordBatchReader] c_recordbatchreader
         vector[CDeclaration].iterator plan_iter
         vector[CDeclaration.Input] no_c_inputs
-        CStatus c_plan_status
 
     if use_threads:
         c_executor = GetCpuThreadPool()
     else:
-        c_executor = NULL
+        c_executor_sptr = GetResultValue(CThreadPool.Make(1))
+        c_executor = c_executor_sptr.get()
 
     c_exec_context = make_shared[CExecContext](
         c_default_memory_pool(), c_executor)
@@ -89,12 +88,12 @@ cdef execplan(inputs, output_type, vector[CDeclaration] plan, c_bool use_threads
     # Create source nodes for each input
     for ipt in inputs:
         if isinstance(ipt, Table):
-            node_factory = "table_source"
-            c_in_table = pyarrow_unwrap_table(ipt)
-            c_tablesourceopts = make_shared[CTableSourceNodeOptions](
-                c_in_table, 1 << 20)
-            c_input_node_opts = static_pointer_cast[CExecNodeOptions, CTableSourceNodeOptions](
-                c_tablesourceopts)
+            node_factory = "source"
+            c_in_table = pyarrow_unwrap_table(ipt).get()
+            c_sourceopts = GetResultValue(
+                CSourceNodeOptions.FromTable(deref(c_in_table), deref(c_exec_context).executor()))
+            c_input_node_opts = static_pointer_cast[CExecNodeOptions, CSourceNodeOptions](
+                c_sourceopts)
         elif isinstance(ipt, Dataset):
             node_factory = "scan"
             c_in_dataset = (<Dataset>ipt).unwrap()
@@ -148,18 +147,14 @@ cdef execplan(inputs, output_type, vector[CDeclaration] plan, c_bool use_threads
     deref(c_exec_plan).StartProducing()
 
     # Convert output to the expected one.
-    c_out_table = GetResultValue(
-        CTable.FromRecordBatchReader(c_recordbatchreader.get()))
     if output_type == Table:
+        c_out_table = GetResultValue(
+            CTable.FromRecordBatchReader(c_recordbatchreader.get()))
         output = pyarrow_wrap_table(c_out_table)
-    elif output_type == InMemoryDataset:
-        output = InMemoryDataset(pyarrow_wrap_table(c_out_table))
     else:
         raise TypeError("Unsupported output type")
 
-    with nogil:
-        c_plan_status = deref(c_exec_plan).finished().status()
-    check_status(c_plan_status)
+    deref(c_exec_plan).StopProducing()
 
     return output
 
@@ -167,8 +162,7 @@ cdef execplan(inputs, output_type, vector[CDeclaration] plan, c_bool use_threads
 def _perform_join(join_type, left_operand not None, left_keys,
                   right_operand not None, right_keys,
                   left_suffix=None, right_suffix=None,
-                  use_threads=True, coalesce_keys=False,
-                  output_type=Table):
+                  use_threads=True, coalesce_keys=False):
     """
     Perform join of two tables or datasets.
 
@@ -197,12 +191,10 @@ def _perform_join(join_type, left_operand not None, left_keys,
     coalesce_keys : bool, default False
         If the duplicated keys should be omitted from one of the sides
         in the join result.
-    output_type: Table or InMemoryDataset
-        The output type for the exec plan result.
 
     Returns
     -------
-    result_table : Table or InMemoryDataset
+    result_table : Table
     """
     cdef:
         vector[CFieldRef] c_left_keys
@@ -259,19 +251,13 @@ def _perform_join(join_type, left_operand not None, left_keys,
         left_columns = []
     elif join_type == "inner":
         c_join_type = CJoinType_INNER
-        right_columns = [
-            col for col in right_columns if col not in right_keys_order
-        ]
+        right_columns = set(right_columns) - set(right_keys)
     elif join_type == "left outer":
         c_join_type = CJoinType_LEFT_OUTER
-        right_columns = [
-            col for col in right_columns if col not in right_keys_order
-        ]
+        right_columns = set(right_columns) - set(right_keys)
     elif join_type == "right outer":
         c_join_type = CJoinType_RIGHT_OUTER
-        left_columns = [
-            col for col in left_columns if col not in left_keys_order
-        ]
+        left_columns = set(left_columns) - set(left_keys)
     elif join_type == "full outer":
         c_join_type = CJoinType_FULL_OUTER
     else:
@@ -352,50 +338,7 @@ def _perform_join(join_type, left_operand not None, left_keys,
         )
 
     result_table = execplan([left_operand, right_operand],
-                            plan=c_decl_plan,
-                            output_type=output_type,
-                            use_threads=use_threads)
+                            output_type=Table,
+                            plan=c_decl_plan)
 
     return result_table
-
-
-def _filter_table(table, expression, output_type=Table):
-    """Filter rows of a table or dataset based on the provided expression.
-
-    The result will be an output table with only the rows matching
-    the provided expression.
-
-    Parameters
-    ----------
-    table : Table or Dataset
-        Table or Dataset that should be filtered.
-    expression : Expression
-        The expression on which rows should be filtered.
-    output_type: Table or InMemoryDataset
-        The output type for the filtered result.
-
-    Returns
-    -------
-    result_table : Table or InMemoryDataset
-    """
-    cdef:
-        vector[CDeclaration] c_decl_plan
-        Expression expr = expression
-
-    c_decl_plan.push_back(
-        CDeclaration(tobytes("filter"), CFilterNodeOptions(
-            <CExpression>expr.unwrap(), True
-        ))
-    )
-
-    r = execplan([table], plan=c_decl_plan,
-                 output_type=Table, use_threads=False)
-
-    if output_type == Table:
-        return r
-    elif output_type == InMemoryDataset:
-        # Get rid of special dataset columns
-        # "__fragment_index", "__batch_index", "__last_in_fragment", "__filename"
-        return InMemoryDataset(r.select(table.schema.names))
-    else:
-        raise TypeError("Unsupported output type")

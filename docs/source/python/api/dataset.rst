@@ -69,5 +69,3 @@ Classes
    TaggedRecordBatch
    Scanner
    Expression
-   InMemoryDataset
-   WrittenFile

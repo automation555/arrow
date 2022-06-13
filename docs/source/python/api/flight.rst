@@ -57,7 +57,6 @@ Flight Client
 .. autosummary::
    :toctree: ../generated/
 
-    connect
     FlightCallOptions
     FlightClient
     FlightStreamReader
@@ -88,22 +87,6 @@ Authentication
 
     ClientAuthHandler
     ServerAuthHandler
-
-Errors
-------
-
-.. autosummary::
-   :toctree: ../generated/
-
-    FlightError
-    FlightCancelledError
-    FlightInternalError
-    FlightServerError
-    FlightTimedOutError
-    FlightUnauthenticatedError
-    FlightUnauthorizedError
-    FlightUnavailableError
-    FlightWriteSizeExceededError
 
 Middleware
 ----------

@@ -30,7 +30,6 @@
 #include "arrow/compute/api_vector.h"
 #include "arrow/compute/cast.h"
 #include "arrow/compute/exec/exec_plan.h"
-#include "arrow/compute/exec/options.h"
 #include "arrow/dataset/dataset.h"
 #include "arrow/dataset/dataset_internal.h"
 #include "arrow/dataset/plan.h"
@@ -81,15 +80,6 @@ class ScannerRecordBatchReader : public RecordBatchReader {
       *batch = nullptr;
     } else {
       *batch = std::move(next.record_batch);
-    }
-    return Status::OK();
-  }
-
-  Status Close() override {
-    std::shared_ptr<RecordBatch> batch;
-    RETURN_NOT_OK(ReadNext(&batch));
-    while (batch != nullptr) {
-      RETURN_NOT_OK(ReadNext(&batch));
     }
     return Status::OK();
   }
@@ -194,11 +184,8 @@ class AsyncScanner : public Scanner, public std::enable_shared_from_this<AsyncSc
   Status Scan(std::function<Status(TaggedRecordBatch)> visitor) override;
   Result<TaggedRecordBatchIterator> ScanBatches() override;
   Result<TaggedRecordBatchGenerator> ScanBatchesAsync() override;
-  Result<TaggedRecordBatchGenerator> ScanBatchesAsync(Executor* executor) override;
   Result<EnumeratedRecordBatchIterator> ScanBatchesUnordered() override;
   Result<EnumeratedRecordBatchGenerator> ScanBatchesUnorderedAsync() override;
-  Result<EnumeratedRecordBatchGenerator> ScanBatchesUnorderedAsync(
-      Executor* executor) override;
   Result<std::shared_ptr<Table>> TakeRows(const Array& indices) override;
   Result<std::shared_ptr<Table>> Head(int64_t num_rows) override;
   Result<std::shared_ptr<Table>> ToTable() override;
@@ -207,10 +194,11 @@ class AsyncScanner : public Scanner, public std::enable_shared_from_this<AsyncSc
   const std::shared_ptr<Dataset>& dataset() const override;
 
  private:
+  Result<TaggedRecordBatchGenerator> ScanBatchesAsync(Executor* executor);
   Future<> VisitBatchesAsync(std::function<Status(TaggedRecordBatch)> visitor,
                              Executor* executor);
   Result<EnumeratedRecordBatchGenerator> ScanBatchesUnorderedAsync(
-      Executor* executor, bool sequence_fragments);
+      Executor* executor, bool sequence_fragments = false);
   Future<std::shared_ptr<Table>> ToTableAsync(Executor* executor);
 
   Result<FragmentGenerator> GetFragments() const;
@@ -324,13 +312,7 @@ Result<std::shared_ptr<Table>> AsyncScanner::ToTable() {
 }
 
 Result<EnumeratedRecordBatchGenerator> AsyncScanner::ScanBatchesUnorderedAsync() {
-  return ScanBatchesUnorderedAsync(::arrow::internal::GetCpuThreadPool(),
-                                   /*sequence_fragments=*/false);
-}
-
-Result<EnumeratedRecordBatchGenerator> AsyncScanner::ScanBatchesUnorderedAsync(
-    ::arrow::internal::Executor* cpu_thread_pool) {
-  return ScanBatchesUnorderedAsync(cpu_thread_pool, /*sequence_fragments=*/false);
+  return ScanBatchesUnorderedAsync(::arrow::internal::GetCpuThreadPool());
 }
 
 Result<EnumeratedRecordBatch> ToEnumeratedRecordBatch(
@@ -364,6 +346,8 @@ Result<EnumeratedRecordBatchGenerator> AsyncScanner::ScanBatchesUnorderedAsync(
   ARROW_ASSIGN_OR_RAISE(auto plan, compute::ExecPlan::Make(exec_context.get()));
   AsyncGenerator<util::optional<compute::ExecBatch>> sink_gen;
 
+  util::BackpressureOptions backpressure =
+      util::BackpressureOptions::Make(kDefaultBackpressureLow, kDefaultBackpressureHigh);
   auto exprs = scan_options_->projection.call()->arguments;
   auto names = checked_cast<const compute::MakeStructOptions*>(
                    scan_options_->projection.call()->options.get())
@@ -372,11 +356,12 @@ Result<EnumeratedRecordBatchGenerator> AsyncScanner::ScanBatchesUnorderedAsync(
   RETURN_NOT_OK(
       compute::Declaration::Sequence(
           {
-              {"scan", ScanNodeOptions{dataset_, scan_options_, sequence_fragments}},
+              {"scan", ScanNodeOptions{dataset_, scan_options_, backpressure.toggle,
+                                       sequence_fragments}},
               {"filter", compute::FilterNodeOptions{scan_options_->filter}},
               {"augmented_project",
                compute::ProjectNodeOptions{std::move(exprs), std::move(names)}},
-              {"sink", compute::SinkNodeOptions{&sink_gen, scan_options_->backpressure}},
+              {"sink", compute::SinkNodeOptions{&sink_gen, std::move(backpressure)}},
           })
           .AddToPlan(plan.get()));
 
@@ -852,11 +837,6 @@ Status ScannerBuilder::FragmentScanOptions(
   return Status::OK();
 }
 
-Status ScannerBuilder::Backpressure(compute::BackpressureOptions backpressure) {
-  scan_options_->backpressure = backpressure;
-  return Status::OK();
-}
-
 Result<std::shared_ptr<Scanner>> ScannerBuilder::Finish() {
   if (!scan_options_->projection.IsBound()) {
     RETURN_NOT_OK(Project(scan_options_->dataset_schema->field_names()));
@@ -873,6 +853,7 @@ Result<compute::ExecNode*> MakeScanNode(compute::ExecPlan* plan,
   const auto& scan_node_options = checked_cast<const ScanNodeOptions&>(options);
   auto scan_options = scan_node_options.scan_options;
   auto dataset = scan_node_options.dataset;
+  const auto& backpressure_toggle = scan_node_options.backpressure_toggle;
   bool require_sequenced_output = scan_node_options.require_sequenced_output;
 
   RETURN_NOT_OK(NormalizeScanOptions(scan_options, dataset->schema()));
@@ -922,6 +903,10 @@ Result<compute::ExecNode*> MakeScanNode(compute::ExecPlan* plan,
         batch->values.emplace_back(partial.fragment.value->ToString());
         return batch;
       });
+
+  if (backpressure_toggle) {
+    gen = MakePauseable(gen, backpressure_toggle);
+  }
 
   auto fields = scan_options->dataset_schema->fields();
   for (const auto& aug_field : kAugmentedFields) {

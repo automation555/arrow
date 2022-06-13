@@ -67,21 +67,27 @@ template <typename TYPE,
                                              arrow::is_temporal_type<TYPE>::value>::type>
 arrow::Result<std::shared_ptr<arrow::Array>> GetArrayDataSample(
     const std::vector<typename TYPE::c_type>& values) {
-  using ArrowBuilderType = typename arrow::TypeTraits<TYPE>::BuilderType;
-  ArrowBuilderType builder;
+  using ARROW_ARRAY_TYPE = typename arrow::TypeTraits<TYPE>::ArrayType;
+  using ARROW_BUILDER_TYPE = typename arrow::TypeTraits<TYPE>::BuilderType;
+  ARROW_BUILDER_TYPE builder;
   ARROW_RETURN_NOT_OK(builder.Reserve(values.size()));
+  std::shared_ptr<ARROW_ARRAY_TYPE> array;
   ARROW_RETURN_NOT_OK(builder.AppendValues(values));
-  return builder.Finish();
+  ARROW_RETURN_NOT_OK(builder.Finish(&array));
+  return array;
 }
 
 template <class TYPE>
 arrow::Result<std::shared_ptr<arrow::Array>> GetBinaryArrayDataSample(
     const std::vector<std::string>& values) {
-  using ArrowBuilderType = typename arrow::TypeTraits<TYPE>::BuilderType;
-  ArrowBuilderType builder;
+  using ARROW_ARRAY_TYPE = typename arrow::TypeTraits<TYPE>::ArrayType;
+  using ARROW_BUILDER_TYPE = typename arrow::TypeTraits<TYPE>::BuilderType;
+  ARROW_BUILDER_TYPE builder;
   ARROW_RETURN_NOT_OK(builder.Reserve(values.size()));
+  std::shared_ptr<ARROW_ARRAY_TYPE> array;
   ARROW_RETURN_NOT_OK(builder.AppendValues(values));
-  return builder.Finish();
+  ARROW_RETURN_NOT_OK(builder.Finish(&array));
+  return array;
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> GetSampleRecordBatch(
@@ -585,8 +591,7 @@ arrow::Status SourceConsumingSinkExample(cp::ExecContext& exec_context) {
     CustomSinkNodeConsumer(std::atomic<uint32_t>* batches_seen, arrow::Future<> finish)
         : batches_seen(batches_seen), finish(std::move(finish)) {}
 
-    arrow::Status Init(const std::shared_ptr<arrow::Schema>& schema,
-                       cp::BackpressureControl* backpressure_control) override {
+    arrow::Status Init(const std::shared_ptr<arrow::Schema>& schema) override {
       return arrow::Status::OK();
     }
 

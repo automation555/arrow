@@ -24,7 +24,6 @@ import logging
 import mimetypes
 import subprocess
 import textwrap
-import uuid
 from io import StringIO
 from pathlib import Path
 from datetime import date
@@ -43,10 +42,8 @@ try:
     import pygit2
 except ImportError:
     PygitRemoteCallbacks = object
-    GitError = Exception
 else:
     PygitRemoteCallbacks = pygit2.RemoteCallbacks
-    GitError = pygit2.GitError
 
 from ..utils.source import ArrowSources
 
@@ -268,18 +265,9 @@ class Repo:
                                 "Crossbow: {}".format(remote.url))
         return remote
 
-    def fetch(self, retry=3):
+    def fetch(self):
         refspec = '+refs/heads/*:refs/remotes/origin/*'
-        attempt = 1
-        while True:
-            try:
-                self.origin.fetch([refspec])
-                break
-            except GitError as e:
-                if retry and attempt < retry:
-                    attempt += 1
-                else:
-                    raise e
+        self.origin.fetch([refspec])
 
     def push(self, refs=None, github_token=None):
         github_token = github_token or self.github_token
@@ -576,11 +564,6 @@ class Queue(Repo):
         latest_id = self._latest_prefix_id(prefix)
         return '{}-{}'.format(prefix, latest_id + 1)
 
-    def _new_hex_id(self, prefix):
-        """Append a new id to branch's identifier based on the prefix"""
-        hex_id = uuid.uuid4().hex[:10]
-        return '{}-{}'.format(prefix, hex_id)
-
     def latest_for_prefix(self, prefix):
         prefix_date = self._prefix_contains_date(prefix)
         if prefix.startswith("nightly") and not prefix_date:
@@ -634,20 +617,16 @@ class Queue(Repo):
         job.queue = self
         return job
 
-    def put(self, job, prefix='build', increment_job_id=True):
+    def put(self, job, prefix='build'):
         if not isinstance(job, Job):
             raise CrossbowError('`job` must be an instance of Job')
         if job.branch is not None:
             raise CrossbowError('`job.branch` is automatically generated, '
                                 'thus it must be blank')
 
+        # auto increment and set next job id, e.g. build-85
         job._queue = self
-        if increment_job_id:
-            # auto increment and set next job id, e.g. build-85
-            job.branch = self._next_job_id(prefix)
-        else:
-            # set new branch to something unique, e.g. build-41d017af40
-            job.branch = self._new_hex_id(prefix)
+        job.branch = self._next_job_id(prefix)
 
         # create tasks' branches
         for task_name, task in job.tasks.items():
@@ -968,6 +947,8 @@ class Job(Serializable):
             raise ValueError('each `tasks` mus be an instance of Task')
         if not isinstance(target, Target):
             raise ValueError('`target` must be an instance of Target')
+        if not isinstance(target, Target):
+            raise ValueError('`target` must be an instance of Target')
         if not isinstance(params, dict):
             raise ValueError('`params` must be an instance of dict')
 
@@ -1238,5 +1219,3 @@ yaml = YAML()
 yaml.register_class(Job)
 yaml.register_class(Task)
 yaml.register_class(Target)
-yaml.register_class(Queue)
-yaml.register_class(TaskStatus)

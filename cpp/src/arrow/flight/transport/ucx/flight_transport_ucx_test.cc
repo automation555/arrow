@@ -50,61 +50,41 @@ testing::Environment* const kUcxEnvironment =
 //------------------------------------------------------------
 // Common transport tests
 
-class UcxConnectivityTest : public ConnectivityTest, public ::testing::Test {
+class UcxConnectivityTest : public ConnectivityTest {
  protected:
   std::string transport() const override { return "ucx"; }
-  void SetUp() override { SetUpTest(); }
-  void TearDown() override { TearDownTest(); }
 };
 ARROW_FLIGHT_TEST_CONNECTIVITY(UcxConnectivityTest);
 
-class UcxDataTest : public DataTest, public ::testing::Test {
+class UcxDataTest : public DataTest {
  protected:
   std::string transport() const override { return "ucx"; }
-  void SetUp() override { SetUpTest(); }
-  void TearDown() override { TearDownTest(); }
 };
 ARROW_FLIGHT_TEST_DATA(UcxDataTest);
 
-class UcxDoPutTest : public DoPutTest, public ::testing::Test {
+class UcxDoPutTest : public DoPutTest {
  protected:
   std::string transport() const override { return "ucx"; }
-  void SetUp() override { SetUpTest(); }
-  void TearDown() override { TearDownTest(); }
 };
 ARROW_FLIGHT_TEST_DO_PUT(UcxDoPutTest);
 
-class UcxAppMetadataTest : public AppMetadataTest, public ::testing::Test {
+class UcxAppMetadataTest : public AppMetadataTest {
  protected:
   std::string transport() const override { return "ucx"; }
-  void SetUp() override { SetUpTest(); }
-  void TearDown() override { TearDownTest(); }
 };
 ARROW_FLIGHT_TEST_APP_METADATA(UcxAppMetadataTest);
 
-class UcxIpcOptionsTest : public IpcOptionsTest, public ::testing::Test {
+class UcxIpcOptionsTest : public IpcOptionsTest {
  protected:
   std::string transport() const override { return "ucx"; }
-  void SetUp() override { SetUpTest(); }
-  void TearDown() override { TearDownTest(); }
 };
 ARROW_FLIGHT_TEST_IPC_OPTIONS(UcxIpcOptionsTest);
 
-class UcxCudaDataTest : public CudaDataTest, public ::testing::Test {
+class UcxCudaDataTest : public CudaDataTest {
  protected:
   std::string transport() const override { return "ucx"; }
-  void SetUp() override { SetUpTest(); }
-  void TearDown() override { TearDownTest(); }
 };
 ARROW_FLIGHT_TEST_CUDA_DATA(UcxCudaDataTest);
-
-class UcxErrorHandlingTest : public ErrorHandlingTest, public ::testing::Test {
- protected:
-  std::string transport() const override { return "ucx"; }
-  void SetUp() override { SetUpTest(); }
-  void TearDown() override { TearDownTest(); }
-};
-ARROW_FLIGHT_TEST_ERROR_HANDLING(UcxErrorHandlingTest);
 
 //------------------------------------------------------------
 // UCX internals tests
@@ -223,6 +203,43 @@ TEST(HeadersFrame, Parse) {
         HeadersFrame::Parse(std::move(buffer)));
   }
 }
+
+TEST(HeadersFrame, RoundTripStatus) {
+  for (const auto code : kStatusCodes) {
+    {
+      Status expected = code == StatusCode::OK ? Status() : Status(code, "foo");
+      ASSERT_OK_AND_ASSIGN(auto headers, HeadersFrame::Make(expected, {}));
+      Status status;
+      ASSERT_OK(headers.GetStatus(&status));
+      ASSERT_EQ(status, expected);
+    }
+
+    if (code == StatusCode::OK) continue;
+
+    // Attach a generic status detail
+    {
+      auto detail = std::make_shared<TestStatusDetail>();
+      Status original(code, "foo", detail);
+      Status expected(code, "foo",
+                      std::make_shared<FlightStatusDetail>(FlightStatusCode::Internal,
+                                                           detail->ToString()));
+      ASSERT_OK_AND_ASSIGN(auto headers, HeadersFrame::Make(expected, {}));
+      Status status;
+      ASSERT_OK(headers.GetStatus(&status));
+      ASSERT_EQ(status, expected);
+    }
+
+    // Attach a Flight status detail
+    for (const auto flight_code : kFlightStatusCodes) {
+      Status expected(code, "foo",
+                      std::make_shared<FlightStatusDetail>(flight_code, "extra"));
+      ASSERT_OK_AND_ASSIGN(auto headers, HeadersFrame::Make(expected, {}));
+      Status status;
+      ASSERT_OK(headers.GetStatus(&status));
+      ASSERT_EQ(status, expected);
+    }
+  }
+}
 }  // namespace ucx
 }  // namespace transport
 
@@ -325,9 +342,7 @@ TEST_F(TestUcx, Errors) {
     Status expected(code, "Error message");
     server->set_error_status(expected);
     Status actual = client_->GetFlightInfo(descriptor).status();
-    ASSERT_EQ(actual.code(), expected.code()) << actual.ToString();
-    ASSERT_THAT(actual.message(), ::testing::HasSubstr("Error message"))
-        << actual.ToString();
+    ASSERT_EQ(actual, expected);
 
     // Attach a generic status detail
     {
@@ -337,10 +352,7 @@ TEST_F(TestUcx, Errors) {
                       std::make_shared<FlightStatusDetail>(FlightStatusCode::Internal,
                                                            detail->ToString()));
       Status actual = client_->GetFlightInfo(descriptor).status();
-      ASSERT_EQ(actual.code(), expected.code()) << actual.ToString();
-      ASSERT_THAT(actual.message(), ::testing::HasSubstr("foo")) << actual.ToString();
-      ASSERT_THAT(actual.message(), ::testing::HasSubstr("Custom status detail"))
-          << actual.ToString();
+      ASSERT_EQ(actual, expected);
     }
 
     // Attach a Flight status detail
@@ -349,9 +361,7 @@ TEST_F(TestUcx, Errors) {
                       std::make_shared<FlightStatusDetail>(flight_code, "extra"));
       server->set_error_status(expected);
       Status actual = client_->GetFlightInfo(descriptor).status();
-      ASSERT_EQ(actual.code(), expected.code()) << actual.ToString();
-      ASSERT_THAT(actual.message(), ::testing::HasSubstr("Error message"))
-          << actual.ToString();
+      ASSERT_EQ(actual, expected);
     }
   }
 }

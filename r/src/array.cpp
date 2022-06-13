@@ -17,6 +17,8 @@
 
 #include "./arrow_types.h"
 
+#if defined(ARROW_R_WITH_ARROW)
+
 #include <arrow/array.h>
 #include <arrow/array/concatenate.h>
 #include <arrow/util/bitmap_reader.h>
@@ -334,3 +336,5 @@ std::shared_ptr<arrow::Array> arrow__Concatenate(cpp11::list dots) {
 
   return ValueOrStop(arrow::Concatenate(vector));
 }
+
+#endif

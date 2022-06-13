@@ -182,30 +182,29 @@ def array(object obj, type=None, mask=None, size=None, from_pandas=None,
     >>> import pandas as pd
     >>> import pyarrow as pa
     >>> pa.array(pd.Series([1, 2]))
-    <pyarrow.lib.Int64Array object at ...>
+    <pyarrow.lib.Int64Array object at 0x7f674e4c0e10>
     [
       1,
       2
     ]
 
     >>> pa.array(["a", "b", "a"], type=pa.dictionary(pa.int8(), pa.string()))
-    <pyarrow.lib.DictionaryArray object at ...>
-    ...
+    <pyarrow.lib.DictionaryArray object at 0x7feb288d9040>
     -- dictionary:
-      [
-        "a",
-        "b"
-      ]
+    [
+      "a",
+      "b"
+    ]
     -- indices:
-      [
-        0,
-        1,
-        0
-      ]
+    [
+      0,
+      1,
+      0
+    ]
 
     >>> import numpy as np
     >>> pa.array(pd.Series([1, 2]), mask=np.array([0, 1], dtype=bool))
-    <pyarrow.lib.Int64Array object at ...>
+    <pyarrow.lib.Int64Array object at 0x7f9019e11208>
     [
       1,
       null
@@ -365,11 +364,11 @@ def nulls(size, type=None, MemoryPool memory_pool=None):
     --------
     >>> import pyarrow as pa
     >>> pa.nulls(10)
-    <pyarrow.lib.NullArray object at ...>
+    <pyarrow.lib.NullArray object at 0x7ffaf04c2e50>
     10 nulls
 
     >>> pa.nulls(3, pa.uint32())
-    <pyarrow.lib.UInt32Array object at ...>
+    <pyarrow.lib.UInt32Array object at 0x7ffaf04c2e50>
     [
       null,
       null,
@@ -415,7 +414,7 @@ def repeat(value, size, MemoryPool memory_pool=None):
     --------
     >>> import pyarrow as pa
     >>> pa.repeat(10, 3)
-    <pyarrow.lib.Int64Array object at ...>
+    <pyarrow.lib.Int64Array object at 0x7ffac03a2750>
     [
       10,
       10,
@@ -423,7 +422,7 @@ def repeat(value, size, MemoryPool memory_pool=None):
     ]
 
     >>> pa.repeat([1, 2], 2)
-    <pyarrow.lib.ListArray object at ...>
+    <pyarrow.lib.ListArray object at 0x7ffaf04c2e50>
     [
       [
         1,
@@ -436,7 +435,7 @@ def repeat(value, size, MemoryPool memory_pool=None):
     ]
 
     >>> pa.repeat("string", 3)
-    <pyarrow.lib.StringArray object at ...>
+    <pyarrow.lib.StringArray object at 0x7ffac03a2750>
     [
       "string",
       "string",
@@ -444,7 +443,7 @@ def repeat(value, size, MemoryPool memory_pool=None):
     ]
 
     >>> pa.repeat(pa.scalar({'a': 1, 'b': [1, 2]}), 2)
-    <pyarrow.lib.StructArray object at ...>
+    <pyarrow.lib.StructArray object at 0x7ffac03a2750>
     -- is_valid: all not null
     -- child 0 type: int64
       [
@@ -754,11 +753,9 @@ cdef class _PandasConvertible(_Weakrefable):
 
         Examples
         --------
-        >>> import pyarrow as pa
-        >>> import pandas as pd
-
         Convert a Table to pandas DataFrame:
 
+        >>> import pyarrow as pa
         >>> table = pa.table([
         ...    pa.array([2, 4, 5, 100]),
         ...    pa.array(["Flamingo", "Horse", "Brittle stars", "Centipede"])
@@ -770,26 +767,6 @@ cdef class _PandasConvertible(_Weakrefable):
         2       5  Brittle stars
         3     100      Centipede
         >>> isinstance(table.to_pandas(), pd.DataFrame)
-        True
-
-        Convert a RecordBatch to pandas DataFrame:
-
-        >>> import pyarrow as pa
-        >>> n_legs = pa.array([2, 4, 5, 100])
-        >>> animals = pa.array(["Flamingo", "Horse", "Brittle stars", "Centipede"])
-        >>> batch = pa.record_batch([n_legs, animals],
-        ...                         names=["n_legs", "animals"])
-        >>> batch
-        pyarrow.RecordBatch
-        n_legs: int64
-        animals: string
-        >>> batch.to_pandas()
-           n_legs        animals
-        0       2       Flamingo
-        1       4          Horse
-        2       5  Brittle stars
-        3     100      Centipede
-        >>> isinstance(batch.to_pandas(), pd.DataFrame)
         True
 
         Convert a Chunked Array to pandas Series:
@@ -804,6 +781,7 @@ cdef class _PandasConvertible(_Weakrefable):
         4      5
         5    100
         dtype: int64
+        >>> import pandas as pd
         >>> isinstance(n_legs.to_pandas(), pd.Series)
         True
         """
@@ -880,10 +858,9 @@ cdef class Array(_PandasConvertible):
 
         Examples
         --------
-        >>> import pyarrow as pa
         >>> left = pa.array(["one", "two", "three"])
         >>> right = pa.array(["two", None, "two-and-a-half", "three"])
-        >>> print(left.diff(right)) # doctest: +SKIP
+        >>> print(left.diff(right))
 
         @@ -0, +0 @@
         -"one"
@@ -1280,7 +1257,7 @@ cdef class Array(_PandasConvertible):
         -------
         value : Scalar (index) or Array (slice)
         """
-        if isinstance(key, slice):
+        if PySlice_Check(key):
             return _normalize_slice(self, key)
 
         return self.getitem(_normalize_index(key, self.length()))
@@ -1597,7 +1574,7 @@ cdef _array_like_to_pandas(obj, options, types_mapper):
                                               obj, &out))
     elif isinstance(obj, ChunkedArray):
         with nogil:
-            check_status(libarrow_python.ConvertChunkedArrayToPandas(
+            check_status(libarrow.ConvertChunkedArrayToPandas(
                 c_options,
                 (<ChunkedArray> obj).sp_chunked_array,
                 obj, &out))
@@ -1846,11 +1823,10 @@ cdef class BaseListArray(Array):
 
         Examples
         --------
-        >>> import pyarrow as pa
         >>> arr = pa.array([[1, 2, 3], [], None, [4]],
         ...                type=pa.list_(pa.int32()))
         >>> arr.value_parent_indices()
-        <pyarrow.lib.Int64Array object at ...>
+        <pyarrow.lib.Int32Array object at 0x7efc5db958a0>
         [
           0,
           0,
@@ -1867,11 +1843,10 @@ cdef class BaseListArray(Array):
 
         Examples
         --------
-        >>> import pyarrow as pa
         >>> arr = pa.array([[1, 2, 3], [], None, [4]],
         ...                type=pa.list_(pa.int32()))
         >>> arr.value_lengths()
-        <pyarrow.lib.Int32Array object at ...>
+        <pyarrow.lib.Int32Array object at 0x7efc5db95910>
         [
           3,
           0,
@@ -1907,34 +1882,33 @@ cdef class ListArray(BaseListArray):
 
         Examples
         --------
-        >>> import pyarrow as pa
         >>> values = pa.array([1, 2, 3, 4])
         >>> offsets = pa.array([0, 2, 4])
         >>> pa.ListArray.from_arrays(offsets, values)
-        <pyarrow.lib.ListArray object at ...>
+        <pyarrow.lib.ListArray object at 0x7fbde226bf40>
         [
           [
-            1,
-            2
+            0,
+            1
           ],
           [
-            3,
-            4
+            2,
+            3
           ]
         ]
-        >>> # nulls in the offsets array become null lists
+        # nulls in the offsets array become null lists
         >>> offsets = pa.array([0, None, 2, 4])
         >>> pa.ListArray.from_arrays(offsets, values)
-        <pyarrow.lib.ListArray object at ...>
+        <pyarrow.lib.ListArray object at 0x7fbde226bf40>
         [
           [
-            1,
-            2
+            0,
+            1
           ],
           null,
           [
-            3,
-            4
+            2,
+            3
           ]
         ]
         """
@@ -1980,10 +1954,9 @@ cdef class ListArray(BaseListArray):
 
         Examples
         --------
-        >>> import pyarrow as pa
-        >>> array = pa.array([[1, 2], None, [3, 4, 5]])
+        >>> array = pa.array([[1, 2], None, [3, 4, 5])
         >>> array.offsets
-        <pyarrow.lib.Int32Array object at ...>
+        <pyarrow.lib.Int32Array object at 0x7f3adc4776a0>
         [
           0,
           2,
@@ -2140,11 +2113,10 @@ cdef class FixedSizeListArray(Array):
 
         Create from a values array and a list size:
 
-        >>> import pyarrow as pa
         >>> values = pa.array([1, 2, 3, 4])
         >>> arr = pa.FixedSizeListArray.from_arrays(values, 2)
         >>> arr
-        <pyarrow.lib.FixedSizeListArray object at ...>
+        <pyarrow.lib.FixedSizeListArray object at 0x7f6436df3a00>
         [
           [
             1,
@@ -2156,22 +2128,10 @@ cdef class FixedSizeListArray(Array):
           ]
         ]
 
-        Or create from a values array, list size and matching type:
+        Or create from a values array and matching type:
 
-        >>> typ = pa.list_(pa.field("values", pa.int64()), 2)
-        >>> arr = pa.FixedSizeListArray.from_arrays(values,type=typ)
-        >>> arr
-        <pyarrow.lib.FixedSizeListArray object at ...>
-        [
-          [
-            1,
-            2
-          ],
-          [
-            3,
-            4
-          ]
-        ]
+        >>> arr = pa.FixedSizeListArray.from_arrays(values, type=pa.list_(2))
+
         """
         cdef:
             Array _values
@@ -2861,7 +2821,7 @@ def concat_arrays(arrays, MemoryPool memory_pool=None):
     >>> arr1 = pa.array([2, 4, 5, 100])
     >>> arr2 = pa.array([2, 4])
     >>> pa.concat_arrays([arr1, arr2])
-    <pyarrow.lib.Int64Array object at ...>
+    <pyarrow.lib.Int64Array object at 0x1166eb1c0>
     [
       2,
       4,
