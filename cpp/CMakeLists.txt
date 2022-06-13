@@ -745,9 +745,9 @@ if(ARROW_WITH_BZ2)
 endif()
 
 if(ARROW_WITH_LZ4)
-  list(APPEND ARROW_STATIC_LINK_LIBS lz4::lz4)
-  if(lz4_SOURCE STREQUAL "SYSTEM")
-    list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS lz4::lz4)
+  list(APPEND ARROW_STATIC_LINK_LIBS LZ4::lz4)
+  if(Lz4_SOURCE STREQUAL "SYSTEM")
+    list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS LZ4::lz4)
   endif()
 endif()
 
@@ -971,6 +971,10 @@ if(NOT WIN32 AND ARROW_PLASMA)
 endif()
 
 add_subdirectory(src/arrow)
+
+if(ARROW_ADBC)
+  add_subdirectory(src/adbc)
+endif()
 
 if(ARROW_PARQUET)
   add_subdirectory(src/parquet)
