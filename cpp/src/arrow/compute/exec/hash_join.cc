@@ -29,12 +29,10 @@
 #include "arrow/compute/exec/key_hash.h"
 #include "arrow/compute/exec/task_util.h"
 #include "arrow/compute/kernels/row_encoder.h"
-#include "arrow/util/tracing_internal.h"
+#include "arrow/compute/row/encode_internal.h"
 
 namespace arrow {
 namespace compute {
-
-using internal::RowEncoder;
 
 class HashJoinBasicImpl : public HashJoinImpl {
  private:
@@ -672,11 +670,6 @@ class HashJoinBasicImpl : public HashJoinImpl {
       for (size_t i = 0; i < keys.size(); i++) {
         int input_idx = bloom_filter_column_maps_[ifilter][i];
         keys[i] = batch[input_idx];
-        if (keys[i].is_scalar()) {
-          ARROW_ASSIGN_OR_RAISE(
-              keys[i],
-              MakeArrayFromScalar(*keys[i].scalar(), batch.length, ctx_->memory_pool()));
-        }
       }
       ARROW_ASSIGN_OR_RAISE(ExecBatch key_batch, ExecBatch::Make(std::move(keys)));
       RETURN_NOT_OK(Hashing32::HashBatch(
@@ -721,11 +714,6 @@ class HashJoinBasicImpl : public HashJoinImpl {
     for (size_t i = 0; i < key_columns.size(); i++) {
       int input_idx = key_to_in.get(static_cast<int>(i));
       key_columns[i] = input_batch[input_idx];
-      if (key_columns[i].is_scalar()) {
-        ARROW_ASSIGN_OR_RAISE(
-            key_columns[i], MakeArrayFromScalar(*key_columns[i].scalar(),
-                                                input_batch.length, ctx_->memory_pool()));
-      }
     }
     ARROW_ASSIGN_OR_RAISE(ExecBatch key_batch, ExecBatch::Make(std::move(key_columns)));
 

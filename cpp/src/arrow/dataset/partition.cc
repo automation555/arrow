@@ -26,15 +26,15 @@
 #include "arrow/array/array_dict.h"
 #include "arrow/array/array_nested.h"
 #include "arrow/array/builder_dict.h"
-#include "arrow/compute/api_aggregate.h"
 #include "arrow/compute/api_scalar.h"
 #include "arrow/compute/api_vector.h"
 #include "arrow/compute/cast.h"
 #include "arrow/compute/exec/expression_internal.h"
+#include "arrow/compute/row/grouper.h"
 #include "arrow/dataset/dataset_internal.h"
 #include "arrow/filesystem/path_util.h"
 #include "arrow/scalar.h"
-#include "arrow/util/int_util_overflow.h"
+#include "arrow/util/int_util_internal.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/make_unique.h"
 #include "arrow/util/string_view.h"
@@ -141,14 +141,13 @@ Result<Partitioning::PartitionedBatches> KeyValuePartitioning::Partition(
     key_batch.values.emplace_back(batch->column_data(i));
   }
 
-  ARROW_ASSIGN_OR_RAISE(auto grouper,
-                        compute::internal::Grouper::Make(key_batch.GetDescriptors()));
+  ARROW_ASSIGN_OR_RAISE(auto grouper, compute::Grouper::Make(key_batch.GetDescriptors()));
 
   ARROW_ASSIGN_OR_RAISE(Datum id_batch, grouper->Consume(key_batch));
 
   auto ids = id_batch.array_as<UInt32Array>();
-  ARROW_ASSIGN_OR_RAISE(auto groupings, compute::internal::Grouper::MakeGroupings(
-                                            *ids, grouper->num_groups()));
+  ARROW_ASSIGN_OR_RAISE(auto groupings,
+                        compute::Grouper::MakeGroupings(*ids, grouper->num_groups()));
 
   ARROW_ASSIGN_OR_RAISE(auto uniques, grouper->GetUniques());
   ArrayVector unique_arrays(num_keys);
@@ -263,7 +262,7 @@ Result<compute::Expression> KeyValuePartitioning::Parse(const std::string& path)
   return and_(std::move(expressions));
 }
 
-Result<PartitionPathFormat> KeyValuePartitioning::Format(
+Result<Partitioning::PartitionPathFormat> KeyValuePartitioning::Format(
     const compute::Expression& expr) const {
   ScalarVector values{static_cast<size_t>(schema_->num_fields()), nullptr};
 
@@ -377,8 +376,7 @@ DirectoryPartitioning::DirectoryPartitioning(std::shared_ptr<Schema> schema,
 
 Result<std::vector<KeyValuePartitioning::Key>> DirectoryPartitioning::ParseKeys(
     const std::string& path) const {
-  std::vector<std::string> segments =
-      fs::internal::SplitAbstractPath(fs::internal::GetAbstractPathParent(path).first);
+  std::vector<std::string> segments = fs::internal::SplitAbstractPath(path);
   return ParsePartitionSegments(segments);
 }
 
@@ -391,24 +389,23 @@ FilenamePartitioning::FilenamePartitioning(std::shared_ptr<Schema> schema,
 
 Result<std::vector<KeyValuePartitioning::Key>> FilenamePartitioning::ParseKeys(
     const std::string& path) const {
-  std::vector<std::string> segments = fs::internal::SplitAbstractPath(
-      StripNonPrefix(fs::internal::GetAbstractPathParent(path).second),
-      kFilenamePartitionSep);
+  std::vector<std::string> segments =
+      fs::internal::SplitAbstractPath(StripNonPrefix(path), kFilenamePartitionSep);
   return ParsePartitionSegments(segments);
 }
 
-Result<PartitionPathFormat> DirectoryPartitioning::FormatValues(
+Result<Partitioning::PartitionPathFormat> DirectoryPartitioning::FormatValues(
     const ScalarVector& values) const {
   std::vector<std::string> segments;
   ARROW_ASSIGN_OR_RAISE(segments, FormatPartitionSegments(values));
   return PartitionPathFormat{fs::internal::JoinAbstractPath(std::move(segments)), ""};
 }
 
-Result<PartitionPathFormat> FilenamePartitioning::FormatValues(
+Result<Partitioning::PartitionPathFormat> FilenamePartitioning::FormatValues(
     const ScalarVector& values) const {
   std::vector<std::string> segments;
   ARROW_ASSIGN_OR_RAISE(segments, FormatPartitionSegments(values));
-  return PartitionPathFormat{
+  return Partitioning::PartitionPathFormat{
       "", fs::internal::JoinAbstractPath(std::move(segments), kFilenamePartitionSep) +
               kFilenamePartitionSep};
 }
@@ -723,8 +720,7 @@ Result<std::vector<KeyValuePartitioning::Key>> HivePartitioning::ParseKeys(
     const std::string& path) const {
   std::vector<Key> keys;
 
-  for (const auto& segment :
-       fs::internal::SplitAbstractPath(fs::internal::GetAbstractPathParent(path).first)) {
+  for (const auto& segment : fs::internal::SplitAbstractPath(path)) {
     ARROW_ASSIGN_OR_RAISE(auto maybe_key, ParseKey(segment, hive_options_));
     if (auto key = maybe_key) {
       keys.push_back(std::move(*key));
@@ -734,7 +730,7 @@ Result<std::vector<KeyValuePartitioning::Key>> HivePartitioning::ParseKeys(
   return keys;
 }
 
-Result<PartitionPathFormat> HivePartitioning::FormatValues(
+Result<Partitioning::PartitionPathFormat> HivePartitioning::FormatValues(
     const ScalarVector& values) const {
   std::vector<std::string> segments(static_cast<size_t>(schema_->num_fields()));
 
@@ -752,7 +748,8 @@ Result<PartitionPathFormat> HivePartitioning::FormatValues(
     }
   }
 
-  return PartitionPathFormat{fs::internal::JoinAbstractPath(std::move(segments)), ""};
+  return Partitioning::PartitionPathFormat{
+      fs::internal::JoinAbstractPath(std::move(segments)), ""};
 }
 
 class HivePartitioningFactory : public KeyValuePartitioningFactory {
@@ -807,14 +804,9 @@ std::shared_ptr<PartitioningFactory> HivePartitioning::MakeFactory(
   return std::shared_ptr<PartitioningFactory>(new HivePartitioningFactory(options));
 }
 
-std::string StripPrefix(const std::string& path, const std::string& prefix) {
+std::string StripPrefixAndFilename(const std::string& path, const std::string& prefix) {
   auto maybe_base_less = fs::internal::RemoveAncestor(prefix, path);
   auto base_less = maybe_base_less ? std::string(*maybe_base_less) : path;
-  return base_less;
-}
-
-std::string StripPrefixAndFilename(const std::string& path, const std::string& prefix) {
-  auto base_less = StripPrefix(path, prefix);
   auto basename_filename = fs::internal::GetAbstractPathParent(base_less);
   return basename_filename.first;
 }
@@ -844,6 +836,7 @@ Result<std::shared_ptr<Schema>> PartitioningOrFactory::GetOrInferSchema(
   if (auto part = partitioning()) {
     return part->schema();
   }
+
   return factory()->Inspect(paths);
 }
 
