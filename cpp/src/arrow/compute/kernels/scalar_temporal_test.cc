@@ -2468,7 +2468,7 @@ TEST_F(ScalarTemporalTest, TestCeilTemporalStrictCeil) {
   CheckScalarUnary(op, unit, times, unit, ceil_15_years, &round_to_15_years);
 }
 
-TEST_F(ScalarTemporalTest, TestCeilTemporalMultipleSinceGreaterUnit) {
+TEST_F(ScalarTemporalTest, TestCeilTemporalCalendarBasedOrigin) {
   std::string op = "ceil_temporal";
   RoundTemporalOptions round_to_15_nanoseconds =
       RoundTemporalOptions(15, CalendarUnit::NANOSECOND, true, true, true);
@@ -2495,9 +2495,6 @@ TEST_F(ScalarTemporalTest, TestCeilTemporalMultipleSinceGreaterUnit) {
   RoundTemporalOptions round_to_15_years =
       RoundTemporalOptions(15, CalendarUnit::YEAR, true, true, true);
 
-  // Data for tests below was generaed via lubridate with the exception
-  // of week data because lubridate currently does not support rounding to
-  // multiple of week.
   const char* ceil_15_nanosecond =
       R"(["1970-01-01 00:00:59.123456795", "2000-02-29 23:23:24.000000005",
           "1899-01-01 00:59:20.001001015", "2033-05-18 03:33:20.000000015",
@@ -2784,7 +2781,7 @@ TEST_F(ScalarTemporalTest, TestFloorTemporal) {
   CheckScalarUnary(op, unit, times, unit, floor_15_years, &round_to_15_years);
 }
 
-TEST_F(ScalarTemporalTest, TestFloorTemporalMultipleSinceGreaterUnit) {
+TEST_F(ScalarTemporalTest, TestFloorTemporalCalendarBasedOrigin) {
   std::string op = "floor_temporal";
   RoundTemporalOptions round_to_15_nanoseconds =
       RoundTemporalOptions(15, CalendarUnit::NANOSECOND, true, true, true);
@@ -2811,9 +2808,6 @@ TEST_F(ScalarTemporalTest, TestFloorTemporalMultipleSinceGreaterUnit) {
   RoundTemporalOptions round_to_15_years =
       RoundTemporalOptions(15, CalendarUnit::YEAR, true, true, true);
 
-  // Data for tests below was generaed via lubridate with the exception
-  // of week data because lubridate currently does not support rounding to
-  // multiple of week.
   const char* floor_15_nanosecond =
       R"(["1970-01-01 00:00:59.123456780", "2000-02-29 23:23:23.999999990",
           "1899-01-01 00:59:20.001001000", "2033-05-18 03:33:20.000000000",
@@ -3102,6 +3096,106 @@ TEST_F(ScalarTemporalTest, TestRoundTemporal) {
   CheckScalarUnary(op, unit, times, unit, round_15_years, &round_to_15_years);
 }
 
+TEST_F(ScalarTemporalTest, TestCeilFloorRoundTemporalAmbiguous1) {
+  auto unit = timestamp(TimeUnit::MILLI, "Asia/Tehran");
+  auto options = RoundTemporalOptions(1, CalendarUnit::HOUR, true);
+  const char* times = R"([
+    "2022-03-21 19:30:00", "2022-03-21 20:00:00", "2022-03-21 20:30:00",
+    "2022-09-21 18:30:00", "2022-09-21 19:00:00", "2022-09-21 19:30:00",
+    "2022-09-21 20:00:00", "2022-09-21 20:30:00", "2022-09-21 21:00:00",
+    "2022-09-21 21:30:00"])";
+  const char* times_ceil = R"([
+    "2022-03-21 19:30:00", "2022-03-21 20:30:00", "2022-03-21 20:30:00",
+    "2022-09-21 18:30:00", "2022-09-21 19:30:00", "2022-09-21 19:30:00",
+    "2022-09-21 20:30:00", "2022-09-21 20:30:00", "2022-09-21 21:30:00",
+    "2022-09-21 21:30:00"])";
+  const char* times_floor = R"([
+    "2022-03-21 19:30:00", "2022-03-21 19:30:00", "2022-03-21 20:30:00",
+    "2022-09-21 18:30:00", "2022-09-21 18:30:00", "2022-09-21 19:30:00",
+    "2022-09-21 19:30:00", "2022-09-21 20:30:00", "2022-09-21 20:30:00",
+    "2022-09-21 21:30:00"])";
+  const char* times_round = R"([
+    "2022-03-21 19:30:00", "2022-03-21 20:30:00", "2022-03-21 20:30:00",
+    "2022-09-21 18:30:00", "2022-09-21 19:30:00", "2022-09-21 19:30:00",
+    "2022-09-21 20:30:00", "2022-09-21 20:30:00", "2022-09-21 21:30:00",
+    "2022-09-21 21:30:00"])";
+
+  CheckScalarUnary("ceil_temporal", unit, times, unit, times_ceil, &options);
+  CheckScalarUnary("floor_temporal", unit, times, unit, times_floor, &options);
+  CheckScalarUnary("round_temporal", unit, times, unit, times_round, &options);
+}
+
+TEST_F(ScalarTemporalTest, TestCeilFloorRoundTemporalAmbiguous2) {
+  auto unit = timestamp(TimeUnit::NANO, "Europe/Brussels");
+  auto options = RoundTemporalOptions(15, CalendarUnit::MINUTE, true);
+  const char* times = R"([
+    "2018-10-28 01:05:00", "2018-10-28 01:20:00", "2018-10-28 01:55:00",
+    "2018-10-28 01:59:59", "2018-10-28 02:00:00", "2018-10-28 02:08:00"])";
+  const char* times_ceil = R"([
+    "2018-10-28 01:15:00", "2018-10-28 01:30:00", "2018-10-28 02:00:00",
+    "2018-10-28 02:00:00", "2018-10-28 02:00:00", "2018-10-28 02:15:00"])";
+  const char* times_floor = R"([
+    "2018-10-28 01:00:00", "2018-10-28 01:15:00", "2018-10-28 01:45:00",
+    "2018-10-28 01:45:00", "2018-10-28 02:00:00", "2018-10-28 02:00:00"])";
+  const char* times_round = R"([
+    "2018-10-28 01:00:00", "2018-10-28 01:15:00", "2018-10-28 02:00:00",
+    "2018-10-28 02:00:00", "2018-10-28 02:00:00", "2018-10-28 02:15:00"])";
+
+  CheckScalarUnary("ceil_temporal", unit, times, unit, times_ceil, &options);
+  CheckScalarUnary("floor_temporal", unit, times, unit, times_floor, &options);
+  CheckScalarUnary("round_temporal", unit, times, unit, times_round, &options);
+}
+
+TEST_F(ScalarTemporalTest, TestCeilFloorRoundTemporalNonexistent1) {
+  auto unit = timestamp(TimeUnit::SECOND, "Asia/Tehran");
+  auto options = RoundTemporalOptions(1, CalendarUnit::HOUR, true);
+  const char* times = R"([
+    "2022-03-21 19:30:00", "2022-03-21 20:00:00", "2022-03-21 20:30:00",
+    "2022-09-21 18:30:00", "2022-09-21 19:00:00", "2022-09-21 19:30:00",
+    "2022-09-21 20:00:00", "2022-09-21 20:30:00", "2022-09-21 21:00:00",
+    "2022-09-21 21:30:00"])";
+  const char* times_ceil = R"([
+    "2022-03-21 19:30:00", "2022-03-21 20:30:00", "2022-03-21 20:30:00",
+    "2022-09-21 18:30:00", "2022-09-21 19:30:00", "2022-09-21 19:30:00",
+    "2022-09-21 20:30:00", "2022-09-21 20:30:00", "2022-09-21 21:30:00",
+    "2022-09-21 21:30:00"])";
+  const char* times_floor = R"([
+    "2022-03-21 19:30:00", "2022-03-21 19:30:00", "2022-03-21 20:30:00",
+    "2022-09-21 18:30:00", "2022-09-21 18:30:00", "2022-09-21 19:30:00",
+    "2022-09-21 19:30:00", "2022-09-21 20:30:00", "2022-09-21 20:30:00",
+    "2022-09-21 21:30:00"])";
+  const char* times_round = R"([
+    "2022-03-21 19:30:00", "2022-03-21 20:30:00", "2022-03-21 20:30:00",
+    "2022-09-21 18:30:00", "2022-09-21 19:30:00", "2022-09-21 19:30:00",
+    "2022-09-21 20:30:00", "2022-09-21 20:30:00", "2022-09-21 21:30:00",
+    "2022-09-21 21:30:00"])";
+
+  CheckScalarUnary("ceil_temporal", unit, times, unit, times_ceil, &options);
+  CheckScalarUnary("floor_temporal", unit, times, unit, times_floor, &options);
+  CheckScalarUnary("round_temporal", unit, times, unit, times_round, &options);
+}
+
+TEST_F(ScalarTemporalTest, TestCeilFloorRoundTemporalNonexistent2) {
+  auto unit = timestamp(TimeUnit::SECOND, "Europe/Brussels");
+  auto options = RoundTemporalOptions(16, CalendarUnit::MINUTE, true);
+  const char* times =
+      R"(["2015-03-29 00:52:00", "2015-03-29 01:01:00", "2015-03-29 01:05:00",
+          "2015-03-29 01:08:00", "2015-03-29 01:10:00", "2015-03-29 01:12:00"])";
+  const char* times_ceil =
+      R"(["2015-03-29 00:52:00", "2015-03-29 01:12:00", "2015-03-29 01:12:00",
+          "2015-03-29 01:12:00", "2015-03-29 01:12:00", "2015-03-29 01:12:00"])";
+  const char* times_floor =
+      R"(["2015-03-29 00:52:00", "2015-03-29 00:52:00", "2015-03-29 00:52:00",
+          "2015-03-29 00:52:00", "2015-03-29 00:52:00", "2015-03-29 01:12:00"])";
+  const char* times_round =
+      R"(["2015-03-29 00:52:00", "2015-03-29 00:52:00", "2015-03-29 01:12:00",
+          "2015-03-29 01:12:00", "2015-03-29 01:12:00", "2015-03-29 01:12:00"])";
+
+  CheckScalarUnary("ceil_temporal", unit, times, unit, times_ceil, &options);
+  CheckScalarUnary("floor_temporal", unit, times, unit, times_floor, &options);
+  CheckScalarUnary("round_temporal", unit, times, unit, times_round, &options);
+}
+
 TEST_F(ScalarTemporalTest, TestCeilFloorRoundTemporalBrussels) {
   RoundTemporalOptions round_to_1_hours = RoundTemporalOptions(1, CalendarUnit::HOUR);
   RoundTemporalOptions round_to_2_hours = RoundTemporalOptions(2, CalendarUnit::HOUR);
@@ -3123,7 +3217,7 @@ TEST_F(ScalarTemporalTest, TestCeilFloorRoundTemporalBrussels) {
   CheckScalarUnary("round_temporal", unit, times, unit, round_2_hours, &round_to_2_hours);
 }
 
-TEST_F(ScalarTemporalTest, TestRoundTemporalMultipleSinceGreaterUnit) {
+TEST_F(ScalarTemporalTest, TestRoundTemporalCalendarBasedOrigin) {
   std::string op = "round_temporal";
   RoundTemporalOptions round_to_15_nanoseconds =
       RoundTemporalOptions(15, CalendarUnit::NANOSECOND, true, true, true);
@@ -3143,16 +3237,13 @@ TEST_F(ScalarTemporalTest, TestRoundTemporalMultipleSinceGreaterUnit) {
       RoundTemporalOptions(15, CalendarUnit::WEEK, true, true, true);
   RoundTemporalOptions round_to_15_weeks_sunday =
       RoundTemporalOptions(15, CalendarUnit::WEEK, false, true, true);
-  RoundTemporalOptions round_to_5_months =
-      RoundTemporalOptions(5, CalendarUnit::MONTH, true, true, true);
+  RoundTemporalOptions round_to_15_months =
+      RoundTemporalOptions(15, CalendarUnit::MONTH, true, true, true);
   RoundTemporalOptions round_to_15_quarters =
       RoundTemporalOptions(15, CalendarUnit::QUARTER, true, true, true);
   RoundTemporalOptions round_to_15_years =
       RoundTemporalOptions(15, CalendarUnit::YEAR, true, true, true);
 
-  // Data for tests below was generaed via lubridate with the exception
-  // of week data because lubridate currently does not support rounding to
-  // multiple of week.
   const char* round_15_nanosecond =
       R"(["1970-01-01 00:00:59.123456795", "2000-02-29 23:23:24.000000005",
           "1899-01-01 00:59:20.001001000", "2033-05-18 03:33:20.000000000",
@@ -3216,11 +3307,11 @@ TEST_F(ScalarTemporalTest, TestRoundTemporalMultipleSinceGreaterUnit) {
           "2019-12-29", "2019-12-29", "2019-12-29", "2010-01-03",
           "2010-01-03", "2010-01-03", "2010-01-03", "2006-01-01",
           "2006-01-01", "2009-01-04", "2009-01-04", "2012-01-01", null])";
-  const char* round_5_months =
-      R"(["1970-01-01", "2000-01-01", "1899-01-01", "2033-06-01",
-          "2020-01-01", "2019-11-01", "2019-11-01", "2009-11-01",
+  const char* round_15_months =
+      R"(["1970-01-01", "2000-01-01", "1899-01-01", "2033-01-01",
+          "2020-01-01", "2020-04-01", "2020-04-01", "2010-04-01",
           "2010-01-01", "2010-01-01", "2010-01-01", "2006-01-01",
-          "2005-11-01", "2008-11-01", "2008-11-01", "2012-01-01",  null])";
+          "2006-04-01", "2009-04-01", "2009-04-01", "2012-01-01",  null])";
   const char* round_15_quarters =
       R"(["1970-01-01", "2000-01-01", "1899-01-01", "2033-01-01",
           "2020-01-01", "2019-01-01", "2019-01-01", "2009-01-01",
@@ -3244,7 +3335,7 @@ TEST_F(ScalarTemporalTest, TestRoundTemporalMultipleSinceGreaterUnit) {
   CheckScalarUnary(op, unit, times, unit, round_15_weeks, &round_to_15_weeks);
   CheckScalarUnary(op, unit, times, unit, round_15_weeks_sunday,
                    &round_to_15_weeks_sunday);
-  CheckScalarUnary(op, unit, times, unit, round_5_months, &round_to_5_months);
+  CheckScalarUnary(op, unit, times, unit, round_15_months, &round_to_15_months);
   CheckScalarUnary(op, unit, times, unit, round_15_quarters, &round_to_15_quarters);
   CheckScalarUnary(op, unit, times, unit, round_15_years, &round_to_15_years);
 }

@@ -147,9 +147,8 @@ def test_option_class_equality():
         pc.NullOptions(),
         pc.PadOptions(5),
         pc.PartitionNthOptions(1, null_placement="at_start"),
-        pc.CumulativeSumOptions(start=0, skip_nulls=False),
         pc.QuantileOptions(),
-        pc.RandomOptions(),
+        pc.RandomOptions(10),
         pc.ReplaceSliceOptions(0, 1, "a"),
         pc.ReplaceSubstringOptions("a", "b"),
         pc.RoundOptions(2, "towards_infinity"),
@@ -729,6 +728,31 @@ def test_generated_docstrings():
         memory_pool : pyarrow.MemoryPool, optional
             If not passed, will allocate memory from the default memory pool.
         """)
+    # Nullary with options
+    assert pc.random.__doc__ == textwrap.dedent("""\
+        Generate numbers in the range [0, 1).
+
+        Generated values are uniformly-distributed, double-precision """ +
+                                                """in range [0, 1).
+        Length of generated data, algorithm and seed can be changed """ +
+                                                """via RandomOptions.
+
+        Parameters
+        ----------
+        length : int
+            Number of random values to generate.
+        initializer : int or str
+            How to initialize the underlying random generator.
+            If an integer is given, it is used as a seed.
+            If "system" is given, the random generator is initialized with
+            a system-specific source of (hopefully true) randomness.
+            Other values are invalid.
+        options : pyarrow.compute.RandomOptions, optional
+            Alternative way of passing options.
+        memory_pool : pyarrow.MemoryPool, optional
+            If not passed, will allocate memory from the default memory pool.
+        """)
+    # With custom examples
     assert pc.filter.__doc__ == textwrap.dedent("""\
         Filter with a boolean selection filter.
 
@@ -756,13 +780,13 @@ def test_generated_docstrings():
         >>> arr = pa.array(["a", "b", "c", None, "e"])
         >>> mask = pa.array([True, False, None, False, True])
         >>> arr.filter(mask)
-        <pyarrow.lib.StringArray object at ...>
+        <pyarrow.lib.StringArray object at 0x7fa826df9200>
         [
           "a",
           "e"
         ]
         >>> arr.filter(mask, null_selection_behavior='emit_null')
-        <pyarrow.lib.StringArray object at ...>
+        <pyarrow.lib.StringArray object at 0x7fa826df9200>
         [
           "a",
           null,
@@ -797,7 +821,7 @@ def test_generated_signatures():
     assert str(sig) == "(indices, /, *values, memory_pool=None)"
     # Nullary with options
     sig = inspect.signature(pc.random)
-    assert str(sig) == ("(n, *, initializer='system', "
+    assert str(sig) == ("(length, *, initializer='system', "
                         "options=None, memory_pool=None)")
 
 
@@ -2013,14 +2037,6 @@ def _check_temporal_rounding(ts, values, unit):
         "hour": "H",
         "day": "D"
     }
-    greater_unit = {
-        "nanosecond": "us",
-        "microsecond": "ms",
-        "millisecond": "s",
-        "second": "min",
-        "minute": "H",
-        "hour": "d",
-    }
     ta = pa.array(ts)
 
     for value in values:
@@ -2039,27 +2055,6 @@ def _check_temporal_rounding(ts, values, unit):
         expected = ts.dt.round(frequency)
         np.testing.assert_array_equal(result, expected)
 
-        # Check rounding with calendar_based_origin=True.
-        # Note: rounding to month is not supported in Pandas so we can't
-        # approximate this functionallity and exclude unit == "day".
-        if unit != "day":
-            options = pc.RoundTemporalOptions(
-                value, unit, calendar_based_origin=True)
-            origin = ts.dt.floor(greater_unit[unit])
-
-            if ta.type.tz is None:
-                result = pc.ceil_temporal(ta, options=options).to_pandas()
-                expected = (ts - origin).dt.ceil(frequency) + origin
-                np.testing.assert_array_equal(result, expected)
-
-            result = pc.floor_temporal(ta, options=options).to_pandas()
-            expected = (ts - origin).dt.floor(frequency) + origin
-            np.testing.assert_array_equal(result, expected)
-
-            result = pc.round_temporal(ta, options=options).to_pandas()
-            expected = (ts - origin).dt.round(frequency) + origin
-            np.testing.assert_array_equal(result, expected)
-
         # Check RoundTemporalOptions partial defaults
         if unit == "day":
             result = pc.ceil_temporal(ta, multiple=value).to_pandas()
@@ -2073,22 +2068,6 @@ def _check_temporal_rounding(ts, values, unit):
             result = pc.round_temporal(ta, multiple=value).to_pandas()
             expected = ts.dt.round(frequency)
             np.testing.assert_array_equal(result, expected)
-
-    # We naively test ceil_is_strictly_greater by adding time unit multiple
-    # to regular ceiled timestamp if it is equal to the original timestamp.
-    # This does not work if timestamp is zoned since our logic will not
-    # account for DST jumps.
-    if ta.type.tz is None:
-        options = pc.RoundTemporalOptions(
-            value, unit, ceil_is_strictly_greater=True)
-        result = pc.ceil_temporal(ta, options=options)
-        expected = ts.dt.ceil(frequency)
-
-        expected = np.where(
-            expected == ts,
-            expected + pd.Timedelta(value, unit_shorthand[unit]),
-            expected)
-        np.testing.assert_array_equal(result, expected)
 
     # Check RoundTemporalOptions defaults
     if unit == "day":
@@ -2104,6 +2083,18 @@ def _check_temporal_rounding(ts, values, unit):
 
         result = pc.round_temporal(ta).to_pandas()
         expected = ts.dt.round(frequency)
+        np.testing.assert_array_equal(result, expected)
+
+    if ta.type.tz is None and unit != "day":
+        options = pc.RoundTemporalOptions(
+            value, unit, strict_ceil=True)
+        result = pc.ceil_temporal(ta, options=options)
+        expected = ts.dt.ceil(frequency)
+
+        expected = np.where(
+            expected == ts,
+            expected + pd.Timedelta(value, unit_shorthand[unit]),
+            expected)
         np.testing.assert_array_equal(result, expected)
 
 
@@ -2529,58 +2520,6 @@ def test_min_max_element_wise():
     assert result == pa.array([2, 3, None])
     result = pc.min_element_wise(arr1, arr3, skip_nulls=False)
     assert result == pa.array([1, 2, None])
-
-
-@pytest.mark.parametrize('start', (1.25, 10.5, -10.5))
-@pytest.mark.parametrize('skip_nulls', (True, False))
-def test_cumulative_sum(start, skip_nulls):
-    # Exact tests (e.g., integral types)
-    start_int = int(start)
-    starts = [start_int, pa.scalar(start_int, type=pa.int8()),
-              pa.scalar(start_int, type=pa.int64())]
-    for strt in starts:
-        arrays = [
-            pa.array([1, 2, 3]),
-            pa.array([0, None, 20, 30]),
-            pa.chunked_array([[0, None], [20, 30]])
-        ]
-        expected_arrays = [
-            pa.array([1, 3, 6]),
-            pa.array([0, None, 20, 50])
-            if skip_nulls else pa.array([0, None, None, None]),
-            pa.chunked_array([[0, None, 20, 50]])
-            if skip_nulls else pa.chunked_array([[0, None, None, None]])
-        ]
-        for i, arr in enumerate(arrays):
-            result = pc.cumulative_sum(arr, start=strt, skip_nulls=skip_nulls)
-            # Add `start` offset to expected array before comparing
-            expected = pc.add(expected_arrays[i], strt)
-            assert result.equals(expected)
-
-    starts = [start, pa.scalar(start, type=pa.float32()),
-              pa.scalar(start, type=pa.float64())]
-    for strt in starts:
-        arrays = [
-            pa.array([1.125, 2.25, 3.03125]),
-            pa.array([1, np.nan, 2, -3, 4, 5]),
-            pa.array([1, np.nan, None, 3, None, 5])
-        ]
-        expected_arrays = [
-            np.array([1.125, 3.375, 6.40625]),
-            np.array([1, np.nan, np.nan, np.nan, np.nan, np.nan]),
-            np.array([1, np.nan, None, np.nan, None, np.nan])
-            if skip_nulls else np.array([1, np.nan, None, None, None, None])
-        ]
-        for i, arr in enumerate(arrays):
-            result = pc.cumulative_sum(arr, start=strt, skip_nulls=skip_nulls)
-            # Add `start` offset to expected array before comparing
-            expected = pc.add(expected_arrays[i], strt)
-            np.testing.assert_array_almost_equal(result.to_numpy(
-                zero_copy_only=False), expected.to_numpy(zero_copy_only=False))
-
-    for strt in ['a', pa.scalar('arrow'), 1.1]:
-        with pytest.raises(pa.ArrowInvalid):
-            pc.cumulative_sum([1, 2, 3], start=strt)
 
 
 def test_make_struct():

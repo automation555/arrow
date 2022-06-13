@@ -68,7 +68,11 @@ using arrow_vendored::date::literals::wed;
 using internal::applicator::SimpleUnary;
 using std::chrono::duration_cast;
 using std::chrono::hours;
+using std::chrono::microseconds;
+using std::chrono::milliseconds;
 using std::chrono::minutes;
+using std::chrono::nanoseconds;
+using std::chrono::seconds;
 
 using DayOfWeekState = OptionsWrapper<DayOfWeekOptions>;
 using WeekState = OptionsWrapper<WeekOptions>;
@@ -105,7 +109,7 @@ struct TemporalComponentExtractDayOfWeek
     : public TemporalComponentExtractBase<Op, Duration, InType, OutType> {
   using Base = TemporalComponentExtractBase<Op, Duration, InType, OutType>;
 
-  static Status Exec(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) {
+  static Status Exec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
     const DayOfWeekOptions& options = DayOfWeekState::Get(ctx);
     RETURN_NOT_OK(ValidateDayOfWeekOptions(options));
     return Base::ExecWithOptions(ctx, &options, batch, out);
@@ -118,9 +122,9 @@ struct AssumeTimezoneExtractor
     : public TemporalComponentExtractBase<Op, Duration, InType, OutType> {
   using Base = TemporalComponentExtractBase<Op, Duration, InType, OutType>;
 
-  static Status Exec(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) {
+  static Status Exec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
     const AssumeTimezoneOptions& options = AssumeTimezoneState::Get(ctx);
-    const auto& timezone = GetInputTimezone(*batch[0].type());
+    const auto& timezone = GetInputTimezone(batch.values[0]);
     if (!timezone.empty()) {
       return Status::Invalid("Timestamps already have a timezone: '", timezone,
                              "'. Cannot localize to '", options.timezone, "'.");
@@ -140,8 +144,8 @@ struct DaylightSavingsExtractor
     : public TemporalComponentExtractBase<Op, Duration, InType, OutType> {
   using Base = TemporalComponentExtractBase<Op, Duration, InType, OutType>;
 
-  static Status Exec(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) {
-    const auto& timezone = GetInputTimezone(*batch[0].type());
+  static Status Exec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
+    const auto& timezone = GetInputTimezone(batch.values[0]);
     if (timezone.empty()) {
       return Status::Invalid("Timestamps have no timezone. Cannot determine DST.");
     }
@@ -160,7 +164,7 @@ struct TemporalComponentExtractWeek
     : public TemporalComponentExtractBase<Op, Duration, InType, OutType> {
   using Base = TemporalComponentExtractBase<Op, Duration, InType, OutType>;
 
-  static Status Exec(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) {
+  static Status Exec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
     const WeekOptions& options = WeekState::Get(ctx);
     return Base::ExecWithOptions(ctx, &options, batch, out);
   }
@@ -172,7 +176,7 @@ struct TemporalComponentExtractRound
     : public TemporalComponentExtractBase<Op, Duration, InType, OutType> {
   using Base = TemporalComponentExtractBase<Op, Duration, InType, OutType>;
 
-  static Status Exec(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) {
+  static Status Exec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
     const RoundTemporalOptions& options = RoundTemporalState::Get(ctx);
     return Base::ExecWithOptions(ctx, &options, batch, out);
   }
@@ -279,7 +283,7 @@ template <typename Duration>
 struct YearMonthDayWrapper<Duration, TimestampType> {
   static Result<std::array<int64_t, 3>> Get(const Scalar& in) {
     const auto& in_val = internal::UnboxScalar<const TimestampType>::Unbox(in);
-    const auto& timezone = GetInputTimezone(*in.type);
+    const auto& timezone = GetInputTimezone(in);
     if (timezone.empty()) {
       return GetYearMonthDay<Duration>(in_val, NonZonedLocalizer{});
     } else {
@@ -292,7 +296,7 @@ struct YearMonthDayWrapper<Duration, TimestampType> {
 template <typename Duration, typename InType, typename BuilderType>
 struct YearMonthDayVisitValueFunction {
   static Result<std::function<Status(typename InType::c_type arg)>> Get(
-      const std::vector<BuilderType*>& field_builders, const ArraySpan&,
+      const std::vector<BuilderType*>& field_builders, const ArrayData&,
       StructBuilder* struct_builder) {
     return [=](typename InType::c_type arg) {
       const auto ymd = GetYearMonthDay<Duration>(arg, NonZonedLocalizer{});
@@ -307,9 +311,9 @@ struct YearMonthDayVisitValueFunction {
 template <typename Duration, typename BuilderType>
 struct YearMonthDayVisitValueFunction<Duration, TimestampType, BuilderType> {
   static Result<std::function<Status(typename TimestampType::c_type arg)>> Get(
-      const std::vector<BuilderType*>& field_builders, const ArraySpan& in,
+      const std::vector<BuilderType*>& field_builders, const ArrayData& in,
       StructBuilder* struct_builder) {
-    const auto& timezone = GetInputTimezone(*in.type);
+    const auto& timezone = GetInputTimezone(in);
     if (timezone.empty()) {
       return [=](TimestampType::c_type arg) {
         const auto ymd = GetYearMonthDay<Duration>(arg, NonZonedLocalizer{});
@@ -332,23 +336,22 @@ struct YearMonthDayVisitValueFunction<Duration, TimestampType, BuilderType> {
 
 template <typename Duration, typename InType>
 struct YearMonthDay {
-  static Status Call(KernelContext* ctx, const Scalar& in, ExecResult* out) {
-    Scalar* out_scalar = out->scalar().get();
+  static Status Call(KernelContext* ctx, const Scalar& in, Scalar* out) {
     if (in.is_valid) {
       ARROW_ASSIGN_OR_RAISE(auto year_month_day,
                             (YearMonthDayWrapper<Duration, InType>::Get(in)));
       ScalarVector values = {std::make_shared<Int64Scalar>(year_month_day[0]),
                              std::make_shared<Int64Scalar>(year_month_day[1]),
                              std::make_shared<Int64Scalar>(year_month_day[2])};
-      *checked_cast<StructScalar*>(out_scalar) =
+      *checked_cast<StructScalar*>(out) =
           StructScalar(std::move(values), YearMonthDayType());
     } else {
-      out_scalar->is_valid = false;
+      out->is_valid = false;
     }
     return Status::OK();
   }
 
-  static Status Call(KernelContext* ctx, const ArraySpan& in, ExecResult* out) {
+  static Status Call(KernelContext* ctx, const ArrayData& in, ArrayData* out) {
     using BuilderType = typename TypeTraits<Int64Type>::BuilderType;
 
     std::unique_ptr<ArrayBuilder> array_builder;
@@ -369,10 +372,10 @@ struct YearMonthDay {
         visit_value, (YearMonthDayVisitValueFunction<Duration, InType, BuilderType>::Get(
                          field_builders, in, struct_builder)));
     RETURN_NOT_OK(
-        VisitArraySpanInline<typename InType::PhysicalType>(in, visit_value, visit_null));
+        VisitArrayDataInline<typename InType::PhysicalType>(in, visit_value, visit_null));
     std::shared_ptr<Array> out_array;
     RETURN_NOT_OK(struct_builder->Finish(&out_array));
-    out->value = std::move(out_array->data());
+    *out = *std::move(out_array->data());
     return Status::OK();
   }
 };
@@ -734,74 +737,6 @@ year_month_day GetFlooredYmd(int64_t arg, const int multiple,
   }
 }
 
-template <typename Duration, typename Unit, typename Localizer>
-const Duration FloorTimePoint(const int64_t arg, const RoundTemporalOptions& options,
-                              Localizer localizer_, Status* st) {
-  const auto t = localizer_.template ConvertTimePoint<Duration>(arg);
-
-  if (options.multiple == 1) {
-    // Round to a multiple of unit since epoch start (1970-01-01 00:00:00).
-    const Unit d = floor<Unit>(t).time_since_epoch();
-    return localizer_.template ConvertLocalToSys<Duration>(duration_cast<Duration>(d),
-                                                           st);
-  } else if (options.calendar_based_origin) {
-    // Round to a multiple of units since the last greater unit.
-    // For example: round to multiple of days since the beginning of the month or
-    // to hours since the beginning of the day.
-    const Unit unit = Unit{options.multiple};
-    Duration origin;
-
-    switch (options.unit) {
-      case compute::CalendarUnit::DAY:
-        origin = duration_cast<Duration>(
-            localizer_
-                .ConvertDays(year_month_day(floor<days>(t)).year() /
-                             year_month_day(floor<days>(t)).month() / 1)
-                .time_since_epoch());
-        break;
-      case compute::CalendarUnit::HOUR:
-        origin = duration_cast<Duration>(
-            localizer_.ConvertDays(year_month_day(floor<days>(t))).time_since_epoch());
-        break;
-      case compute::CalendarUnit::MINUTE:
-        origin = duration_cast<Duration>(floor<std::chrono::hours>(t).time_since_epoch());
-        break;
-      case compute::CalendarUnit::SECOND:
-        origin =
-            duration_cast<Duration>(floor<std::chrono::minutes>(t).time_since_epoch());
-        break;
-      case compute::CalendarUnit::MILLISECOND:
-        origin =
-            duration_cast<Duration>(floor<std::chrono::seconds>(t).time_since_epoch());
-        break;
-      case compute::CalendarUnit::MICROSECOND:
-        origin = duration_cast<Duration>(
-            floor<std::chrono::milliseconds>(t).time_since_epoch());
-        break;
-      case compute::CalendarUnit::NANOSECOND:
-        origin = duration_cast<Duration>(
-            floor<std::chrono::microseconds>(t).time_since_epoch());
-        break;
-      default: {
-        *st = Status::Invalid("Cannot floor to ", &options.unit);
-        return Duration{0};
-      }
-    }
-    const Duration m =
-        duration_cast<Duration>(((t - origin).time_since_epoch() / unit * unit + origin));
-    return localizer_.template ConvertLocalToSys<Duration>(m, st);
-  } else {
-    // Round to a multiple of units * options.multiple since epoch start
-    // (1970-01-01 00:00:00).
-    const Unit d = floor<Unit>(t).time_since_epoch();
-    const Unit unit = Unit{options.multiple};
-    const Unit m =
-        (d.count() >= 0) ? d / unit * unit : (d - unit + Unit{1}) / unit * unit;
-    return localizer_.template ConvertLocalToSys<Duration>(duration_cast<Duration>(m),
-                                                           st);
-  }
-}
-
 template <typename Duration, typename Localizer>
 const Duration FloorWeekTimePoint(const int64_t arg, const RoundTemporalOptions& options,
                                   Localizer localizer_, const Duration weekday_offset,
@@ -840,24 +775,6 @@ const Duration FloorWeekTimePoint(const int64_t arg, const RoundTemporalOptions&
   }
 }
 
-template <typename Duration, typename Unit, typename Localizer>
-Duration CeilTimePoint(const int64_t arg, const RoundTemporalOptions& options,
-                       Localizer localizer_, Status* st) {
-  const Duration f =
-      FloorTimePoint<Duration, Unit, Localizer>(arg, options, localizer_, st);
-  const auto cl =
-      localizer_.template ConvertTimePoint<Duration>(f.count()).time_since_epoch();
-  const Duration cs =
-      localizer_.template ConvertLocalToSys<Duration>(duration_cast<Duration>(cl), st);
-
-  if (options.ceil_is_strictly_greater || cs < Duration{arg}) {
-    return localizer_.template ConvertLocalToSys<Duration>(
-        duration_cast<Duration>(cl + duration_cast<Duration>(Unit{options.multiple})),
-        st);
-  }
-  return cs;
-}
-
 template <typename Duration, typename Localizer>
 Duration CeilWeekTimePoint(const int64_t arg, const RoundTemporalOptions& options,
                            Localizer localizer_, const Duration weekday_offset,
@@ -868,22 +785,12 @@ Duration CeilWeekTimePoint(const int64_t arg, const RoundTemporalOptions& option
       localizer_.template ConvertTimePoint<Duration>(f.count()).time_since_epoch();
   const Duration cs =
       localizer_.template ConvertLocalToSys<Duration>(duration_cast<Duration>(cl), st);
-  if (options.ceil_is_strictly_greater || cs < Duration{arg}) {
+  if (options.strict_ceil || cs < Duration{arg}) {
     return localizer_.template ConvertLocalToSys<Duration>(
         duration_cast<Duration>(cl + duration_cast<Duration>(weeks{options.multiple})),
         st);
   }
   return cs;
-}
-
-template <typename Duration, typename Unit, typename Localizer>
-Duration RoundTimePoint(const int64_t arg, const RoundTemporalOptions& options,
-                        Localizer localizer_, Status* st) {
-  const Duration f =
-      FloorTimePoint<Duration, Unit, Localizer>(arg, options, localizer_, st);
-  const Duration c =
-      CeilTimePoint<Duration, Unit, Localizer>(arg, options, localizer_, st);
-  return (Duration{arg} - f >= c - Duration{arg}) ? c : f;
 }
 
 template <typename Duration, typename Localizer>
@@ -907,30 +814,25 @@ struct CeilTemporal {
     Duration t;
     switch (options.unit) {
       case compute::CalendarUnit::NANOSECOND:
-        t = CeilTimePoint<Duration, std::chrono::nanoseconds, Localizer>(arg, options,
-                                                                         localizer_, st);
+        t = localizer_.template CeilTimePoint<Duration, nanoseconds>(arg, &options);
         break;
       case compute::CalendarUnit::MICROSECOND:
-        t = CeilTimePoint<Duration, std::chrono::microseconds, Localizer>(arg, options,
-                                                                          localizer_, st);
+        t = localizer_.template CeilTimePoint<Duration, microseconds>(arg, &options);
         break;
       case compute::CalendarUnit::MILLISECOND:
-        t = CeilTimePoint<Duration, std::chrono::milliseconds, Localizer>(arg, options,
-                                                                          localizer_, st);
+        t = localizer_.template CeilTimePoint<Duration, milliseconds>(arg, &options);
         break;
       case compute::CalendarUnit::SECOND:
-        t = CeilTimePoint<Duration, std::chrono::seconds, Localizer>(arg, options,
-                                                                     localizer_, st);
+        t = localizer_.template CeilTimePoint<Duration, seconds>(arg, &options);
         break;
       case compute::CalendarUnit::MINUTE:
-        t = CeilTimePoint<Duration, minutes, Localizer>(arg, options, localizer_, st);
+        t = localizer_.template CeilTimePoint<Duration, minutes>(arg, &options);
         break;
       case compute::CalendarUnit::HOUR:
-        t = CeilTimePoint<Duration, std::chrono::hours, Localizer>(arg, options,
-                                                                   localizer_, st);
+        t = localizer_.template CeilTimePoint<Duration, hours>(arg, &options);
         break;
       case compute::CalendarUnit::DAY:
-        t = CeilTimePoint<Duration, days, Localizer>(arg, options, localizer_, st);
+        t = localizer_.template CeilTimePoint<Duration, days>(arg, &options);
         break;
       case compute::CalendarUnit::WEEK:
         if (options.week_starts_monday) {
@@ -983,30 +885,25 @@ struct FloorTemporal {
     Duration t;
     switch (options.unit) {
       case compute::CalendarUnit::NANOSECOND:
-        t = FloorTimePoint<Duration, std::chrono::nanoseconds, Localizer>(arg, options,
-                                                                          localizer_, st);
+        t = localizer_.template FloorTimePoint<Duration, nanoseconds>(arg, &options);
         break;
       case compute::CalendarUnit::MICROSECOND:
-        t = FloorTimePoint<Duration, std::chrono::microseconds, Localizer>(
-            arg, options, localizer_, st);
+        t = localizer_.template FloorTimePoint<Duration, microseconds>(arg, &options);
         break;
       case compute::CalendarUnit::MILLISECOND:
-        t = FloorTimePoint<Duration, std::chrono::milliseconds, Localizer>(
-            arg, options, localizer_, st);
+        t = localizer_.template FloorTimePoint<Duration, milliseconds>(arg, &options);
         break;
       case compute::CalendarUnit::SECOND:
-        t = FloorTimePoint<Duration, std::chrono::seconds, Localizer>(arg, options,
-                                                                      localizer_, st);
+        t = localizer_.template FloorTimePoint<Duration, seconds>(arg, &options);
         break;
       case compute::CalendarUnit::MINUTE:
-        t = FloorTimePoint<Duration, minutes, Localizer>(arg, options, localizer_, st);
+        t = localizer_.template FloorTimePoint<Duration, minutes>(arg, &options);
         break;
       case compute::CalendarUnit::HOUR:
-        t = FloorTimePoint<Duration, std::chrono::hours, Localizer>(arg, options,
-                                                                    localizer_, st);
+        t = localizer_.template FloorTimePoint<Duration, hours>(arg, &options);
         break;
       case compute::CalendarUnit::DAY:
-        t = FloorTimePoint<Duration, days, Localizer>(arg, options, localizer_, st);
+        t = localizer_.template FloorTimePoint<Duration, days>(arg, &options);
         break;
       case compute::CalendarUnit::WEEK:
         if (options.week_starts_monday) {
@@ -1056,30 +953,25 @@ struct RoundTemporal {
     Duration t;
     switch (options.unit) {
       case compute::CalendarUnit::NANOSECOND:
-        t = RoundTimePoint<Duration, std::chrono::nanoseconds, Localizer>(arg, options,
-                                                                          localizer_, st);
+        t = localizer_.template RoundTimePoint<Duration, nanoseconds>(arg, &options);
         break;
       case compute::CalendarUnit::MICROSECOND:
-        t = RoundTimePoint<Duration, std::chrono::microseconds, Localizer>(
-            arg, options, localizer_, st);
+        t = localizer_.template RoundTimePoint<Duration, microseconds>(arg, &options);
         break;
       case compute::CalendarUnit::MILLISECOND:
-        t = RoundTimePoint<Duration, std::chrono::milliseconds, Localizer>(
-            arg, options, localizer_, st);
+        t = localizer_.template RoundTimePoint<Duration, milliseconds>(arg, &options);
         break;
       case compute::CalendarUnit::SECOND:
-        t = RoundTimePoint<Duration, std::chrono::seconds, Localizer>(arg, options,
-                                                                      localizer_, st);
+        t = localizer_.template RoundTimePoint<Duration, seconds>(arg, &options);
         break;
       case compute::CalendarUnit::MINUTE:
-        t = RoundTimePoint<Duration, minutes, Localizer>(arg, options, localizer_, st);
+        t = localizer_.template RoundTimePoint<Duration, minutes>(arg, &options);
         break;
       case compute::CalendarUnit::HOUR:
-        t = RoundTimePoint<Duration, std::chrono::hours, Localizer>(arg, options,
-                                                                    localizer_, st);
+        t = localizer_.template RoundTimePoint<Duration, hours>(arg, &options);
         break;
       case compute::CalendarUnit::DAY:
-        t = RoundTimePoint<Duration, days, Localizer>(arg, options, localizer_, st);
+        t = localizer_.template RoundTimePoint<Duration, days>(arg, &options);
         break;
       case compute::CalendarUnit::WEEK:
         if (options.week_starts_monday) {
@@ -1178,23 +1070,21 @@ struct Strftime {
     return Strftime{options, tz, std::move(locale)};
   }
 
-  static Status Call(KernelContext* ctx, const Scalar& in, ExecResult* out) {
+  static Status Call(KernelContext* ctx, const Scalar& in, Scalar* out) {
     ARROW_ASSIGN_OR_RAISE(auto self, Make(ctx, *in.type));
     TimestampFormatter<Duration> formatter{self.options.format, self.tz, self.locale};
 
-    Scalar* output = out->scalar().get();
     if (in.is_valid) {
       const int64_t in_val = internal::UnboxScalar<const InType>::Unbox(in);
       ARROW_ASSIGN_OR_RAISE(auto formatted, formatter(in_val));
-      checked_cast<StringScalar*>(output)->value =
-          Buffer::FromString(std::move(formatted));
+      checked_cast<StringScalar*>(out)->value = Buffer::FromString(std::move(formatted));
     } else {
-      output->is_valid = false;
+      out->is_valid = false;
     }
     return Status::OK();
   }
 
-  static Status Call(KernelContext* ctx, const ArraySpan& in, ExecResult* out) {
+  static Status Call(KernelContext* ctx, const ArrayData& in, ArrayData* out) {
     ARROW_ASSIGN_OR_RAISE(auto self, Make(ctx, *in.type));
     TimestampFormatter<Duration> formatter{self.options.format, self.tz, self.locale};
 
@@ -1213,11 +1103,12 @@ struct Strftime {
       ARROW_ASSIGN_OR_RAISE(auto formatted, formatter(arg));
       return string_builder.Append(std::move(formatted));
     };
-    RETURN_NOT_OK(VisitArraySpanInline<InType>(in, visit_value, visit_null));
+    RETURN_NOT_OK(VisitArrayDataInline<InType>(in, visit_value, visit_null));
 
     std::shared_ptr<Array> out_array;
     RETURN_NOT_OK(string_builder.Finish(&out_array));
-    out->value = std::move(out_array->data());
+    *out = *std::move(out_array->data());
+
     return Status::OK();
   }
 };
@@ -1261,47 +1152,44 @@ struct Strptime {
                     options.error_is_null};
   }
 
-  static Status Call(KernelContext* ctx, const Scalar& in, ExecResult* out) {
+  static Status Call(KernelContext* ctx, const Scalar& in, Scalar* out) {
     ARROW_ASSIGN_OR_RAISE(auto self, Make(ctx, *in.type));
 
-    Scalar* output = out->scalar().get();
     if (in.is_valid) {
       auto s = internal::UnboxScalar<InType>::Unbox(in);
       int64_t result;
       if ((*self.parser)(s.data(), s.size(), self.unit, &result)) {
-        *checked_cast<TimestampScalar*>(output) =
+        *checked_cast<TimestampScalar*>(out) =
             TimestampScalar(result, timestamp(self.unit, self.zone));
       } else {
         if (self.error_is_null) {
-          output->is_valid = false;
+          out->is_valid = false;
         } else {
           return Status::Invalid("Failed to parse string: '", s, "' as a scalar of type ",
                                  TimestampType(self.unit).ToString());
         }
       }
     } else {
-      output->is_valid = false;
+      out->is_valid = false;
     }
     return Status::OK();
   }
 
-  static Status Call(KernelContext* ctx, const ArraySpan& in, ExecResult* out) {
+  static Status Call(KernelContext* ctx, const ArrayData& in, ArrayData* out) {
     ARROW_ASSIGN_OR_RAISE(auto self, Make(ctx, *in.type));
-
-    ArraySpan* out_span = out->array_span();
-    int64_t* out_data = out_span->GetValues<int64_t>(1);
+    int64_t* out_data = out->GetMutableValues<int64_t>(1);
 
     if (self.error_is_null) {
-      // Set all values to non-null, and only clear bits when there is a
-      // parsing error
-      bit_util::SetBitmap(out_span->buffers[0].data, out_span->offset, out_span->length);
+      if (out->buffers[0] == nullptr) {
+        ARROW_ASSIGN_OR_RAISE(out->buffers[0], ctx->AllocateBitmap(in.length));
+        bit_util::SetBitmap(out->buffers[0]->mutable_data(), out->offset, out->length);
+      }
 
       int64_t null_count = 0;
-      arrow::internal::BitmapWriter out_writer(out_span->buffers[0].data,
-                                               out_span->offset, out_span->length);
+      arrow::internal::BitmapWriter out_writer(out->GetMutableValues<uint8_t>(0, 0),
+                                               out->offset, out->length);
       auto visit_null = [&]() {
         *out_data++ = 0;
-        out_writer.Clear();
         out_writer.Next();
         null_count++;
       };
@@ -1316,18 +1204,10 @@ struct Strptime {
         }
         out_writer.Next();
       };
-      VisitArraySpanInline<InType>(in, visit_value, visit_null);
+      VisitArrayDataInline<InType>(in, visit_value, visit_null);
       out_writer.Finish();
-      out_span->null_count = null_count;
+      out->null_count = null_count;
     } else {
-      if (in.buffers[0].data != nullptr) {
-        ::arrow::internal::CopyBitmap(in.buffers[0].data, in.offset, in.length,
-                                      out_span->buffers[0].data, out_span->offset);
-      } else {
-        // Input is all non-null
-        bit_util::SetBitmap(out_span->buffers[0].data, out_span->offset,
-                            out_span->length);
-      }
       auto visit_null = [&]() {
         *out_data++ = 0;
         return Status::OK();
@@ -1342,7 +1222,7 @@ struct Strptime {
                                  TimestampType(self.unit).ToString());
         }
       };
-      RETURN_NOT_OK(VisitArraySpanInline<InType>(in, visit_value, visit_null));
+      RETURN_NOT_OK(VisitArrayDataInline<InType>(in, visit_value, visit_null));
     }
     return Status::OK();
   }
@@ -1463,7 +1343,7 @@ template <typename Duration>
 struct ISOCalendarWrapper<Duration, TimestampType> {
   static Result<std::array<int64_t, 3>> Get(const Scalar& in) {
     const auto& in_val = internal::UnboxScalar<const TimestampType>::Unbox(in);
-    const auto& timezone = GetInputTimezone(*in.type);
+    const auto& timezone = GetInputTimezone(in);
     if (timezone.empty()) {
       return GetIsoCalendar<Duration>(in_val, NonZonedLocalizer{});
     } else {
@@ -1476,7 +1356,7 @@ struct ISOCalendarWrapper<Duration, TimestampType> {
 template <typename Duration, typename InType, typename BuilderType>
 struct ISOCalendarVisitValueFunction {
   static Result<std::function<Status(typename InType::c_type arg)>> Get(
-      const std::vector<BuilderType*>& field_builders, const ArraySpan&,
+      const std::vector<BuilderType*>& field_builders, const ArrayData&,
       StructBuilder* struct_builder) {
     return [=](typename InType::c_type arg) {
       const auto iso_calendar = GetIsoCalendar<Duration>(arg, NonZonedLocalizer{});
@@ -1491,9 +1371,9 @@ struct ISOCalendarVisitValueFunction {
 template <typename Duration, typename BuilderType>
 struct ISOCalendarVisitValueFunction<Duration, TimestampType, BuilderType> {
   static Result<std::function<Status(typename TimestampType::c_type arg)>> Get(
-      const std::vector<BuilderType*>& field_builders, const ArraySpan& in,
+      const std::vector<BuilderType*>& field_builders, const ArrayData& in,
       StructBuilder* struct_builder) {
-    const auto& timezone = GetInputTimezone(*in.type);
+    const auto& timezone = GetInputTimezone(in);
     if (timezone.empty()) {
       return [=](TimestampType::c_type arg) {
         const auto iso_calendar = GetIsoCalendar<Duration>(arg, NonZonedLocalizer{});
@@ -1516,23 +1396,22 @@ struct ISOCalendarVisitValueFunction<Duration, TimestampType, BuilderType> {
 
 template <typename Duration, typename InType>
 struct ISOCalendar {
-  static Status Call(KernelContext* ctx, const Scalar& in, ExecResult* out) {
-    Scalar* output = out->scalar().get();
+  static Status Call(KernelContext* ctx, const Scalar& in, Scalar* out) {
     if (in.is_valid) {
       ARROW_ASSIGN_OR_RAISE(auto iso_calendar,
                             (ISOCalendarWrapper<Duration, InType>::Get(in)));
       ScalarVector values = {std::make_shared<Int64Scalar>(iso_calendar[0]),
                              std::make_shared<Int64Scalar>(iso_calendar[1]),
                              std::make_shared<Int64Scalar>(iso_calendar[2])};
-      *checked_cast<StructScalar*>(output) =
+      *checked_cast<StructScalar*>(out) =
           StructScalar(std::move(values), IsoCalendarType());
     } else {
-      output->is_valid = false;
+      out->is_valid = false;
     }
     return Status::OK();
   }
 
-  static Status Call(KernelContext* ctx, const ArraySpan& in, ExecResult* out) {
+  static Status Call(KernelContext* ctx, const ArrayData& in, ArrayData* out) {
     using BuilderType = typename TypeTraits<Int64Type>::BuilderType;
 
     std::unique_ptr<ArrayBuilder> array_builder;
@@ -1553,10 +1432,10 @@ struct ISOCalendar {
         visit_value, (ISOCalendarVisitValueFunction<Duration, InType, BuilderType>::Get(
                          field_builders, in, struct_builder)));
     RETURN_NOT_OK(
-        VisitArraySpanInline<typename InType::PhysicalType>(in, visit_value, visit_null));
+        VisitArrayDataInline<typename InType::PhysicalType>(in, visit_value, visit_null));
     std::shared_ptr<Array> out_array;
     RETURN_NOT_OK(struct_builder->Finish(&out_array));
-    out->value = std::move(out_array->data());
+    *out = *std::move(out_array->data());
     return Status::OK();
   }
 };
@@ -1576,12 +1455,12 @@ struct UnaryTemporalFactory {
 
   template <typename... WithTypes>
   static std::shared_ptr<ScalarFunction> Make(
-      std::string name, OutputType out_type, FunctionDoc doc,
+      std::string name, OutputType out_type, const FunctionDoc* doc,
       const FunctionOptions* default_options = NULLPTR, KernelInit init = NULLPTR) {
     DCHECK_NE(sizeof...(WithTypes), 0);
-    UnaryTemporalFactory self{out_type, init,
-                              std::make_shared<ScalarFunction>(
-                                  name, Arity::Unary(), std::move(doc), default_options)};
+    UnaryTemporalFactory self{
+        out_type, init,
+        std::make_shared<ScalarFunction>(name, Arity::Unary(), doc, default_options)};
     AddTemporalKernels(&self, WithTypes{}...);
     return self.func;
   }
@@ -1589,8 +1468,7 @@ struct UnaryTemporalFactory {
   template <typename Duration, typename InType>
   void AddKernel(InputType in_type) {
     auto exec = ExecTemplate<Op, Duration, InType, OutType>::Exec;
-    ScalarKernel kernel({std::move(in_type)}, out_type, std::move(exec), init);
-    DCHECK_OK(func->AddKernel(kernel));
+    DCHECK_OK(func->AddKernel({std::move(in_type)}, out_type, std::move(exec), init));
   }
 };
 
@@ -1599,19 +1477,15 @@ struct SimpleUnaryTemporalFactory {
   OutputType out_type;
   KernelInit init;
   std::shared_ptr<ScalarFunction> func;
-  NullHandling::type null_handling;
 
   template <typename... WithTypes>
   static std::shared_ptr<ScalarFunction> Make(
-      std::string name, OutputType out_type, FunctionDoc doc,
-      const FunctionOptions* default_options = NULLPTR, KernelInit init = NULLPTR,
-      NullHandling::type null_handling = NullHandling::INTERSECTION) {
+      std::string name, OutputType out_type, const FunctionDoc* doc,
+      const FunctionOptions* default_options = NULLPTR, KernelInit init = NULLPTR) {
     DCHECK_NE(sizeof...(WithTypes), 0);
     SimpleUnaryTemporalFactory self{
         out_type, init,
-        std::make_shared<ScalarFunction>(name, Arity::Unary(), std::move(doc),
-                                         default_options),
-        null_handling};
+        std::make_shared<ScalarFunction>(name, Arity::Unary(), doc, default_options)};
     AddTemporalKernels(&self, WithTypes{}...);
     return self.func;
   }
@@ -1619,9 +1493,8 @@ struct SimpleUnaryTemporalFactory {
   template <typename Duration, typename InType>
   void AddKernel(InputType in_type) {
     auto exec = SimpleUnary<Op<Duration, InType>>;
-    ScalarKernel kernel({std::move(in_type)}, out_type, std::move(exec), init);
-    kernel.null_handling = this->null_handling;
-    DCHECK_OK(func->AddKernel(kernel));
+    DCHECK_OK(func->AddKernel({std::move(in_type)}, out_type, std::move(exec), init));
+    ScalarKernel kernel({std::move(in_type)}, out_type, exec, init);
   }
 };
 
@@ -1871,35 +1744,35 @@ void RegisterScalarTemporalUnary(FunctionRegistry* registry) {
   auto year =
       UnaryTemporalFactory<Year, TemporalComponentExtract,
                            Int64Type>::Make<WithDates, WithTimestamps>("year", int64(),
-                                                                       year_doc);
+                                                                       &year_doc);
   DCHECK_OK(registry->AddFunction(std::move(year)));
 
   auto is_leap_year =
       UnaryTemporalFactory<IsLeapYear, TemporalComponentExtract, BooleanType>::Make<
-          WithDates, WithTimestamps>("is_leap_year", boolean(), is_leap_year_doc);
+          WithDates, WithTimestamps>("is_leap_year", boolean(), &is_leap_year_doc);
   DCHECK_OK(registry->AddFunction(std::move(is_leap_year)));
 
   auto month =
       UnaryTemporalFactory<Month, TemporalComponentExtract,
                            Int64Type>::Make<WithDates, WithTimestamps>("month", int64(),
-                                                                       month_doc);
+                                                                       &month_doc);
   DCHECK_OK(registry->AddFunction(std::move(month)));
 
   auto day =
       UnaryTemporalFactory<Day, TemporalComponentExtract,
                            Int64Type>::Make<WithDates, WithTimestamps>("day", int64(),
-                                                                       day_doc);
+                                                                       &day_doc);
   DCHECK_OK(registry->AddFunction(std::move(day)));
 
   auto year_month_day =
       SimpleUnaryTemporalFactory<YearMonthDay>::Make<WithDates, WithTimestamps>(
-          "year_month_day", YearMonthDayType(), year_month_day_doc);
+          "year_month_day", YearMonthDayType(), &year_month_day_doc);
   DCHECK_OK(registry->AddFunction(std::move(year_month_day)));
 
   static const auto default_day_of_week_options = DayOfWeekOptions::Defaults();
   auto day_of_week =
       UnaryTemporalFactory<DayOfWeek, TemporalComponentExtractDayOfWeek, Int64Type>::Make<
-          WithDates, WithTimestamps>("day_of_week", int64(), day_of_week_doc,
+          WithDates, WithTimestamps>("day_of_week", int64(), &day_of_week_doc,
                                      &default_day_of_week_options, DayOfWeekState::Init);
   DCHECK_OK(registry->AddFunction(std::move(day_of_week)));
 
@@ -1907,124 +1780,124 @@ void RegisterScalarTemporalUnary(FunctionRegistry* registry) {
       UnaryTemporalFactory<DayOfYear, TemporalComponentExtract,
                            Int64Type>::Make<WithDates, WithTimestamps>("day_of_year",
                                                                        int64(),
-                                                                       day_of_year_doc);
+                                                                       &day_of_year_doc);
   DCHECK_OK(registry->AddFunction(std::move(day_of_year)));
 
   auto iso_year =
       UnaryTemporalFactory<ISOYear, TemporalComponentExtract,
                            Int64Type>::Make<WithDates, WithTimestamps>("iso_year",
                                                                        int64(),
-                                                                       iso_year_doc);
+                                                                       &iso_year_doc);
   DCHECK_OK(registry->AddFunction(std::move(iso_year)));
 
   auto us_year =
       UnaryTemporalFactory<USYear, TemporalComponentExtract,
                            Int64Type>::Make<WithDates, WithTimestamps>("us_year", int64(),
-                                                                       us_year_doc);
+                                                                       &us_year_doc);
   DCHECK_OK(registry->AddFunction(std::move(us_year)));
 
   static const auto default_iso_week_options = WeekOptions::ISODefaults();
   auto iso_week =
       UnaryTemporalFactory<Week, TemporalComponentExtractWeek, Int64Type>::Make<
-          WithDates, WithTimestamps>("iso_week", int64(), iso_week_doc,
+          WithDates, WithTimestamps>("iso_week", int64(), &iso_week_doc,
                                      &default_iso_week_options, WeekState::Init);
   DCHECK_OK(registry->AddFunction(std::move(iso_week)));
 
   static const auto default_us_week_options = WeekOptions::USDefaults();
   auto us_week =
       UnaryTemporalFactory<Week, TemporalComponentExtractWeek, Int64Type>::Make<
-          WithDates, WithTimestamps>("us_week", int64(), us_week_doc,
+          WithDates, WithTimestamps>("us_week", int64(), &us_week_doc,
                                      &default_us_week_options, WeekState::Init);
   DCHECK_OK(registry->AddFunction(std::move(us_week)));
 
   static const auto default_week_options = WeekOptions();
   auto week = UnaryTemporalFactory<Week, TemporalComponentExtractWeek, Int64Type>::Make<
-      WithDates, WithTimestamps>("week", int64(), week_doc, &default_week_options,
+      WithDates, WithTimestamps>("week", int64(), &week_doc, &default_week_options,
                                  WeekState::Init);
   DCHECK_OK(registry->AddFunction(std::move(week)));
 
   auto iso_calendar =
       SimpleUnaryTemporalFactory<ISOCalendar>::Make<WithDates, WithTimestamps>(
-          "iso_calendar", IsoCalendarType(), iso_calendar_doc);
+          "iso_calendar", IsoCalendarType(), &iso_calendar_doc);
   DCHECK_OK(registry->AddFunction(std::move(iso_calendar)));
 
   auto quarter =
       UnaryTemporalFactory<Quarter, TemporalComponentExtract,
                            Int64Type>::Make<WithDates, WithTimestamps>("quarter", int64(),
-                                                                       quarter_doc);
+                                                                       &quarter_doc);
   DCHECK_OK(registry->AddFunction(std::move(quarter)));
 
   // Date / time extractors
   auto hour =
       UnaryTemporalFactory<Hour, TemporalComponentExtract,
                            Int64Type>::Make<WithTimes, WithTimestamps>("hour", int64(),
-                                                                       hour_doc);
+                                                                       &hour_doc);
   DCHECK_OK(registry->AddFunction(std::move(hour)));
 
   auto minute =
       UnaryTemporalFactory<Minute, TemporalComponentExtract,
                            Int64Type>::Make<WithTimes, WithTimestamps>("minute", int64(),
-                                                                       minute_doc);
+                                                                       &minute_doc);
   DCHECK_OK(registry->AddFunction(std::move(minute)));
 
   auto second =
       UnaryTemporalFactory<Second, TemporalComponentExtract,
                            Int64Type>::Make<WithTimes, WithTimestamps>("second", int64(),
-                                                                       second_doc);
+                                                                       &second_doc);
   DCHECK_OK(registry->AddFunction(std::move(second)));
 
   auto millisecond =
       UnaryTemporalFactory<Millisecond, TemporalComponentExtract,
                            Int64Type>::Make<WithTimes, WithTimestamps>("millisecond",
                                                                        int64(),
-                                                                       millisecond_doc);
+                                                                       &millisecond_doc);
   DCHECK_OK(registry->AddFunction(std::move(millisecond)));
 
   auto microsecond =
       UnaryTemporalFactory<Microsecond, TemporalComponentExtract,
                            Int64Type>::Make<WithTimes, WithTimestamps>("microsecond",
                                                                        int64(),
-                                                                       microsecond_doc);
+                                                                       &microsecond_doc);
   DCHECK_OK(registry->AddFunction(std::move(microsecond)));
 
   auto nanosecond =
       UnaryTemporalFactory<Nanosecond, TemporalComponentExtract,
                            Int64Type>::Make<WithTimes, WithTimestamps>("nanosecond",
                                                                        int64(),
-                                                                       nanosecond_doc);
+                                                                       &nanosecond_doc);
   DCHECK_OK(registry->AddFunction(std::move(nanosecond)));
 
   auto subsecond =
       UnaryTemporalFactory<Subsecond, TemporalComponentExtract,
                            DoubleType>::Make<WithTimes, WithTimestamps>("subsecond",
                                                                         float64(),
-                                                                        subsecond_doc);
+                                                                        &subsecond_doc);
   DCHECK_OK(registry->AddFunction(std::move(subsecond)));
 
   // Timezone-related functions
   static const auto default_strftime_options = StrftimeOptions();
   auto strftime =
       SimpleUnaryTemporalFactory<Strftime>::Make<WithTimes, WithDates, WithTimestamps>(
-          "strftime", utf8(), strftime_doc, &default_strftime_options,
+          "strftime", utf8(), &strftime_doc, &default_strftime_options,
           StrftimeState::Init);
   DCHECK_OK(registry->AddFunction(std::move(strftime)));
 
   auto strptime = SimpleUnaryTemporalFactory<Strptime>::Make<WithStringTypes>(
-      "strptime", OutputType::Resolver(ResolveStrptimeOutput), strptime_doc, nullptr,
-      StrptimeState::Init, NullHandling::COMPUTED_PREALLOCATE);
+      "strptime", OutputType::Resolver(ResolveStrptimeOutput), &strptime_doc, nullptr,
+      StrptimeState::Init);
   DCHECK_OK(registry->AddFunction(std::move(strptime)));
 
   auto assume_timezone =
       UnaryTemporalFactory<AssumeTimezone, AssumeTimezoneExtractor, TimestampType>::Make<
           WithTimestamps>("assume_timezone",
                           OutputType::Resolver(ResolveAssumeTimezoneOutput),
-                          assume_timezone_doc, nullptr, AssumeTimezoneState::Init);
+                          &assume_timezone_doc, nullptr, AssumeTimezoneState::Init);
   DCHECK_OK(registry->AddFunction(std::move(assume_timezone)));
 
   auto is_dst =
       UnaryTemporalFactory<IsDaylightSavings, DaylightSavingsExtractor,
                            BooleanType>::Make<WithTimestamps>("is_dst", boolean(),
-                                                              is_dst_doc);
+                                                              &is_dst_doc);
   DCHECK_OK(registry->AddFunction(std::move(is_dst)));
 
   // Temporal rounding functions
@@ -2032,19 +1905,19 @@ void RegisterScalarTemporalUnary(FunctionRegistry* registry) {
   auto floor_temporal = UnaryTemporalFactory<FloorTemporal, TemporalComponentExtractRound,
                                              TimestampType>::Make<WithDates, WithTimes,
                                                                   WithTimestamps>(
-      "floor_temporal", OutputType(FirstType), floor_temporal_doc,
+      "floor_temporal", OutputType(FirstType), &floor_temporal_doc,
       &default_round_temporal_options, RoundTemporalState::Init);
   DCHECK_OK(registry->AddFunction(std::move(floor_temporal)));
   auto ceil_temporal = UnaryTemporalFactory<CeilTemporal, TemporalComponentExtractRound,
                                             TimestampType>::Make<WithDates, WithTimes,
                                                                  WithTimestamps>(
-      "ceil_temporal", OutputType(FirstType), ceil_temporal_doc,
+      "ceil_temporal", OutputType(FirstType), &ceil_temporal_doc,
       &default_round_temporal_options, RoundTemporalState::Init);
   DCHECK_OK(registry->AddFunction(std::move(ceil_temporal)));
   auto round_temporal = UnaryTemporalFactory<RoundTemporal, TemporalComponentExtractRound,
                                              TimestampType>::Make<WithDates, WithTimes,
                                                                   WithTimestamps>(
-      "round_temporal", OutputType(FirstType), round_temporal_doc,
+      "round_temporal", OutputType(FirstType), &round_temporal_doc,
       &default_round_temporal_options, RoundTemporalState::Init);
   DCHECK_OK(registry->AddFunction(std::move(round_temporal)));
 }
