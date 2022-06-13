@@ -23,6 +23,12 @@ jobs:
   autobrew:
     name: "install from local source"
     runs-on: {{ "${{ matrix.os }}" }}
+  {% if env is defined %}
+    env:
+    {% for key, value in env.items() %}
+      {{ key }}: "{{ value }}"
+    {% endfor %}
+  {% endif %}
     strategy:
       fail-fast: false
       matrix:
@@ -69,7 +75,7 @@ jobs:
         run: R -e 'if(tools::testInstalledPackage("arrow") != 0L) stop("There was a test failure.")'
       - name: Dump test logs
         run: cat arrow-tests/testthat.Rout*
-        if: failure()
+        if: always()
       - name: Save the test output
         uses: actions/upload-artifact@v2
         with:
