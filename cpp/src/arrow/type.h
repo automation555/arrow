@@ -126,8 +126,7 @@ struct ARROW_EXPORT DataTypeLayout {
 ///
 /// Simple datatypes may be entirely described by their Type::type id, but
 /// complex datatypes are usually parametric.
-class ARROW_EXPORT DataType : public std::enable_shared_from_this<DataType>,
-                              public detail::Fingerprintable {
+class ARROW_EXPORT DataType : public detail::Fingerprintable {
  public:
   explicit DataType(Type::type id) : detail::Fingerprintable(), id_(id) {}
   ~DataType() override;
@@ -175,26 +174,6 @@ class ARROW_EXPORT DataType : public std::enable_shared_from_this<DataType>,
   /// \brief Return the type category of the storage type
   virtual Type::type storage_id() const { return id_; }
 
-  /// \brief Returns the type's fixed byte width, if any. Returns -1
-  /// for non-fixed-width types, and should only be used for
-  /// subclasses of FixedWidthType
-  virtual int32_t byte_width() const {
-    int32_t num_bits = this->bit_width();
-    return num_bits > 0 ? num_bits / 8 : -1;
-  }
-
-  /// \brief Returns the type's fixed bit width, if any. Returns -1
-  /// for non-fixed-width types, and should only be used for
-  /// subclasses of FixedWidthType
-  virtual int bit_width() const { return -1; }
-
-  // \brief EXPERIMENTAL: Enable retrieving shared_ptr<DataType> from a const
-  // context. Implementation requires enable_shared_from_this but we may fix
-  // this in the future
-  std::shared_ptr<DataType> Copy() const {
-    return const_cast<DataType*>(this)->shared_from_this();
-  }
-
  protected:
   // Dummy version that returns a null string (indicating not implemented).
   // Subclasses should override for fast equality checks.
@@ -236,6 +215,8 @@ std::shared_ptr<DataType> GetPhysicalType(const std::shared_ptr<DataType>& type)
 class ARROW_EXPORT FixedWidthType : public DataType {
  public:
   using DataType::DataType;
+
+  virtual int bit_width() const = 0;
 };
 
 /// \brief Base class for all data types representing primitive values
@@ -718,7 +699,7 @@ class ARROW_EXPORT FixedSizeBinaryType : public FixedWidthType, public Parametri
         {DataTypeLayout::Bitmap(), DataTypeLayout::FixedWidth(byte_width())});
   }
 
-  int32_t byte_width() const override { return byte_width_; }
+  int32_t byte_width() const { return byte_width_; }
   int bit_width() const override;
 
   // Validating constructor
@@ -1140,6 +1121,28 @@ class ARROW_EXPORT DenseUnionType : public UnionType {
       std::vector<std::shared_ptr<Field>> fields, std::vector<int8_t> type_codes);
 
   std::string name() const override { return "dense_union"; }
+};
+
+/// \brief Type class for run-length encoded data
+class ARROW_EXPORT RunLengthEncodedType : public NestedType {
+ public:
+  RunLengthEncodedType(std::shared_ptr<DataType> encoded_type)
+      : NestedType(Type::RUN_LENGTH_ENCODED), encoded_type_{std::move(encoded_type)} {}
+
+  DataTypeLayout layout() const override {
+    return DataTypeLayout({DataTypeLayout::FixedWidth(sizeof(uint64_t))});
+  }
+
+  std::string ToString() const override;
+
+  const std::shared_ptr<DataType>& encoded_type() { return encoded_type_; }
+
+  std::string name() const override { return "run_length_encoded"; }
+
+ private:
+  std::string ComputeFingerprint() const override;
+
+  std::shared_ptr<DataType> encoded_type_;
 };
 
 /// @}
