@@ -104,7 +104,21 @@ final class CDataReferenceManager implements ReferenceManager {
 
   @Override
   public OwnershipTransferResult transferOwnership(ArrowBuf sourceBuffer, BufferAllocator targetAllocator) {
-    throw new UnsupportedOperationException();
+    ArrowBuf targetArrowBuf = this.deriveBuffer(sourceBuffer, 0, sourceBuffer.capacity());
+    targetArrowBuf.readerIndex(sourceBuffer.readerIndex());
+    targetArrowBuf.writerIndex(sourceBuffer.writerIndex());
+
+    return new OwnershipTransferResult() {
+      @Override
+      public boolean getAllocationFit() {
+        return true;
+      }
+
+      @Override
+      public ArrowBuf getTransferredBuffer() {
+        return targetArrowBuf;
+      }
+    };
   }
 
   @Override
