@@ -43,21 +43,9 @@ If you want a quicker installation process, and by default a more fully-featured
 
 For example, if you are using Ubuntu 20.04 (Focal):
 
-```r
-options(
-  HTTPUserAgent =
-    sprintf(
-      "R/%s R (%s)",
-      getRversion(),
-      paste(getRversion(), R.version["platform"], R.version["arch"], R.version["os"])
-    )
-)
-
+```{r, eval = FALSE}
 install.packages("arrow", repos = "https://packagemanager.rstudio.com/all/__linux__/focal/latest")
 ```
-
-Note that the User Agent header must be specified as in the example above.
-Please check [the RStudio Package Manager: Admin Guide ](https://docs.rstudio.com/rspm/admin/serving-binaries/#using-linux-binary-packages) for more details.
 
 For other Linux distributions, to get the relevant URL, you can visit 
 [the RSPM site](https://packagemanager.rstudio.com/client/#/repos/1/overview),
@@ -227,7 +215,7 @@ the bundled build script.  All boolean variables are case-insensitive.
 See below for more in-depth explanations of these environment variables.
 
 * `LIBARROW_BINARY` : If set to `true`, the script will try to download a binary
-  C++ library built for your operating system.  You may also set it to some other string,  a related "distro-version" that has binaries built that work for your OS.  See the [distro map](https://raw.githubusercontent.com/ursa-labs/arrow-r-nightly/master/linux/distro-map.csv) for compatible binaries and OSs.  If no binary is found, installation will fall back to building C++  dependencies from source. 
+  C++ library built for your operating system.  You may also set it to some other string,  a related "distro-version" that has binaries built that work for your OS.  See the [distro map](https://raw.githubusercontent.com/apache/arrow/master/r/tools/distro-map.csv) for compatible binaries and OSs.  If no binary is found, installation will fall back to building C++  dependencies from source. 
 * `LIBARROW_BUILD` : If set to `false`, the build script
   will not attempt to build the C++ from source. This means you will only get
   a working arrow R package if a prebuilt binary is found.
@@ -271,7 +259,7 @@ from the Ursa Labs repository:
 
 ```r
 Sys.setenv(NOT_CRAN = TRUE)
-install.packages("arrow", repos = c(arrow = "https://arrow-r-nightly.s3.amazonaws.com", getOption("repos")))
+install.packages("arrow", repos = "https://nightlies.apache.org/arrow/r")
 ```
 
 or for conda users via:
@@ -462,7 +450,7 @@ for your OS but a similar version would work,
 such as if you're on `ubuntu-18.10` and there's only a binary for `ubuntu-18.04`.
 
 If that workaround works for you, and you believe that it should work for everyone else too,
-you may propose [adding an entry to this lookup table](https://github.com/ursa-labs/arrow-r-nightly/edit/master/linux/distro-map.csv).
+you may propose [adding an entry to this lookup table](https://github.com/apache/arrow/edit/master/r/tools/distro-map.csv).
 This table is checked during the installation process
 and tells the script to use binaries built on a different operating system/version
 because they're known to work.
