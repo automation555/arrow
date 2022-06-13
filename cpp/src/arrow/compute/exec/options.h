@@ -232,16 +232,10 @@ class ARROW_EXPORT SinkNodeConsumer {
 /// \brief Add a sink node which consumes data within the exec plan run
 class ARROW_EXPORT ConsumingSinkNodeOptions : public ExecNodeOptions {
  public:
-  explicit ConsumingSinkNodeOptions(std::shared_ptr<SinkNodeConsumer> consumer,
-                                    std::vector<std::string> names = {})
-      : consumer(std::move(consumer)), names(std::move(names)) {}
+  explicit ConsumingSinkNodeOptions(std::shared_ptr<SinkNodeConsumer> consumer)
+      : consumer(std::move(consumer)) {}
 
   std::shared_ptr<SinkNodeConsumer> consumer;
-  /// \brief Names to rename the sink's schema fields to
-  ///
-  /// If specified then names must be provided for all fields. Currently, only a flat
-  /// schema is supported (see ARROW-15901).
-  std::vector<std::string> names;
 };
 
 /// \brief Make a node which sorts rows passed through it
@@ -287,41 +281,25 @@ class ARROW_EXPORT HashJoinNodeOptions : public ExecNodeOptions {
       JoinType in_join_type, std::vector<FieldRef> in_left_keys,
       std::vector<FieldRef> in_right_keys, Expression filter = literal(true),
       std::string output_suffix_for_left = default_output_suffix_for_left,
-      std::string output_suffix_for_right = default_output_suffix_for_right,
-      bool disable_bloom_filter = false)
+      std::string output_suffix_for_right = default_output_suffix_for_right)
       : join_type(in_join_type),
         left_keys(std::move(in_left_keys)),
         right_keys(std::move(in_right_keys)),
         output_all(true),
         output_suffix_for_left(std::move(output_suffix_for_left)),
         output_suffix_for_right(std::move(output_suffix_for_right)),
-        filter(std::move(filter)),
-        disable_bloom_filter(disable_bloom_filter) {
+        filter(std::move(filter)) {
     this->key_cmp.resize(this->left_keys.size());
     for (size_t i = 0; i < this->left_keys.size(); ++i) {
       this->key_cmp[i] = JoinKeyCmp::EQ;
     }
-  }
-  HashJoinNodeOptions(std::vector<FieldRef> in_left_keys,
-                      std::vector<FieldRef> in_right_keys)
-      : left_keys(std::move(in_left_keys)), right_keys(std::move(in_right_keys)) {
-    this->join_type = JoinType::INNER;
-    this->output_all = true;
-    this->output_suffix_for_left = default_output_suffix_for_left;
-    this->output_suffix_for_right = default_output_suffix_for_right;
-    this->key_cmp.resize(this->left_keys.size());
-    for (size_t i = 0; i < this->left_keys.size(); ++i) {
-      this->key_cmp[i] = JoinKeyCmp::EQ;
-    }
-    this->filter = literal(true);
   }
   HashJoinNodeOptions(
       JoinType join_type, std::vector<FieldRef> left_keys,
       std::vector<FieldRef> right_keys, std::vector<FieldRef> left_output,
       std::vector<FieldRef> right_output, Expression filter = literal(true),
       std::string output_suffix_for_left = default_output_suffix_for_left,
-      std::string output_suffix_for_right = default_output_suffix_for_right,
-      bool disable_bloom_filter = false)
+      std::string output_suffix_for_right = default_output_suffix_for_right)
       : join_type(join_type),
         left_keys(std::move(left_keys)),
         right_keys(std::move(right_keys)),
@@ -330,8 +308,7 @@ class ARROW_EXPORT HashJoinNodeOptions : public ExecNodeOptions {
         right_output(std::move(right_output)),
         output_suffix_for_left(std::move(output_suffix_for_left)),
         output_suffix_for_right(std::move(output_suffix_for_right)),
-        filter(std::move(filter)),
-        disable_bloom_filter(disable_bloom_filter) {
+        filter(std::move(filter)) {
     this->key_cmp.resize(this->left_keys.size());
     for (size_t i = 0; i < this->left_keys.size(); ++i) {
       this->key_cmp[i] = JoinKeyCmp::EQ;
@@ -343,8 +320,7 @@ class ARROW_EXPORT HashJoinNodeOptions : public ExecNodeOptions {
       std::vector<FieldRef> right_output, std::vector<JoinKeyCmp> key_cmp,
       Expression filter = literal(true),
       std::string output_suffix_for_left = default_output_suffix_for_left,
-      std::string output_suffix_for_right = default_output_suffix_for_right,
-      bool disable_bloom_filter = false)
+      std::string output_suffix_for_right = default_output_suffix_for_right)
       : join_type(join_type),
         left_keys(std::move(left_keys)),
         right_keys(std::move(right_keys)),
@@ -354,20 +330,17 @@ class ARROW_EXPORT HashJoinNodeOptions : public ExecNodeOptions {
         key_cmp(std::move(key_cmp)),
         output_suffix_for_left(std::move(output_suffix_for_left)),
         output_suffix_for_right(std::move(output_suffix_for_right)),
-        filter(std::move(filter)),
-        disable_bloom_filter(disable_bloom_filter) {}
-
-  HashJoinNodeOptions() = default;
+        filter(std::move(filter)) {}
 
   // type of join (inner, left, semi...)
-  JoinType join_type = JoinType::INNER;
+  JoinType join_type;
   // key fields from left input
   std::vector<FieldRef> left_keys;
   // key fields from right input
   std::vector<FieldRef> right_keys;
   // if set all valid fields from both left and right input will be output
   // (and field ref vectors for output fields will be ignored)
-  bool output_all = false;
+  bool output_all;
   // output fields passed from left input
   std::vector<FieldRef> left_output;
   // output fields passed from right input
@@ -385,9 +358,30 @@ class ARROW_EXPORT HashJoinNodeOptions : public ExecNodeOptions {
   // the filter are not included.  The filter is applied against the
   // concatenated input schema (left fields then right fields) and can reference
   // fields that are not included in the output.
-  Expression filter = literal(true);
-  // whether or not to disable Bloom filters in this join
-  bool disable_bloom_filter = false;
+  Expression filter;
+};
+
+/// \brief Make a node which implements asof join operation
+///
+/// This node takes one left table and (n-1) right tables, and asof joins them
+/// together. Batches produced by each inputs must be ordered by the "on" key.
+/// The batch size that this node produces is decided by the left table.
+class ARROW_EXPORT AsofJoinNodeOptions : public ExecNodeOptions {
+ public:
+  AsofJoinNodeOptions(FieldRef on_key, FieldRef by_key, int64_t tolerance)
+      : on_key(std::move(on_key)), by_key(std::move(by_key)), tolerance(tolerance) {}
+
+  // "on" key for the join. Each input table must be sorted by the "on" key. Inexact
+  // match is used on the "on" key. i.e., a row is considiered match iff
+  // left_on - tolerance <= right_on <= left_on.
+  // Currently, "on" key must be an int64 field
+  FieldRef on_key;
+  // "by" key for the join. All tables must have the "by" key. Equity prediciate
+  // are used on the "by" key.
+  // Currently, "by" key must be an int32 field
+  FieldRef by_key;
+  // tolerance for inexact "on" key matching
+  int64_t tolerance;
 };
 
 /// \brief Make a node which select top_k/bottom_k rows passed through it
@@ -404,6 +398,7 @@ class ARROW_EXPORT SelectKSinkNodeOptions : public SinkNodeOptions {
   /// SelectK options
   SelectKOptions select_k_options;
 };
+/// @}
 
 /// \brief Adapt a Table as a sink node
 ///
@@ -416,8 +411,6 @@ class ARROW_EXPORT TableSinkNodeOptions : public ExecNodeOptions {
 
   std::shared_ptr<Table>* output_table;
 };
-
-/// @}
 
 }  // namespace compute
 }  // namespace arrow

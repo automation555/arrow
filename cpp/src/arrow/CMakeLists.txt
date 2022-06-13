@@ -381,6 +381,7 @@ if(ARROW_COMPUTE)
        compute/cast.cc
        compute/exec.cc
        compute/exec/aggregate_node.cc
+       compute/exec/asof_join_node.cc
        compute/exec/bloom_filter.cc
        compute/exec/exec_plan.cc
        compute/exec/expression.cc
@@ -393,6 +394,7 @@ if(ARROW_COMPUTE)
        compute/exec/key_encode.cc
        compute/exec/key_hash.cc
        compute/exec/key_map.cc
+       compute/exec/options.cc
        compute/exec/order_by_impl.cc
        compute/exec/partition_util.cc
        compute/exec/options.cc
@@ -437,7 +439,6 @@ if(ARROW_COMPUTE)
        compute/kernels/scalar_validity.cc
        compute/kernels/util_internal.cc
        compute/kernels/vector_array_sort.cc
-       compute/kernels/vector_cumulative_ops.cc
        compute/kernels/vector_hash.cc
        compute/kernels/vector_nested.cc
        compute/kernels/vector_replace.cc
@@ -754,6 +755,20 @@ endif()
 
 if(ARROW_FLIGHT)
   add_subdirectory(flight)
+
+  if(ARROW_WITH_UCX)
+    add_subdirectory(flight/transport/ucx)
+  endif()
+endif()
+
+if(ARROW_FLIGHT_SQL)
+  add_subdirectory(flight/sql)
+endif()
+
+if(ARROW_FLIGHT
+   AND ARROW_FLIGHT_SQL
+   AND ARROW_BUILD_INTEGRATION)
+  add_subdirectory(flight/integration_tests)
 endif()
 
 if(ARROW_HIVESERVER2)
