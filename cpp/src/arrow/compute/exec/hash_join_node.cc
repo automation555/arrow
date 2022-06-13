@@ -28,7 +28,6 @@
 #include "arrow/util/future.h"
 #include "arrow/util/make_unique.h"
 #include "arrow/util/thread_pool.h"
-#include "arrow/util/tracing_internal.h"
 
 namespace arrow {
 
@@ -337,8 +336,7 @@ std::shared_ptr<Schema> HashJoinSchema::MakeOutputSchema(
 
 Result<Expression> HashJoinSchema::BindFilter(Expression filter,
                                               const Schema& left_schema,
-                                              const Schema& right_schema,
-                                              ExecContext* exec_context) {
+                                              const Schema& right_schema) {
   if (filter.IsBound() || filter == literal(true)) {
     return std::move(filter);
   }
@@ -369,7 +367,7 @@ Result<Expression> HashJoinSchema::BindFilter(Expression filter,
                                           filter);
 
   // Step 3: Bind
-  ARROW_ASSIGN_OR_RAISE(filter, filter.Bind(filter_schema, exec_context));
+  ARROW_ASSIGN_OR_RAISE(filter, filter.Bind(filter_schema));
   if (filter.type()->id() != Type::BOOL) {
     return Status::TypeError("Filter expression must evaluate to bool, but ",
                              filter.ToString(), " evaluates to ",
@@ -516,9 +514,9 @@ class HashJoinNode : public ExecNode {
           join_options.output_suffix_for_left, join_options.output_suffix_for_right));
     }
 
-    ARROW_ASSIGN_OR_RAISE(Expression filter,
-                          schema_mgr->BindFilter(join_options.filter, left_schema,
-                                                 right_schema, plan->exec_context()));
+    ARROW_ASSIGN_OR_RAISE(
+        Expression filter,
+        schema_mgr->BindFilter(join_options.filter, left_schema, right_schema));
 
     // Generate output schema
     std::shared_ptr<Schema> output_schema = schema_mgr->MakeOutputSchema(
@@ -539,7 +537,7 @@ class HashJoinNode : public ExecNode {
       return;
     }
 
-    size_t thread_index = thread_indexer_();
+    size_t thread_index = plan_->GetThreadIndex();
     int side = (input == inputs_[0]) ? 0 : 1;
 
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}, {"side", side}});
@@ -556,7 +554,7 @@ class HashJoinNode : public ExecNode {
       }
     }
     if (batch_count_[side].Increment()) {
-      Status status = impl_->InputFinished(thread_index, side);
+      Status status = impl_->InputFinished(side);
       if (!status.ok()) {
         StopProducing();
         ErrorIfNotOk(status);
@@ -575,13 +573,12 @@ class HashJoinNode : public ExecNode {
   void InputFinished(ExecNode* input, int total_batches) override {
     ARROW_DCHECK(std::find(inputs_.begin(), inputs_.end(), input) != inputs_.end());
 
-    size_t thread_index = thread_indexer_();
     int side = (input == inputs_[0]) ? 0 : 1;
 
     EVENT(span_, "InputFinished", {{"side", side}, {"batches.length", total_batches}});
 
     if (batch_count_[side].SetTotal(total_batches)) {
-      Status status = impl_->InputFinished(thread_index, side);
+      Status status = impl_->InputFinished(side);
       if (!status.ok()) {
         StopProducing();
         ErrorIfNotOk(status);
@@ -698,23 +695,26 @@ class HashJoinNode : public ExecNode {
 #endif  // ARROW_LITTLE_ENDIAN
   }
 
-  Status PrepareToProduce() override {
-    bool use_sync_execution = !(plan_->exec_context()->executor());
-    size_t num_threads = use_sync_execution ? 1 : thread_indexer_.Capacity();
+  Status Init() override {
+    size_t num_threads = plan_->max_concurrency();
 
     HashJoinImpl* pushdown_target = nullptr;
     std::vector<int> column_map;
     std::tie(pushdown_target, column_map) = GetPushdownTarget();
 
     return impl_->Init(
-        plan_->exec_context(), join_type_, use_sync_execution, num_threads,
-        schema_mgr_.get(), key_cmp_, filter_,
-        [this](ExecBatch batch) { this->OutputBatchCallback(batch); },
+        plan_->exec_context(), join_type_, num_threads, schema_mgr_.get(), key_cmp_,
+        filter_, [this](ExecBatch batch) { this->OutputBatchCallback(batch); },
         [this](int64_t total_num_batches) { this->FinishedCallback(total_num_batches); },
-        [this](std::function<Status(size_t)> func) -> Status {
-          return this->ScheduleTaskCallback(std::move(func));
+        [this](std::function<Status(size_t, int64_t)> task,
+               std::function<Status(size_t)> on_finished) {
+          return plan_->RegisterTaskGroup(std::move(task), std::move(on_finished));
+        },
+        [this](int task_group_id, int64_t num_tasks) {
+          return plan_->StartTaskGroup(task_group_id, num_tasks);
         },
         pushdown_target, std::move(column_map));
+    return Status::OK();
   }
 
   Status StartProducing() override {
@@ -723,7 +723,6 @@ class HashJoinNode : public ExecNode {
                         {"node.detail", ToString()},
                         {"node.kind", kind_name()}});
     END_SPAN_ON_FUTURE_COMPLETION(span_, finished(), this);
-
     return Status::OK();
   }
 
@@ -747,11 +746,9 @@ class HashJoinNode : public ExecNode {
       for (auto&& input : inputs_) {
         input->StopProducing(this);
       }
-      impl_->Abort([this]() { ARROW_UNUSED(task_group_.End()); });
+      impl_->Abort([this]() { finished_.MarkFinished(); });
     }
   }
-
-  Future<> finished() override { return task_group_.OnFinished(); }
 
  private:
   void OutputBatchCallback(ExecBatch batch) {
@@ -762,29 +759,12 @@ class HashJoinNode : public ExecNode {
     bool expected = false;
     if (complete_.compare_exchange_strong(expected, true)) {
       outputs_[0]->InputFinished(this, static_cast<int>(total_num_batches));
-      ARROW_UNUSED(task_group_.End());
+      finished_.MarkFinished();
     }
   }
 
   Status ScheduleTaskCallback(std::function<Status(size_t)> func) {
-    auto executor = plan_->exec_context()->executor();
-    if (executor) {
-      return task_group_.AddTask([this, executor, func] {
-        return DeferNotOk(executor->Submit([this, func] {
-          size_t thread_index = thread_indexer_();
-          Status status = func(thread_index);
-          if (!status.ok()) {
-            StopProducing();
-            ErrorIfNotOk(status);
-            return;
-          }
-        }));
-      });
-    } else {
-      // We should not get here in serial execution mode
-      ARROW_DCHECK(false);
-    }
-    return Status::OK();
+    return plan_->ScheduleTask(std::move(func));
   }
 
  private:
@@ -793,10 +773,8 @@ class HashJoinNode : public ExecNode {
   JoinType join_type_;
   std::vector<JoinKeyCmp> key_cmp_;
   Expression filter_;
-  ThreadIndexer thread_indexer_;
   std::unique_ptr<HashJoinSchema> schema_mgr_;
   std::unique_ptr<HashJoinImpl> impl_;
-  util::AsyncTaskGroup task_group_;
   bool disable_bloom_filter_;
 };
 

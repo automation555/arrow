@@ -24,6 +24,7 @@
 #include "arrow/compute/exec.h"
 #include "arrow/compute/exec/expression.h"
 #include "arrow/compute/exec/options.h"
+#include "arrow/compute/exec/task_util.h"
 #include "arrow/compute/exec_internal.h"
 #include "arrow/compute/registry.h"
 #include "arrow/datum.h"
@@ -56,6 +57,11 @@ struct ExecPlanImpl : public ExecPlan {
     }
   }
 
+  size_t GetThreadIndex() { return thread_indexer_(); }
+  size_t max_concurrency() const {
+    return exec_context()->executor() ? thread_indexer_.Capacity() : 1;
+  }
+
   ExecNode* AddNode(std::unique_ptr<ExecNode> node) {
     if (node->label().empty()) {
       node->SetLabel(std::to_string(auto_label_counter_++));
@@ -68,6 +74,32 @@ struct ExecPlanImpl : public ExecPlan {
     }
     nodes_.push_back(std::move(node));
     return nodes_.back().get();
+  }
+
+  Status AddFuture(Future<> fut) { return task_group_.AddTaskIfNotEnded(std::move(fut)); }
+
+  Status ScheduleTask(std::function<Status()> fn) {
+    auto executor = exec_context_->executor();
+    if (!executor) return fn();
+    ARROW_ASSIGN_OR_RAISE(auto task_fut, executor->Submit(std::move(fn)));
+    return AddFuture(std::move(task_fut));
+  }
+
+  Status ScheduleTask(std::function<Status(size_t)> fn) {
+    std::function<Status()> indexed_fn = [this, fn]() {
+      size_t thread_index = GetThreadIndex();
+      return fn(thread_index);
+    };
+    return ScheduleTask(std::move(indexed_fn));
+  }
+
+  int RegisterTaskGroup(std::function<Status(size_t, int64_t)> task,
+                        std::function<Status(size_t)> on_finished) {
+    return task_scheduler_->RegisterTaskGroup(std::move(task), std::move(on_finished));
+  }
+
+  Status StartTaskGroup(int task_group_id, int64_t num_tasks) {
+    return task_scheduler_->StartTaskGroup(GetThreadIndex(), task_group_id, num_tasks);
   }
 
   Status Validate() const {
@@ -85,25 +117,35 @@ struct ExecPlanImpl : public ExecPlan {
 #ifdef ARROW_WITH_OPENTELEMETRY
     if (HasMetadata()) {
       auto pairs = metadata().get()->sorted_pairs();
-      opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> span =
-          ::arrow::internal::tracing::UnwrapSpan(span_.details.get());
       std::for_each(std::begin(pairs), std::end(pairs),
-                    [span](std::pair<std::string, std::string> const& pair) {
-                      span->SetAttribute(pair.first, pair.second);
+                    [this](std::pair<std::string, std::string> const& pair) {
+                      span_.Get().span->SetAttribute(pair.first, pair.second);
                     });
     }
 #endif
     if (started_) {
       return Status::Invalid("restarted ExecPlan");
     }
-    started_ = true;
 
+    for (auto& n : nodes_) RETURN_NOT_OK(n->Init());
+
+    task_scheduler_->RegisterEnd();
+    int num_threads = 1;
+    bool sync_execution = true;
+    if (auto executor = exec_context()->executor()) {
+      num_threads = executor->GetCapacity();
+      sync_execution = false;
+    }
+    RETURN_NOT_OK(task_scheduler_->StartScheduling(
+        0 /* thread_index */,
+        [this](std::function<Status(size_t)> fn) -> Status {
+          return this->ScheduleTask(std::move(fn));
+        },
+        /*concurrent_tasks=*/2 * num_threads, sync_execution));
+
+    started_ = true;
     // producers precede consumers
     sorted_nodes_ = TopoSort();
-    for (ExecNode* node : sorted_nodes_) {
-      RETURN_NOT_OK(node->PrepareToProduce());
-    }
-
     std::vector<Future<>> futures;
 
     Status st = Status::OK();
@@ -120,23 +162,34 @@ struct ExecPlanImpl : public ExecPlan {
         // Stop nodes that successfully started, in reverse order
         stopped_ = true;
         StopProducingImpl(it.base(), sorted_nodes_.end());
-        break;
+        finished_.MarkFinished(st);
+        return st;
       }
 
       futures.push_back(node->finished());
     }
 
-    finished_ = AllFinished(futures);
+    AllFinished(futures).AddCallback([this](const Status& st) {
+      error_st_ = st;
+      EndTaskGroup();
+    });
     END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
     return st;
+  }
+
+  void EndTaskGroup() {
+    bool expected = false;
+    if (group_ended_.compare_exchange_strong(expected, true))
+      task_group_.End().AddCallback(
+          [this](const Status& st) { finished_.MarkFinished(error_st_ & st); });
   }
 
   void StopProducing() {
     DCHECK(started_) << "stopped an ExecPlan which never started";
     EVENT(span_, "StopProducing");
     stopped_ = true;
-
     StopProducingImpl(sorted_nodes_.begin(), sorted_nodes_.end());
+    task_scheduler_->Abort([this]() { EndTaskGroup(); });
   }
 
   template <typename It>
@@ -242,7 +295,8 @@ struct ExecPlanImpl : public ExecPlan {
     return ss.str();
   }
 
-  Future<> finished_ = Future<>::MakeFinished();
+  Status error_st_;
+  Future<> finished_ = Future<>::Make();
   bool started_ = false, stopped_ = false;
   std::vector<std::unique_ptr<ExecNode>> nodes_;
   NodeVector sources_, sinks_;
@@ -250,6 +304,11 @@ struct ExecPlanImpl : public ExecPlan {
   uint32_t auto_label_counter_ = 0;
   util::tracing::Span span_;
   std::shared_ptr<const KeyValueMetadata> metadata_;
+
+  ThreadIndexer thread_indexer_;
+  std::atomic<bool> group_ended_{false};
+  util::AsyncTaskGroup task_group_;
+  std::unique_ptr<TaskScheduler> task_scheduler_ = TaskScheduler::Make();
 };
 
 ExecPlanImpl* ToDerived(ExecPlan* ptr) { return checked_cast<ExecPlanImpl*>(ptr); }
@@ -282,6 +341,26 @@ const ExecPlan::NodeVector& ExecPlan::sources() const {
 }
 
 const ExecPlan::NodeVector& ExecPlan::sinks() const { return ToDerived(this)->sinks_; }
+
+size_t ExecPlan::GetThreadIndex() { return ToDerived(this)->GetThreadIndex(); }
+size_t ExecPlan::max_concurrency() const { return ToDerived(this)->max_concurrency(); }
+
+Status ExecPlan::AddFuture(Future<> fut) {
+  return ToDerived(this)->AddFuture(std::move(fut));
+}
+Status ExecPlan::ScheduleTask(std::function<Status()> fn) {
+  return ToDerived(this)->ScheduleTask(std::move(fn));
+}
+Status ExecPlan::ScheduleTask(std::function<Status(size_t)> fn) {
+  return ToDerived(this)->ScheduleTask(std::move(fn));
+}
+int ExecPlan::RegisterTaskGroup(std::function<Status(size_t, int64_t)> task,
+                                std::function<Status(size_t)> on_finished) {
+  return ToDerived(this)->RegisterTaskGroup(std::move(task), std::move(on_finished));
+}
+Status ExecPlan::StartTaskGroup(int task_group_id, int64_t num_tasks) {
+  return ToDerived(this)->StartTaskGroup(task_group_id, num_tasks);
+}
 
 Status ExecPlan::Validate() { return ToDerived(this)->Validate(); }
 
@@ -395,7 +474,6 @@ Status MapNode::StartProducing() {
   START_COMPUTE_SPAN(
       span_, std::string(kind_name()) + ":" + label(),
       {{"node.label", label()}, {"node.detail", ToString()}, {"node.kind", kind_name()}});
-  finished_ = Future<>::Make();
   END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
   return Status::OK();
 }
@@ -423,8 +501,6 @@ void MapNode::StopProducing() {
   }
   inputs_[0]->StopProducing(this);
 }
-
-Future<> MapNode::finished() { return finished_; }
 
 void MapNode::SubmitTask(std::function<Result<ExecBatch>(ExecBatch)> map_fn,
                          ExecBatch batch) {

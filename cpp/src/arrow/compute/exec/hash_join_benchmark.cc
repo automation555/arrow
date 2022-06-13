@@ -54,8 +54,6 @@ struct BenchmarkSettings {
 class JoinBenchmark {
  public:
   explicit JoinBenchmark(BenchmarkSettings& settings) {
-    bool is_parallel = settings.num_threads != 1;
-
     SchemaBuilder l_schema_builder, r_schema_builder;
     std::vector<FieldRef> left_keys, right_keys;
     std::vector<JoinKeyCmp> key_cmp;
@@ -118,9 +116,8 @@ class JoinBenchmark {
 
     stats_.num_probe_rows = settings.num_probe_batches * settings.batch_size;
 
-    ctx_ = arrow::internal::make_unique<ExecContext>(
-        default_memory_pool(),
-        is_parallel ? arrow::internal::GetCpuThreadPool() : nullptr);
+    ctx_ = arrow::internal::make_unique<ExecContext>(default_memory_pool(),
+                                                     arrow::internal::GetCpuThreadPool());
 
     schema_mgr_ = arrow::internal::make_unique<HashJoinSchema>();
     Expression filter = literal(true);
@@ -152,11 +149,31 @@ class JoinBenchmark {
       return Status::OK();
     };
 
+    auto register_task_group_callback = [&](std::function<Status(size_t, int64_t)> task,
+                                            std::function<Status(size_t)> cont) {
+      return scheduler_->RegisterTaskGroup(std::move(task), std::move(cont));
+    };
+
+    auto start_task_group_callback = [&](int task_group_id, int64_t num_tasks) {
+      return scheduler_->StartTaskGroup(omp_get_thread_num(), task_group_id, num_tasks);
+    };
+
+    scheduler_ = TaskScheduler::Make();
     DCHECK_OK(join_->Init(
-        ctx_.get(), settings.join_type, !is_parallel, settings.num_threads,
-        schema_mgr_.get(), std::move(key_cmp), std::move(filter), [](ExecBatch) {},
-        [](int64_t x) {}, schedule_callback, bloom_filter_pushdown_target,
-        std::move(key_input_map)));
+        ctx_.get(), settings.join_type, settings.num_threads, schema_mgr_.get(),
+        std::move(key_cmp), std::move(filter), [](ExecBatch) {}, [](int64_t x) {},
+        register_task_group_callback, start_task_group_callback,
+        bloom_filter_pushdown_target, std::move(key_input_map)));
+    scheduler_->RegisterEnd();
+    DCHECK_OK(scheduler_->StartScheduling(
+        /*thread_index=*/0, schedule_callback,
+        /*concurrent_tasks=*/2 * settings.num_threads,
+        /*sync_execution=*/settings.num_threads == 1));
+    scheduler_->RegisterEnd();
+    DCHECK_OK(scheduler_->StartScheduling(
+        /*thread_index=*/0, schedule_callback,
+        /*concurrent_tasks=*/2 * settings.num_threads,
+        /*sync_execution=*/settings.num_threads == 1));
   }
 
   void RunJoin() {
@@ -173,10 +190,10 @@ class JoinBenchmark {
 #pragma omp barrier
 
 #pragma omp single nowait
-      { DCHECK_OK(join_->InputFinished(tid, /*side=*/1)); }
+      { DCHECK_OK(join_->InputFinished(/*side=*/1)); }
 
 #pragma omp single nowait
-      { DCHECK_OK(join_->InputFinished(tid, /*side=*/0)); }
+      { DCHECK_OK(join_->InputFinished(/*side=*/0)); }
     }
   }
 
@@ -185,6 +202,7 @@ class JoinBenchmark {
   std::unique_ptr<HashJoinSchema> schema_mgr_;
   std::unique_ptr<HashJoinImpl> join_;
   std::unique_ptr<ExecContext> ctx_;
+  std::unique_ptr<TaskScheduler> scheduler_;
 
   struct {
     uint64_t num_probe_rows;
