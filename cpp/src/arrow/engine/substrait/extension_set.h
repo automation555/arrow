@@ -22,15 +22,37 @@
 #include <unordered_map>
 #include <vector>
 
+#include "arrow/compute/function.h"
+#include "arrow/compute/exec/expression.h"
 #include "arrow/engine/substrait/visibility.h"
 #include "arrow/type_fwd.h"
 #include "arrow/util/optional.h"
 #include "arrow/util/string_view.h"
 
 #include "arrow/util/hash_util.h"
+#include "substrait/expression.pb.h"  // IWYU pragma: export
 
 namespace arrow {
 namespace engine {
+
+class ExtensionSet;
+using ArrowToSubstrait = std::function<Result<substrait::Expression::ScalarFunction>(const arrow::compute::Expression::Call&, arrow::engine::ExtensionSet*)>;
+using SubstraitToArrow = std::function<Result<arrow::compute::Expression>(const substrait::Expression::ScalarFunction&)>;
+
+class FunctionMapping {
+
+  std::unordered_map<std::string, SubstraitToArrow> substrait_to_arrow;
+  std::unordered_map<std::string, ArrowToSubstrait> arrow_to_substrait;
+
+  // Registration API
+  Status AddArrowToSubstrait(std::string arrow_function_name, ArrowToSubstrait conversion_func);
+  Status AddSubstraitToArrow(std::string substrait_function_name, SubstraitToArrow conversion_func);
+
+  public: 
+  Result<SubstraitToArrow> GetArrowFromSubstrait(std::string name) const;
+  Result<ArrowToSubstrait> GetSubstraitFromArrow(std::string name) const;
+};
+
 
 /// Substrait identifies functions and custom data types using a (uri, name) pair.
 ///
@@ -89,6 +111,7 @@ class ARROW_ENGINE_EXPORT ExtensionIdRegistry {
     Id id;
     const std::string& function_name;
   };
+  arrow::engine::FunctionMapping functions_map;
   virtual util::optional<FunctionRecord> GetFunction(Id) const = 0;
   virtual util::optional<FunctionRecord> GetFunction(
       util::string_view arrow_function_name) const = 0;
@@ -243,7 +266,7 @@ class ARROW_ENGINE_EXPORT ExtensionSet {
   /// value larger than the actual number of functions. This behavior may change in the
   /// future; see ARROW-15583.
   std::size_t num_functions() const { return functions_.size(); }
-
+  
  private:
   const ExtensionIdRegistry* registry_;
 
@@ -261,11 +284,17 @@ class ARROW_ENGINE_EXPORT ExtensionSet {
   // Map from function names to anchor values.  Used during Arrow->Substrait
   // and built as the plan is created.
   std::unordered_map<Id, uint32_t, IdHashEq, IdHashEq> functions_map_;
-
+    
   Status CheckHasUri(util::string_view uri);
   void AddUri(std::pair<uint32_t, util::string_view> uri);
-  Status AddUri(Id id);
+  Status AddUri(Id id); 
+
+ public:
+    FunctionMapping GetFunctionMap() const { return registry_->functions_map;}
+
 };
+
+
 
 }  // namespace engine
 }  // namespace arrow
