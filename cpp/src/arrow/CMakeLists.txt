@@ -380,6 +380,7 @@ if(ARROW_COMPUTE)
        compute/api_vector.cc
        compute/cast.cc
        compute/exec.cc
+       compute/exec/accumulation_queue.cc
        compute/exec/aggregate_node.cc
        compute/exec/bloom_filter.cc
        compute/exec/exec_plan.cc
