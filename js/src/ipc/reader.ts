@@ -46,6 +46,7 @@ import {
     isFileHandle, isFetchResponse,
     isReadableDOMStream, isReadableNodeStream
 } from '../util/compat.js';
+import { compressionRegistry } from './compression.js';
 
 /** @ignore */ export type FromArg0 = ArrowJSONLike;
 /** @ignore */ export type FromArg1 = PromiseLike<ArrowJSONLike>;
@@ -147,7 +148,7 @@ export class RecordBatchReader<T extends TypeMap = any> extends ReadableInterop<
     public static from<T extends TypeMap = any>(source: FromArg1): Promise<RecordBatchStreamReader<T>>;
     public static from<T extends TypeMap = any>(source: FromArg2): RecordBatchFileReader<T> | RecordBatchStreamReader<T>;
     public static from<T extends TypeMap = any>(source: FromArg3): Promise<RecordBatchFileReader<T> | RecordBatchStreamReader<T>>;
-    public static from<T extends TypeMap = any>(source: FromArg4): Promise<AsyncRecordBatchFileReader<T> | AsyncRecordBatchStreamReader<T>>;
+    public static from<T extends TypeMap = any>(source: FromArg4): Promise<RecordBatchFileReader<T> | AsyncRecordBatchReaders<T>>;
     public static from<T extends TypeMap = any>(source: FromArg5): Promise<AsyncRecordBatchFileReader<T> | AsyncRecordBatchStreamReader<T>>;
     /** @nocollapse */
     public static from<T extends TypeMap = any>(source: any) {
@@ -352,12 +353,24 @@ abstract class RecordBatchReaderImpl<T extends TypeMap = any> implements RecordB
         return this;
     }
 
-    protected _loadRecordBatch(header: metadata.RecordBatch, body: any) {
+    protected _loadRecordBatch(header: metadata.RecordBatch, body: Uint8Array) {
+        if (header.compression) {
+            const codec = compressionRegistry.get(header.compression);
+            if (codec?.decode) {
+                // TODO: does this need to be offset by 8 bytes? Since the uncompressed length is
+                // written in the first 8 bytes:
+                // https://github.com/apache/arrow/blob/1fc251f18d5b48f0c9fe8af8168237e7e6d05a45/format/Message.fbs#L59-L65
+                body = codec.decode(body);
+            } else {
+                throw new Error('Record batch is compressed but codec not found');
+            }
+        }
+
         const children = this._loadVectors(header, body, this.schema.fields);
         const data = makeData({ type: new Struct(this.schema.fields), length: header.length, children });
         return new RecordBatch(this.schema, data);
     }
-    protected _loadDictionaryBatch(header: metadata.DictionaryBatch, body: any) {
+    protected _loadDictionaryBatch(header: metadata.DictionaryBatch, body: Uint8Array) {
         const { id, isDelta } = header;
         const { dictionaries, schema } = this;
         const dictionary = dictionaries.get(id);
@@ -370,7 +383,7 @@ abstract class RecordBatchReaderImpl<T extends TypeMap = any> implements RecordB
         }
         return dictionary.memoize();
     }
-    protected _loadVectors(header: metadata.RecordBatch, body: any, types: (Field | DataType)[]) {
+    protected _loadVectors(header: metadata.RecordBatch, body: Uint8Array, types: (Field | DataType)[]) {
         return new VectorLoader(body, header.nodes, header.buffers, this.dictionaries).visitMany(types);
     }
 }
