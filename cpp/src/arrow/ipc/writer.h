@@ -103,10 +103,7 @@ class ARROW_EXPORT RecordBatchWriter {
   /// \return Status
   virtual Status WriteRecordBatch(
       const RecordBatch& batch,
-      const std::shared_ptr<const KeyValueMetadata>& custom_metadata) {
-    return Status::NotImplemented(
-        "Write record batch with custom metadata not implemented");
-  }
+      const std::shared_ptr<const KeyValueMetadata>& custom_metadata);
 
   /// \brief Write possibly-chunked table by creating sequence of record batches
   /// \param[in] table table to write
@@ -185,6 +182,19 @@ Result<std::shared_ptr<RecordBatchWriter>> MakeFileWriter(
     const std::shared_ptr<const KeyValueMetadata>& metadata = NULLPTR);
 
 /// @}
+
+ARROW_DEPRECATED("Deprecated in 3.0.0. Use MakeStreamWriter")
+ARROW_EXPORT
+Result<std::shared_ptr<RecordBatchWriter>> NewStreamWriter(
+    io::OutputStream* sink, const std::shared_ptr<Schema>& schema,
+    const IpcWriteOptions& options = IpcWriteOptions::Defaults());
+
+ARROW_DEPRECATED("Deprecated in 2.0.0. Use MakeFileWriter")
+ARROW_EXPORT
+Result<std::shared_ptr<RecordBatchWriter>> NewFileWriter(
+    io::OutputStream* sink, const std::shared_ptr<Schema>& schema,
+    const IpcWriteOptions& options = IpcWriteOptions::Defaults(),
+    const std::shared_ptr<const KeyValueMetadata>& metadata = NULLPTR);
 
 /// \brief Low-level API for writing a record batch (without schema)
 /// to an OutputStream as encapsulated IPC message. See Arrow format

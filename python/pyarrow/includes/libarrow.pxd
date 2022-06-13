@@ -54,13 +54,6 @@ cdef extern from "arrow/util/decimal.h" namespace "arrow" nogil:
     cdef cppclass CDecimal256" arrow::Decimal256":
         c_string ToString(int32_t scale) const
 
-cdef extern from "arrow/util/optional.h" namespace "arrow::util" nogil:
-    cdef cppclass c_optional"arrow::util::optional"[T]:
-        c_bool has_value()
-        T value()
-        c_optional(T&)
-        c_optional& operator=[U](U&)
-
 
 cdef extern from "arrow/config.h" namespace "arrow" nogil:
     cdef cppclass CBuildInfo" arrow::BuildInfo":
@@ -86,11 +79,6 @@ cdef extern from "arrow/config.h" namespace "arrow" nogil:
         c_string detected_simd_level
 
     CRuntimeInfo GetRuntimeInfo()
-
-
-cdef extern from "arrow/util/future.h" namespace "arrow" nogil:
-    cdef cppclass CFuture_Void" arrow::Future<>":
-        CStatus status()
 
 
 cdef extern from "arrow/api.h" namespace "arrow" nogil:
@@ -805,6 +793,11 @@ cdef extern from "arrow/api.h" namespace "arrow" nogil:
 
         shared_ptr[CRecordBatch] Slice(int64_t offset)
         shared_ptr[CRecordBatch] Slice(int64_t offset, int64_t length)
+
+    cdef cppclass CRecordBatchWithMetadata" arrow::RecordBatchWithMetadata":
+        shared_ptr[CRecordBatch] batch
+        # The struct in C++ does not actually have these two `const` qualifiers, but adding `const` gets Cython to not complain
+        const shared_ptr[const CKeyValueMetadata] custom_metadata
 
     cdef cppclass CTable" arrow::Table":
         CTable(const shared_ptr[CSchema]& schema,
@@ -1545,6 +1538,9 @@ cdef extern from "arrow/ipc/api.h" namespace "arrow::ipc" nogil:
     cdef cppclass CRecordBatchWriter" arrow::ipc::RecordBatchWriter":
         CStatus Close()
         CStatus WriteRecordBatch(const CRecordBatch& batch)
+        CStatus WriteRecordBatch(
+            const CRecordBatch& batch,
+            const shared_ptr[const CKeyValueMetadata]& metadata)
         CStatus WriteTable(const CTable& table, int64_t max_chunksize)
 
         CIpcWriteStats stats()
@@ -1579,6 +1575,8 @@ cdef extern from "arrow/ipc/api.h" namespace "arrow::ipc" nogil:
         int num_record_batches()
 
         CResult[shared_ptr[CRecordBatch]] ReadRecordBatch(int i)
+
+        CResult[CRecordBatchWithMetadata] ReadRecordBatchWithCustomMetadata(int i)
 
         CIpcReadStats stats()
 
@@ -1845,10 +1843,6 @@ cdef extern from "arrow/compute/api.h" namespace "arrow::compute" nogil:
         int num_args
         c_bool is_varargs
 
-        CArity()
-
-        CArity(int num_args, c_bool is_varargs)
-
     cdef enum FunctionKind" arrow::compute::Function::Kind":
         FunctionKind_SCALAR" arrow::compute::Function::SCALAR"
         FunctionKind_VECTOR" arrow::compute::Function::VECTOR"
@@ -1888,9 +1882,6 @@ cdef extern from "arrow/compute/api.h" namespace "arrow::compute" nogil:
         const CFunctionDoc& doc() const
         int num_kernels() const
         CResult[CDatum] Execute(const vector[CDatum]& args,
-                                const CFunctionOptions* options,
-                                CExecContext* ctx) const
-        CResult[CDatum] Execute(const CExecBatch& args,
                                 const CFunctionOptions* options,
                                 CExecContext* ctx) const
 
@@ -1981,14 +1972,10 @@ cdef extern from "arrow/compute/api.h" namespace "arrow::compute" nogil:
     cdef cppclass CRoundTemporalOptions \
             "arrow::compute::RoundTemporalOptions"(CFunctionOptions):
         CRoundTemporalOptions(int multiple, CCalendarUnit unit,
-                              c_bool week_starts_monday,
-                              c_bool ceil_is_strictly_greater,
-                              c_bool calendar_based_origin)
+                              c_bool week_starts_monday)
         int multiple
         CCalendarUnit unit
         c_bool week_starts_monday
-        c_bool ceil_is_strictly_greater
-        c_bool calendar_based_origin
 
     cdef cppclass CRoundToMultipleOptions \
             "arrow::compute::RoundToMultipleOptions"(CFunctionOptions):
@@ -2259,12 +2246,6 @@ cdef extern from "arrow/compute/api.h" namespace "arrow::compute" nogil:
         int64_t pivot
         CNullPlacement null_placement
 
-    cdef cppclass CCumulativeSumOptions \
-            "arrow::compute::CumulativeSumOptions"(CFunctionOptions):
-        CCumulativeSumOptions(shared_ptr[CScalar] start, c_bool skip_nulls)
-        shared_ptr[CScalar] start
-        c_bool skip_nulls
-
     cdef cppclass CArraySortOptions \
             "arrow::compute::ArraySortOptions"(CFunctionOptions):
         CArraySortOptions(CSortOrder, CNullPlacement)
@@ -2339,10 +2320,10 @@ cdef extern from "arrow/compute/api.h" namespace "arrow::compute" nogil:
         CRandomOptions(CRandomOptions)
 
         @staticmethod
-        CRandomOptions FromSystemRandom()
+        CRandomOptions FromSystemRandom(int64_t length)
 
         @staticmethod
-        CRandomOptions FromSeed(uint64_t seed)
+        CRandomOptions FromSeed(int64_t length, uint64_t seed)
 
     cdef enum DatumType" arrow::Datum::type":
         DatumType_NONE" arrow::Datum::NONE"
@@ -2370,7 +2351,6 @@ cdef extern from "arrow/compute/api.h" namespace "arrow::compute" nogil:
         const shared_ptr[CTable]& table() const
         const shared_ptr[CScalar]& scalar() const
 
-    cdef c_string ToString(DatumType kind)
 
 cdef extern from * namespace "arrow::compute":
     # inlined from compute/function_internal.h to avoid exposing
@@ -2472,14 +2452,12 @@ cdef extern from "arrow/compute/exec/options.h" namespace "arrow::compute" nogil
     cdef cppclass CExecNodeOptions "arrow::compute::ExecNodeOptions":
         pass
 
-    cdef cppclass CTableSourceNodeOptions "arrow::compute::TableSourceNodeOptions"(CExecNodeOptions):
-        CTableSourceNodeOptions(shared_ptr[CTable] table, int64_t max_batch_size)
+    cdef cppclass CSourceNodeOptions "arrow::compute::SourceNodeOptions"(CExecNodeOptions):
+        @staticmethod
+        CResult[shared_ptr[CSourceNodeOptions]] FromTable(const CTable& table, CExecutor*)
 
     cdef cppclass CSinkNodeOptions "arrow::compute::SinkNodeOptions"(CExecNodeOptions):
         pass
-
-    cdef cppclass CFilterNodeOptions "arrow::compute::FilterNodeOptions"(CExecNodeOptions):
-        CFilterNodeOptions(CExpression, c_bool async_mode)
 
     cdef cppclass CProjectNodeOptions "arrow::compute::ProjectNodeOptions"(CExecNodeOptions):
         CProjectNodeOptions(vector[CExpression] expressions)
@@ -2529,8 +2507,6 @@ cdef extern from "arrow/compute/exec/exec_plan.h" namespace "arrow::compute" nog
         CStatus Validate()
         CStatus StopProducing()
 
-        CFuture_Void finished()
-
         vector[CExecNode*] sinks() const
         vector[CExecNode*] sources() const
 
@@ -2539,8 +2515,7 @@ cdef extern from "arrow/compute/exec/exec_plan.h" namespace "arrow::compute" nog
         const shared_ptr[CSchema]& output_schema() const
 
     cdef cppclass CExecBatch "arrow::compute::ExecBatch":
-        vector[CDatum] values
-        int64_t length
+        pass
 
     shared_ptr[CRecordBatchReader] MakeGeneratorReader(
         shared_ptr[CSchema] schema,
@@ -2700,20 +2675,3 @@ cdef extern from "arrow/util/byte_size.h" namespace "arrow::util" nogil:
     int64_t TotalBufferSize(const CChunkedArray& array)
     int64_t TotalBufferSize(const CRecordBatch& record_batch)
     int64_t TotalBufferSize(const CTable& table)
-
-ctypedef PyObject* CallbackUdf(object user_function, const CScalarUdfContext& context, object inputs)
-
-cdef extern from "arrow/python/udf.h" namespace "arrow::py":
-    cdef cppclass CScalarUdfContext" arrow::py::ScalarUdfContext":
-        CMemoryPool *pool
-        int64_t batch_length
-
-    cdef cppclass CScalarUdfOptions" arrow::py::ScalarUdfOptions":
-        c_string func_name
-        CArity arity
-        CFunctionDoc func_doc
-        vector[shared_ptr[CDataType]] input_types
-        shared_ptr[CDataType] output_type
-
-    CStatus RegisterScalarFunction(PyObject* function,
-                                   function[CallbackUdf] wrapper, const CScalarUdfOptions& options)

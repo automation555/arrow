@@ -25,7 +25,6 @@ import socket
 import time
 import threading
 import warnings
-import weakref
 
 from cython.operator cimport dereference as deref
 from cython.operator cimport postincrement
@@ -986,14 +985,18 @@ cdef class MetadataRecordBatchWriter(_CRecordBatchWriter):
         ----------
         batch : RecordBatch
         """
+        cdef:
+            shared_ptr[const CKeyValueMetadata] custom_metadata
+
         # Override superclass method to use check_flight_status so we
         # can generate FlightWriteSizeExceededError. We don't do this
         # for write_table as callers who intend to handle the error
         # and retry with a smaller batch should be working with
         # individual batches to have control.
+
         with nogil:
             check_flight_status(
-                self._writer().WriteRecordBatch(deref(batch.batch)))
+                self._writer().WriteRecordBatch(deref(batch.batch), custom_metadata))
 
     def write_table(self, Table table, max_chunksize=None, **kwargs):
         """
@@ -2121,8 +2124,7 @@ cdef CStatus _middleware_sending_headers(
             if isinstance(values, (str, bytes)):
                 values = (values,)
             # Headers in gRPC (and HTTP/1, HTTP/2) are required to be
-            # valid, lowercase ASCII.
-            header = header.lower()
+            # valid ASCII.
             if isinstance(header, str):
                 header = header.encode("ascii")
             for value in values:
@@ -2349,8 +2351,6 @@ cdef class ClientMiddleware(_Weakrefable):
             not support them or may restrict them. For gRPC, binary
             values are only allowed on headers ending in "-bin".
 
-            Header names must be lowercase ASCII.
-
         """
 
     def received_headers(self, headers):
@@ -2450,8 +2450,6 @@ cdef class ServerMiddleware(_Weakrefable):
             not support them or may restrict them. For gRPC, binary
             values are only allowed on headers ending in "-bin".
 
-            Header names must be lowercase ASCII.
-
         """
 
     def call_completed(self, exception):
@@ -2512,8 +2510,6 @@ cdef class _ServerMiddlewareWrapper(ServerMiddleware):
             # Manually merge with existing headers (since headers are
             # multi-valued)
             for key, values in more_headers.items():
-                # ARROW-16606 gRPC aborts given non-lowercase headers
-                key = key.lower()
                 if isinstance(values, (bytes, str)):
                     values = (values,)
                 headers[key].extend(values)
@@ -2522,33 +2518,6 @@ cdef class _ServerMiddlewareWrapper(ServerMiddleware):
     def call_completed(self, exception):
         for instance in self.middleware.values():
             instance.call_completed(exception)
-
-
-cdef class _FlightServerFinalizer(_Weakrefable):
-    """
-    A finalizer that shuts down the server on destruction.
-
-    See ARROW-16597. If the server is still active at interpreter
-    exit, the process may segfault.
-    """
-
-    cdef:
-        shared_ptr[PyFlightServer] server
-
-    def finalize(self):
-        cdef:
-            PyFlightServer* server = self.server.get()
-            CStatus status
-        if server == NULL:
-            return
-        try:
-            with nogil:
-                status = server.Shutdown()
-                if status.ok():
-                    status = server.Wait()
-            check_flight_status(status)
-        finally:
-            self.server.reset()
 
 
 cdef class FlightServerBase(_Weakrefable):
@@ -2577,21 +2546,19 @@ cdef class FlightServerBase(_Weakrefable):
     root_certificates : bytes optional, default None
         If enabling mutual TLS, this specifies the PEM-encoded root
         certificate used to validate client certificates.
-    middleware : dict optional, default None
-        A dictionary of :class:`ServerMiddlewareFactory` instances. The
-        string keys can be used to retrieve the middleware instance within
-        RPC handlers (see :meth:`ServerCallContext.get_middleware`).
+    middleware : list optional, default None
+        A dictionary of :class:`ServerMiddlewareFactory` items. The
+        keys are used to retrieve the middleware instance during calls
+        (see :meth:`ServerCallContext.get_middleware`).
 
     """
 
     cdef:
-        shared_ptr[PyFlightServer] server
-        object finalizer
+        unique_ptr[PyFlightServer] server
 
     def __init__(self, location=None, auth_handler=None,
                  tls_certificates=None, verify_client=None,
                  root_certificates=None, middleware=None):
-        self.finalizer = None
         if isinstance(location, (bytes, str)):
             location = Location(location)
         elif isinstance(location, (tuple, type(None))):
@@ -2659,9 +2626,6 @@ cdef class FlightServerBase(_Weakrefable):
         self.server.reset(c_server)
         with nogil:
             check_flight_status(c_server.Init(deref(c_options)))
-        cdef _FlightServerFinalizer finalizer = _FlightServerFinalizer()
-        finalizer.server = self.server
-        self.finalizer = weakref.finalize(self, finalizer.finalize)
 
     @property
     def port(self):
@@ -2883,8 +2847,8 @@ cdef class FlightServerBase(_Weakrefable):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        if self.finalizer:
-            self.finalizer()
+        self.shutdown()
+        self.wait()
 
 
 def connect(location, **kwargs):
