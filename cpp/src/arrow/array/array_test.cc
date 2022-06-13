@@ -78,6 +78,24 @@ class TestArray : public ::testing::Test {
   MemoryPool* pool_;
 };
 
+TEST_F(TestArray, ValidateFullNullableList) {
+  auto f1 = field("f1", int32(), /*nullable=*/false);
+  auto ty = list(f1);
+  auto array = ArrayFromJSON(ty, "[[0, 1, 2, null], null, [4, 5]]");
+  ASSERT_RAISES(Invalid, array->ValidateFull());
+}
+
+TEST_F(TestArray, ValidateFullNullableFixedSizeList) {
+  auto f0 = field("f0", int32(), /*nullable=*/false);
+  auto type = fixed_size_list(f0, 2);
+  auto array_nonull = ArrayFromJSON(type, "[[0, 1], [3,4], [2, 3]]");
+  auto array = ArrayFromJSON(type, "[[0, 1], null, [2, 5]]");
+  auto array_nested_null = ArrayFromJSON(type, "[[0, 1], [3, 4], [2, null]]");
+  ASSERT_OK(array_nonull->ValidateFull());
+  ASSERT_RAISES(Invalid, array->ValidateFull());
+  ASSERT_RAISES(Invalid, array_nested_null->ValidateFull());
+}
+
 TEST_F(TestArray, TestNullCount) {
   // These are placeholders
   auto data = std::make_shared<Buffer>(nullptr, 0);
@@ -696,7 +714,6 @@ TEST_F(TestArray, TestMakeEmptyArray) {
 
 TEST_F(TestArray, TestAppendArraySlice) {
   auto scalars = GetScalars();
-  ArraySpan span;
   for (const auto& scalar : scalars) {
     ARROW_SCOPED_TRACE(*scalar->type);
     ASSERT_OK_AND_ASSIGN(auto array, MakeArrayFromScalar(*scalar, 16));
@@ -705,33 +722,31 @@ TEST_F(TestArray, TestAppendArraySlice) {
     std::unique_ptr<arrow::ArrayBuilder> builder;
     ASSERT_OK(MakeBuilder(pool_, scalar->type, &builder));
 
-    span.SetMembers(*array->data());
-    ASSERT_OK(builder->AppendArraySlice(span, 0, 4));
+    ASSERT_OK(builder->AppendArraySlice(*array->data(), 0, 4));
     ASSERT_EQ(4, builder->length());
-    ASSERT_OK(builder->AppendArraySlice(span, 0, 0));
+    ASSERT_OK(builder->AppendArraySlice(*array->data(), 0, 0));
     ASSERT_EQ(4, builder->length());
-    ASSERT_OK(builder->AppendArraySlice(span, 1, 0));
+    ASSERT_OK(builder->AppendArraySlice(*array->data(), 1, 0));
     ASSERT_EQ(4, builder->length());
-    ASSERT_OK(builder->AppendArraySlice(span, 1, 4));
+    ASSERT_OK(builder->AppendArraySlice(*array->data(), 1, 4));
     ASSERT_EQ(8, builder->length());
 
-    span.SetMembers(*nulls->data());
-    ASSERT_OK(builder->AppendArraySlice(span, 0, 4));
+    ASSERT_OK(builder->AppendArraySlice(*nulls->data(), 0, 4));
     ASSERT_EQ(12, builder->length());
     if (!is_union(scalar->type->id())) {
       ASSERT_EQ(4, builder->null_count());
     }
-    ASSERT_OK(builder->AppendArraySlice(span, 0, 0));
+    ASSERT_OK(builder->AppendArraySlice(*nulls->data(), 0, 0));
     ASSERT_EQ(12, builder->length());
     if (!is_union(scalar->type->id())) {
       ASSERT_EQ(4, builder->null_count());
     }
-    ASSERT_OK(builder->AppendArraySlice(span, 1, 0));
+    ASSERT_OK(builder->AppendArraySlice(*nulls->data(), 1, 0));
     ASSERT_EQ(12, builder->length());
     if (!is_union(scalar->type->id())) {
       ASSERT_EQ(4, builder->null_count());
     }
-    ASSERT_OK(builder->AppendArraySlice(span, 1, 4));
+    ASSERT_OK(builder->AppendArraySlice(*nulls->data(), 1, 4));
     ASSERT_EQ(16, builder->length());
     if (!is_union(scalar->type->id())) {
       ASSERT_EQ(8, builder->null_count());
@@ -749,15 +764,13 @@ TEST_F(TestArray, TestAppendArraySlice) {
   {
     ASSERT_OK_AND_ASSIGN(auto array, MakeArrayOfNull(null(), 16));
     NullBuilder builder(pool_);
-
-    span.SetMembers(*array->data());
-    ASSERT_OK(builder.AppendArraySlice(span, 0, 4));
+    ASSERT_OK(builder.AppendArraySlice(*array->data(), 0, 4));
     ASSERT_EQ(4, builder.length());
-    ASSERT_OK(builder.AppendArraySlice(span, 0, 0));
+    ASSERT_OK(builder.AppendArraySlice(*array->data(), 0, 0));
     ASSERT_EQ(4, builder.length());
-    ASSERT_OK(builder.AppendArraySlice(span, 1, 0));
+    ASSERT_OK(builder.AppendArraySlice(*array->data(), 1, 0));
     ASSERT_EQ(4, builder.length());
-    ASSERT_OK(builder.AppendArraySlice(span, 1, 4));
+    ASSERT_OK(builder.AppendArraySlice(*array->data(), 1, 4));
     ASSERT_EQ(8, builder.length());
     std::shared_ptr<Array> result;
     ASSERT_OK(builder.Finish(&result));
@@ -2262,23 +2275,23 @@ struct FWBinaryAppender {
   std::vector<util::string_view> data;
 };
 
-TEST_F(TestFWBinaryArray, ArraySpanVisitor) {
+TEST_F(TestFWBinaryArray, ArrayDataVisitor) {
   auto type = fixed_size_binary(3);
 
   auto array = ArrayFromJSON(type, R"(["abc", null, "def"])");
   FWBinaryAppender appender;
-  ArraySpanVisitor<FixedSizeBinaryType> visitor;
+  ArrayDataVisitor<FixedSizeBinaryType> visitor;
   ASSERT_OK(visitor.Visit(*array->data(), &appender));
   ASSERT_THAT(appender.data, ::testing::ElementsAreArray({"abc", "(null)", "def"}));
   ARROW_UNUSED(visitor);  // Workaround weird MSVC warning
 }
 
-TEST_F(TestFWBinaryArray, ArraySpanVisitorSliced) {
+TEST_F(TestFWBinaryArray, ArrayDataVisitorSliced) {
   auto type = fixed_size_binary(3);
 
   auto array = ArrayFromJSON(type, R"(["abc", null, "def", "ghi"])")->Slice(1, 2);
   FWBinaryAppender appender;
-  ArraySpanVisitor<FixedSizeBinaryType> visitor;
+  ArrayDataVisitor<FixedSizeBinaryType> visitor;
   ASSERT_OK(visitor.Visit(*array->data(), &appender));
   ASSERT_THAT(appender.data, ::testing::ElementsAreArray({"(null)", "def"}));
   ARROW_UNUSED(visitor);  // Workaround weird MSVC warning

@@ -28,7 +28,7 @@
 #include "arrow/util/bitmap_ops.h"
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/decimal.h"
-#include "arrow/util/int_util_overflow.h"
+#include "arrow/util/int_util_internal.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/utf8.h"
 #include "arrow/visit_data_inline.h"
@@ -52,7 +52,7 @@ struct UTF8DataValidator {
     util::InitializeUTF8();
 
     int64_t i = 0;
-    return VisitArraySpanInline<StringType>(
+    return VisitArrayDataInline<StringType>(
         data,
         [&](util::string_view v) {
           if (ARROW_PREDICT_FALSE(!util::ValidateUTF8(v))) {
@@ -83,7 +83,7 @@ struct BoundsChecker {
     using c_type = typename IntegerType::c_type;
 
     int64_t i = 0;
-    return VisitArraySpanInline<IntegerType>(
+    return VisitArrayDataInline<IntegerType>(
         data,
         [&](c_type value) {
           const auto v = static_cast<int64_t>(value);
@@ -104,6 +104,7 @@ struct BoundsChecker {
 struct ValidateArrayImpl {
   const ArrayData& data;
   const bool full_validation;
+  const bool nullable;
 
   Status Validate() {
     if (data.type == nullptr) {
@@ -173,7 +174,7 @@ struct ValidateArrayImpl {
 
     if (full_validation) {
       using c_type = typename Date64Type::c_type;
-      return VisitArraySpanInline<Date64Type>(
+      return VisitArrayDataInline<Date64Type>(
           data,
           [&](c_type date) {
             constexpr c_type kFullDayMillis = 1000 * 60 * 60 * 24;
@@ -193,7 +194,7 @@ struct ValidateArrayImpl {
 
     if (full_validation) {
       using c_type = typename Time32Type::c_type;
-      return VisitArraySpanInline<Time32Type>(
+      return VisitArrayDataInline<Time32Type>(
           data,
           [&](c_type time) {
             constexpr c_type kFullDaySeconds = 60 * 60 * 24;
@@ -221,7 +222,7 @@ struct ValidateArrayImpl {
 
     if (full_validation) {
       using c_type = typename Time64Type::c_type;
-      return VisitArraySpanInline<Time64Type>(
+      return VisitArrayDataInline<Time64Type>(
           data,
           [&](c_type time) {
             constexpr c_type kFullDayMicro = 1000000LL * 60 * 60 * 24;
@@ -271,7 +272,7 @@ struct ValidateArrayImpl {
                              ") multiplied by the value size (", list_size, ")");
     }
 
-    const Status child_valid = RecurseInto(values);
+    const Status child_valid = RecurseInto(values, type.value_field()->nullable());
     if (!child_valid.ok()) {
       return Status::Invalid("Fixed size list child array invalid: ",
                              child_valid.ToString());
@@ -285,7 +286,7 @@ struct ValidateArrayImpl {
       const auto& field_data = *data.child_data[i];
 
       // Validate child first, to catch nonsensical length / offset etc.
-      const Status field_valid = RecurseInto(field_data);
+      const Status field_valid = RecurseInto(field_data, type.field(i)->nullable());
       if (!field_valid.ok()) {
         return Status::Invalid("Struct child array #", i,
                                " invalid: ", field_valid.ToString());
@@ -312,7 +313,7 @@ struct ValidateArrayImpl {
       const auto& field_data = *data.child_data[i];
 
       // Validate children first, to catch nonsensical length / offset etc.
-      const Status field_valid = RecurseInto(field_data);
+      const Status field_valid = RecurseInto(field_data, type.field(i)->nullable());
       if (!field_valid.ok()) {
         return Status::Invalid("Union child array #", i,
                                " invalid: ", field_valid.ToString());
@@ -425,8 +426,8 @@ struct ValidateArrayImpl {
     return data.buffers[index] != nullptr && data.buffers[index]->address() != 0;
   }
 
-  Status RecurseInto(const ArrayData& related_data) {
-    ValidateArrayImpl impl{related_data, full_validation};
+  Status RecurseInto(const ArrayData& related_data, bool nullable = true) {
+    ValidateArrayImpl impl{related_data, full_validation, nullable};
     return impl.Validate();
   }
 
@@ -509,22 +510,23 @@ struct ValidateArrayImpl {
     }
 
     if (full_validation) {
-      if (data.null_count != kUnknownNullCount) {
-        int64_t actual_null_count;
-        if (HasValidityBitmap(data.type->id()) && data.buffers[0]) {
-          // Do not call GetNullCount() as it would also set the `null_count` member
-          actual_null_count = data.length - CountSetBits(data.buffers[0]->data(),
-                                                         data.offset, data.length);
-        } else if (data.type->storage_id() == Type::NA) {
-          actual_null_count = data.length;
-        } else {
-          actual_null_count = 0;
-        }
-        if (actual_null_count != data.null_count) {
-          return Status::Invalid("null_count value (", data.null_count,
-                                 ") doesn't match actual number of nulls in array (",
-                                 actual_null_count, ")");
-        }
+      int64_t actual_null_count;
+      if (HasValidityBitmap(data.type->id()) && data.buffers[0]) {
+        // Do not call GetNullCount() as it would also set the `null_count` member
+        actual_null_count =
+            data.length - CountSetBits(data.buffers[0]->data(), data.offset, data.length);
+      } else if (data.type->storage_id() == Type::NA) {
+        actual_null_count = data.length;
+      } else {
+        actual_null_count = 0;
+      }
+      if (data.null_count != kUnknownNullCount && actual_null_count != data.null_count) {
+        return Status::Invalid("null_count value (", data.null_count,
+                               ") doesn't match actual number of nulls in array (",
+                               actual_null_count, ")");
+      }
+      if (!nullable && actual_null_count > 0) {
+        return Status::Invalid("Null found but field is not nullable");
       }
     }
     return Status::OK();
@@ -580,7 +582,7 @@ struct ValidateArrayImpl {
   template <typename ListType>
   Status ValidateListLike(const ListType& type) {
     const ArrayData& values = *data.child_data[0];
-    const Status child_valid = RecurseInto(values);
+    const Status child_valid = RecurseInto(values, type.value_field()->nullable());
     if (!child_valid.ok()) {
       return Status::Invalid("List child array invalid: ", child_valid.ToString());
     }
@@ -673,7 +675,7 @@ struct ValidateArrayImpl {
     using CType = typename TypeTraits<DecimalType>::CType;
     if (full_validation) {
       const int32_t precision = type.precision();
-      return VisitArraySpanInline<DecimalType>(
+      return VisitArrayDataInline<DecimalType>(
           data,
           [&](util::string_view bytes) {
             DCHECK_EQ(bytes.size(), DecimalType::kByteWidth);
@@ -699,7 +701,7 @@ struct ValidateArrayImpl {
 
 ARROW_EXPORT
 Status ValidateArray(const ArrayData& data) {
-  ValidateArrayImpl validator{data, /*full_validation=*/false};
+  ValidateArrayImpl validator{data, /*full_validation=*/false, /*nullable=*/true};
   return validator.Validate();
 }
 
@@ -708,7 +710,7 @@ Status ValidateArray(const Array& array) { return ValidateArray(*array.data()); 
 
 ARROW_EXPORT
 Status ValidateArrayFull(const ArrayData& data) {
-  return ValidateArrayImpl{data, /*full_validation=*/true}.Validate();
+  return ValidateArrayImpl{data, /*full_validation=*/true, /*nullable=*/true}.Validate();
 }
 
 ARROW_EXPORT

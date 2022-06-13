@@ -313,6 +313,10 @@ Status ValidateBatch(const RecordBatch& batch, bool full_validation) {
     if (!st.ok()) {
       return Status::Invalid("In column ", i, ": ", st.ToString());
     }
+    if (full_validation && !batch.schema()->field(i)->nullable() &&
+        array.null_count() > 0) {
+      return Status::Invalid("In column ", i, ": Null found but field is not nullable");
+    }
   }
   return Status::OK();
 }
@@ -388,13 +392,6 @@ Result<std::shared_ptr<RecordBatchReader>> RecordBatchReader::Make(
   }
 
   return std::make_shared<SimpleRecordBatchReader>(std::move(batches), schema);
-}
-
-RecordBatchReader::~RecordBatchReader() {
-  auto st = this->Close();
-  if (!st.ok()) {
-    ARROW_LOG(WARNING) << "Implicitly called RecordBatchReader::Close failed: " << st;
-  }
 }
 
 }  // namespace arrow
