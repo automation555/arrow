@@ -56,6 +56,21 @@ class ARROW_EXPORT ScalarAggregateOptions : public FunctionOptions {
   uint32_t min_count;
 };
 
+/// \brief Configure a grouped aggregation
+struct ARROW_EXPORT Aggregate {
+  /// the name of the aggregation function
+  std::string function;
+
+  /// options for the aggregation function
+  const FunctionOptions* options;
+
+  // fields to which aggregations will be applied
+  FieldRef target;
+
+  // output field name for aggregations
+  std::string name;
+};
+
 /// \brief Control count aggregate kernel behavior.
 ///
 /// By default, only non-null values are counted.
@@ -471,15 +486,6 @@ class ARROW_EXPORT Grouper {
   static Result<std::shared_ptr<ListArray>> ApplyGroupings(
       const ListArray& groupings, const Array& array,
       ExecContext* ctx = default_exec_context());
-};
-
-/// \brief Configure a grouped aggregation
-struct ARROW_EXPORT Aggregate {
-  /// the name of the aggregation function
-  std::string function;
-
-  /// options for the aggregation function
-  const FunctionOptions* options;
 };
 
 /// Internal use only: helper function for testing HashAggregateKernels.
