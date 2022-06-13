@@ -49,82 +49,50 @@ test_df <- tibble::tibble(
 
 test_that("strptime", {
   t_string <- tibble(x = c("2018-10-07 19:04:05", NA))
-  # lubridate defaults to "UTC" as timezone => t_stamp is in "UTC"
-  t_stamp_with_utc_tz <- tibble(x = c(lubridate::ymd_hms("2018-10-07 19:04:05"), NA))
-  t_stamp_with_pm_tz <- tibble(
-    x = c(lubridate::ymd_hms("2018-10-07 19:04:05", tz = "Pacific/Marquesas"), NA)
-  )
+  t_stamp <- tibble(x = c(lubridate::ymd_hms("2018-10-07 19:04:05"), NA))
 
-  # base::strptime returns a POSIXlt (a list) => we cannot use compare_dplyr_binding
-  # => we use expect_equal for the tests below
-
-  withr::with_timezone("Pacific/Marquesas", {
-    # the default value for strptime's `tz` argument is "", which is interpreted
-    # as the current timezone. we test here if the strptime binding picks up
-    # correctly the current timezone (similarly to the base R version)
-    expect_equal(
-      t_string %>%
-        record_batch() %>%
-        mutate(
-          x = strptime(x, format = "%Y-%m-%d %H:%M:%S")
-        ) %>%
-        collect(),
-      t_stamp_with_pm_tz
-    )
-  })
-
-  # adding a timezone to a timezone-naive timestamp works
-  # and since our TZ when running the test is (typically) Pacific/Marquesas
-  # this also tests that assigning a TZ different from the current session one
-  # works as expected
   expect_equal(
     t_string %>%
-      arrow_table() %>%
+      Table$create() %>%
       mutate(
-        x = strptime(x, format = "%Y-%m-%d %H:%M:%S", tz = "Pacific/Marquesas")
+        x = strptime(x)
       ) %>%
       collect(),
-    t_stamp_with_pm_tz
+    t_stamp,
+    ignore_attr = "tzone"
   )
 
   expect_equal(
     t_string %>%
       Table$create() %>%
       mutate(
-        x = strptime(x, tz = "UTC")
+        x = strptime(x, format = "%Y-%m-%d %H:%M:%S")
       ) %>%
       collect(),
-    t_stamp_with_utc_tz
+    t_stamp,
+    ignore_attr = "tzone"
   )
 
   expect_equal(
     t_string %>%
       Table$create() %>%
       mutate(
-        x = strptime(x, format = "%Y-%m-%d %H:%M:%S", tz = "UTC")
+        x = strptime(x, format = "%Y-%m-%d %H:%M:%S", unit = "ns")
       ) %>%
       collect(),
-    t_stamp_with_utc_tz
+    t_stamp,
+    ignore_attr = "tzone"
   )
 
   expect_equal(
     t_string %>%
       Table$create() %>%
       mutate(
-        x = strptime(x, format = "%Y-%m-%d %H:%M:%S", unit = "ns", tz = "UTC")
+        x = strptime(x, format = "%Y-%m-%d %H:%M:%S", unit = "s")
       ) %>%
       collect(),
-    t_stamp_with_utc_tz
-  )
-
-  expect_equal(
-    t_string %>%
-      Table$create() %>%
-      mutate(
-        x = strptime(x, format = "%Y-%m-%d %H:%M:%S", unit = "s", tz = "UTC")
-      ) %>%
-      collect(),
-    t_stamp_with_utc_tz
+    t_stamp,
+    ignore_attr = "tzone"
   )
 
   tstring <- tibble(x = c("08-05-2008", NA))
@@ -140,6 +108,15 @@ test_that("strptime", {
     # R's strptime returns POSIXlt (list type)
     as.POSIXct(tstamp),
     ignore_attr = "tzone"
+  )
+})
+
+test_that("errors in strptime", {
+  # Error when tz is passed
+  x <- Expression$field_ref("x")
+  expect_error(
+    call_binding("strptime", x, tz = "PDT"),
+    "Time zone argument not supported in Arrow"
   )
 })
 
@@ -1678,22 +1655,17 @@ test_that("parse_date_time() works with year, month, and date components", {
       string_ymd = c(
         "2021-09-1", "2021/09///2", "2021.09.03", "2021,09,4", "2021:09::5",
         "2021 09   6", "21-09-07", "21/09/08", "21.09.9", "21,09,10", "21:09:11",
-        # not yet working for strings with no separators, like "20210917", "210918" or "2021Sep19
-        # no separators and %b or %B are even more complicated (and they work in
-        # lubridate). not to mention locale
-        NA
+        "20210912", "210913", NA
       ),
       string_dmy = c(
         "1-09-2021", "2/09//2021", "03.09.2021", "04,09,2021", "5:::09:2021",
         "6  09  2021", "07-09-21", "08/09/21", "9.09.21", "10,09,21", "11:09:21",
-        # not yet working for strings with no separators, like "10092021", "100921",
-        NA
+        "12092021", "130921", NA
       ),
       string_mdy = c(
         "09-01-2021", "09/2/2021", "09.3.2021", "09,04,2021", "09:05:2021",
         "09 6 2021", "09-7-21", "09/08/21", "09.9.21", "09,10,21", "09:11:21",
-        # not yet working for strings with no separators, like "09102021", "091021",
-        NA
+        "09122021", "091321", NA
       )
     )
   )
@@ -1711,13 +1683,16 @@ test_that("parse_date_time() works with year, month, and date components", {
       collect(),
     tibble::tibble(
       string_ymd = c(
-        "2021 Sep 12", "2021 September 13", "21 Sep 14", "21 September 15", NA
+        "2021 Sep 12", "2021 September 13", "21 Sep 14", "21 September 15",
+        "2021Sep16", NA
       ),
       string_dmy = c(
-        "12 Sep 2021", "13 September 2021", "14 Sep 21", "15 September 21", NA
+        "12 Sep 2021", "13 September 2021", "14 Sep 21", "15 September 21",
+        "16Sep2021", NA
       ),
       string_mdy = c(
-        "Sep 12 2021", "September 13 2021", "Sep 14 21", "September 15 21", NA
+        "Sep 12 2021", "September 13 2021", "Sep 14 21", "September 15 21",
+        "Sep1621", NA
       )
     )
   )
@@ -1741,20 +1716,6 @@ test_that("parse_date_time() works with a mix of formats and orders", {
       ) %>%
       collect(),
     test_df
-  )
-})
-
-test_that("parse_date_time() doesn't work with hour, minutes, and second components", {
-  test_dates_times <- tibble(
-    date_times = c("09-01-17 12:34:56", NA)
-  )
-
-  expect_warning(
-    test_dates_times %>%
-      arrow_table() %>%
-      mutate(parsed_date_ymd = parse_date_time(date_times, orders = "ymd_HMS")) %>%
-      collect(),
-    '"ymd_HMS" `orders` not supported in Arrow'
   )
 })
 
@@ -1806,7 +1767,10 @@ test_that("ym, my & yq parsers", {
     my_string = c("05-2022", "02/2022", "03.22", "12//1979", "09.88", NA),
     yq_string = c("2007.3", "1970.2", "2020.1", "2009.4", "1975.1", NA),
     yq_numeric = c(2007.3, 1970.2, 2020.1, 2009.4, 1975.1, NA),
-    yq_space = c("2007 3", "1970 2", "2020 1", "2009 4", "1975 1", NA)
+    yq_space = c("2007 3", "1970 2", "2020 1", "2009 4", "1975 1", NA),
+    qy_string = c("3.2007", "2.1970", "1.2020", "4.2009", "1.1975", NA),
+    qy_numeric = c(3.2007, 2.1970, 1.2020, 4.2009, 1.1975, NA),
+    qy_space = c("3 2007", "2 1970", "1 2020", "4 2009", "1 1975", NA)
   )
 
   # these functions' internals use some string processing which requires the
@@ -1829,7 +1793,10 @@ test_that("ym, my & yq parsers", {
         my_date2 = parse_date_time(my_string, orders = c("my", "myd")),
         yq_date_from_string2 = parse_date_time(yq_string, orders = "yq"),
         yq_date_from_numeric2 = parse_date_time(yq_numeric, orders = "yq"),
-        yq_date_from_string_with_space2 = parse_date_time(yq_space, orders = "yq")
+        yq_date_from_string_with_space2 = parse_date_time(yq_space, orders = "yq"),
+        qy_date_from_string = parse_date_time(qy_string, orders = "qy"),
+        qy_date_from_numeric = parse_date_time(qy_numeric, orders = "qy"),
+        qy_date_from_string_with_space = parse_date_time(qy_space, orders = "qy")
       ) %>%
       collect(),
     test_df
@@ -1851,9 +1818,7 @@ test_that("lubridate's fast_strptime", {
       collect(),
     tibble(
       x = c("2018-10-07 19:04:05", "2022-05-17 21:23:45", NA)
-    )#,
-    # arrow does not preserve the `tzone` attribute
-    # test ignore_attr = TRUE
+    )
   )
 
   # R object
@@ -1870,8 +1835,7 @@ test_that("lubridate's fast_strptime", {
       collect(),
     tibble(
       x = c("2018-10-07 19:04:05", NA)
-    )#,
-    # test ignore_attr = TRUE
+    )
   )
 
   compare_dplyr_binding(
@@ -1889,6 +1853,10 @@ test_that("lubridate's fast_strptime", {
       x = c("2018-10-07 19:04:05", "10-07-1968 19:04:05")
     )
   )
+
+  # these functions' internals use some string processing which requires the
+  # RE2 library (not available on Windows with R 3.6)
+  skip_if_not_available("re2")
 
   compare_dplyr_binding(
     .input %>%
@@ -1923,9 +1891,7 @@ test_that("lubridate's fast_strptime", {
     tibble(
       x =
         c("68-10-07 19:04:05", "69-10-07 19:04:05", NA)
-    )#,
-    # arrow does not preserve the `tzone` attribute
-    # test ignore_attr = TRUE
+    )
   )
 
   # the arrow binding errors for a value different from 68L for `cutoff_2000`
@@ -1964,4 +1930,347 @@ test_that("lubridate's fast_strptime", {
       ) %>%
       collect()
   )
+})
+
+test_that("parse_date_time with hours, minutes and seconds components", {
+  test_dates_times <- tibble(
+    ymd_hms_string =
+      c("67-01-09 12:34:56", "1970-05-22 20:13:59", "870822201359", NA),
+    ymd_hm_string =
+      c("67-01-09 12:34", "1970-05-22 20:13", "8708222013", NA),
+    ymd_h_string =
+      c("67-01-09 12", "1970-05-22 20", "87082220", NA),
+    dmy_hms_string =
+      c("09-01-67 12:34:56", "22-05-1970 20:13:59", "220887201359", NA),
+    dmy_hm_string =
+      c("09-01-67 12:34", "22-05-1970 20:13",  "2208872013", NA),
+    dmy_h_string =
+      c("09-01-67 12", "22-05-1970 20", "22088720", NA),
+    mdy_hms_string =
+      c("01-09-67 12:34:56", "05-22-1970 20:13:59", "082287201359", NA),
+    mdy_hm_string =
+      c("01-09-67 12:34", "05-22-1970 20:13", "0822872013", NA),
+    mdy_h_string =
+      c("01-09-67 12", "05-22-1970 20", "08228720", NA),
+    ydm_hms_string =
+      c("67-09-01 12:34:56", "1970-22-05 20:13:59", "872208201359", NA),
+    ydm_hm_string =
+      c("67-09-01 12:34", "1970-22-05 20:13", "8722082013", NA),
+    ydm_h_string =
+      c("67-09-01 12", "1970-22-05 20", "87220820", NA)
+  )
+  # the unseparated strings are versions of "1987-08-22 20:13:59" (with %y)
+
+  # these functions' internals use some string processing which requires the
+  # RE2 library (not available on Windows with R 3.6)
+  skip_if_not_available("re2")
+
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        ymd_hms_dttm = parse_date_time(ymd_hms_string, orders = "ymd_HMS"),
+        ymd_hm_dttm  = parse_date_time(ymd_hm_string, orders = "ymd_HM"),
+        ymd_h_dttm   = parse_date_time(ymd_h_string, orders = "ymd_H"),
+        dmy_hms_dttm = parse_date_time(dmy_hms_string, orders = "dmy_HMS"),
+        dmy_hm_dttm  = parse_date_time(dmy_hm_string, orders = "dmy_HM"),
+        dmy_h_dttm   = parse_date_time(dmy_h_string, orders = "dmy_H"),
+        mdy_hms_dttm = parse_date_time(mdy_hms_string, orders = "mdy_HMS"),
+        mdy_hm_dttm  = parse_date_time(mdy_hm_string, orders = "mdy_HM"),
+        mdy_h_dttm   = parse_date_time(mdy_h_string, orders = "mdy_H"),
+        ydm_hms_dttm = parse_date_time(ydm_hms_string, orders = "ydm_HMS"),
+        ydm_hm_dttm  = parse_date_time(ydm_hm_string, orders = "ydmHM"),
+        ydm_h_dttm   = parse_date_time(ydm_h_string, orders = "ydmH")
+      ) %>%
+      collect(),
+    test_dates_times
+  )
+
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        ymd_hms_dttm =
+          parse_date_time(ymd_hms_string, orders = "ymd_HMS", tz = "Pacific/Marquesas"),
+        ymd_hm_dttm =
+          parse_date_time(ymd_hm_string, orders = "ymd_HM", tz = "Pacific/Marquesas"),
+        ymd_h_dttm =
+          parse_date_time(ymd_h_string, orders = "ymd_H", tz = "Pacific/Marquesas"),
+        dmy_hms_dttm =
+          parse_date_time(dmy_hms_string, orders = "dmy_HMS", tz = "Pacific/Marquesas"),
+        dmy_hm_dttm =
+          parse_date_time(dmy_hm_string, orders = "dmy_HM", tz = "Pacific/Marquesas"),
+        dmy_h_dttm =
+          parse_date_time(dmy_h_string, orders = "dmy_H", tz = "Pacific/Marquesas"),
+        mdy_hms_dttm =
+          parse_date_time(mdy_hms_string, orders = "mdy_HMS", tz = "Pacific/Marquesas"),
+        mdy_hm_dttm =
+          parse_date_time(mdy_hm_string, orders = "mdy_HM", tz = "Pacific/Marquesas"),
+        mdy_h_dttm =
+          parse_date_time(mdy_h_string, orders = "mdy_H", tz = "Pacific/Marquesas"),
+        ydm_hms_dttm =
+          parse_date_time(ydm_hms_string, orders = "ydm_HMS", tz = "Pacific/Marquesas"),
+        ydm_hm_dttm =
+          parse_date_time(ydm_hm_string, orders = "ydm_HM", tz = "Pacific/Marquesas"),
+        ydm_h_dttm =
+          parse_date_time(ydm_h_string, orders = "ydm_H", tz = "Pacific/Marquesas")
+      ) %>%
+      collect(),
+    test_dates_times
+  )
+
+  # test ymd_ims
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        ymd_ims_dttm =
+          parse_date_time(
+            ymd_ims_string,
+            orders = "ymd_IMS",
+            # lubridate is chatty and will warn 1 format failed to parse
+            quiet = TRUE
+          )
+      ) %>%
+      collect(),
+    tibble(
+     ymd_ims_string =
+       c("67-01-09 9:34:56", "1970-05-22 10:13:59", "19870822171359", NA)
+   )
+  )
+
+  # test truncated formats
+  test_truncation_df <-  tibble(
+    truncated_ymd_string =
+      c(
+        "2022-05-19 13:46:51",
+        "2022-05-18 13:46",
+        "2022-05-17 13",
+        "2022-05-16"
+      )
+  )
+
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        dttm =
+          parse_date_time(
+            truncated_ymd_string,
+            orders = "ymd_HMS",
+            truncated = 3
+          )
+      ) %>%
+      collect(),
+    test_truncation_df
+  )
+
+  # values for truncated greater than nchar(orders) - 3 not supported in Arrow
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        dttm =
+          parse_date_time(
+            truncated_ymd_string,
+            orders = "ymd_HMS",
+            truncated = 5
+          )
+      ) %>%
+      collect(),
+    test_truncation_df,
+    warning = "a value for `truncated` > 4 not supported in Arrow"
+  )
+
+
+  # we need expect_warning twice as both the arrow pipeline (because quiet =
+  # FALSE is not supported) and the fallback dplyr/lubridate one throw
+  # warnings (the lubridate one because quiet is FALSE)
+  expect_warning(
+    expect_warning(
+      tibble(x = c("2022-05-19 13:46:51")) %>%
+        arrow_table() %>%
+        mutate(
+          x_dttm = parse_date_time(x, orders = "dmy_HMS", quiet = FALSE)
+        ) %>%
+        collect(),
+      "`quiet = FALSE` not supported in Arrow"
+    ),
+    "All formats failed to parse"
+  )
+
+  test_dates_times2 <- tibble(
+    ymd_hms_string =
+      c("67-Jan-09 12:34:56", "1970-June-22 20:13:59", "87Aug22201359", NA),
+    ymd_hm_string =
+      c("67-Jan-09 12:34", "1970-June-22 20:13", "87Aug222013", NA),
+    ymd_h_string =
+      c("67-Jan-09 12", "1970-June-22 20", "87Aug2220", NA),
+    dmy_hms_string =
+      c("09-Jan-67 12:34:56", "22-June-1970 20:13:59", "22Aug87201359", NA),
+    dmy_hm_string =
+      c("09-Jan-67 12:34", "22-June-1970 20:13", "22Aug872013", NA),
+    dmy_h_string =
+      c("09-Jan-67 12", "22-June-1970 20", "22Aug8720", NA),
+    mdy_hms_string =
+      c("Jan-09-67 12:34:56", "June-22-1970 20:13:59", "Aug2287201359", NA),
+    mdy_hm_string =
+      c("Jan-09-67 12:34", "June-22-1970 20:13", "Aug22872013", NA),
+    mdy_h_string =
+      c("Jan-09-67 12", "June-22-1970 20", "Aug228720", NA),
+    ydm_hms_string =
+      c("67-09-Jan 12:34:56", "1970-22-June 20:13:59", "8722Aug201359", NA),
+    ydm_hm_string =
+      c("67-09-Jan 12:34", "1970-22-June 20:13", "8722Aug2013", NA),
+    ydm_h_string =
+      c("67-09-Jan 12", "1970-22-June 20", "8722Aug20", NA)
+  )
+  # the unseparated strings are versions of "1987-08-22 20:13:59" (with %y)
+
+  # locale (affecting "%b% and "%B" formats) does not work properly on Windows
+  # TODO revisit once https://issues.apache.org/jira/browse/ARROW-16443 is done
+  skip_on_os("windows")
+
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        ymd_hms_dttm = parse_date_time(ymd_hms_string, orders = "ymd_HMS"),
+        ymd_hm_dttm  = parse_date_time(ymd_hm_string, orders = "ymdHM"),
+        ymd_h_dttm   = parse_date_time(ymd_h_string, orders = "ymd_H"),
+        dmy_hms_dttm = parse_date_time(dmy_hms_string, orders = "dmy_HMS"),
+        dmy_hm_dttm  = parse_date_time(dmy_hm_string, orders = "dmyHM"),
+        dmy_h_dttm   = parse_date_time(dmy_h_string, orders = "dmy_H"),
+        mdy_hms_dttm = parse_date_time(mdy_hms_string, orders = "mdy_HMS"),
+        mdy_hm_dttm  = parse_date_time(mdy_hm_string, orders = "mdyHM"),
+        mdy_h_dttm   = parse_date_time(mdy_h_string, orders = "mdy_H"),
+        ydm_hms_dttm = parse_date_time(ydm_hms_string, orders = "ydm_HMS"),
+        ydm_hm_dttm  = parse_date_time(ydm_hm_string, orders = "ydmHM"),
+        ydm_h_dttm   = parse_date_time(ydm_h_string, orders = "ydm_H")
+      ) %>%
+      collect(),
+    test_dates_times2
+  )
+})
+
+test_that("parse_date_time with `exact = TRUE`, and with regular R objects", {
+  test_df <- tibble(
+    x = c("2022-12-31 12:59:59", "2022-01-01 12:11", "2022-01-01 12", "2022-01-01", NA),
+    y = c("11/23/1998 07:00:00", "6/18/1952 0135", "2/25/1974 0523", "9/07/1985 01", NA)
+  )
+
+  # these functions' internals use some string processing which requires the
+  # RE2 library (not available on Windows with R 3.6)
+  skip_if_not_available("re2")
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        parsed_x =
+          parse_date_time(
+            x,
+            c("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d %H", "%Y-%m-%d"),
+            exact = TRUE
+          ),
+        parsed_y =
+          parse_date_time(
+            y,
+            c("%m/%d/%Y %I:%M:%S", "%m/%d/%Y %H%M", "%m/%d/%Y %H"),
+            exact = TRUE
+          )
+      ) %>%
+      collect(),
+    test_df
+  )
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        b = parse_date_time("2022-12-31 12:59:59", orders = "ymd_HMS")
+      ) %>%
+      collect(),
+    tibble(
+      a = 1
+    )
+  )
+})
+
+test_that("build_formats", {
+  # TODO finish adding tests for build_formats
+  expect_equal(
+    build_formats(c("ym", "myd", "%Y-%d-%m")),
+    c("%m-%y-%d", "%B-%y-%d", "%b-%y-%d", "%m-%Y-%d", "%B-%Y-%d",
+      "%b-%Y-%d", "%y-%d-%m", "%Y-%d-%m", "%y-%d-%B", "%Y-%d-%B", "%y-%d-%b",
+      "%Y-%d-%b", "%y-%m-%d", "%Y-%m-%d", "%y-%B-%d", "%Y-%B-%d", "%y-%b-%d",
+      "%Y-%b-%d")
+  )
+  expect_error(build_formats("abd"))
+#   a
+#   Abbreviated weekday name in the current locale. (Also matches full name)
+#
+#   A
+#   Full weekday name in the current locale. (Also matches abbreviated name).
+#
+#   You don't need to specify a and A formats explicitly. Wday is automatically handled if preproc_wday = TRUE
+#
+# b (!)
+# Abbreviated or full month name in the current locale. The C parser currently understands only English month names.
+#
+# B (!)
+# Same as b.
+#
+# d (!)
+# Day of the month as decimal number (01–31 or 0–31)
+#
+# H (!)
+# Hours as decimal number (00–24 or 0–24).
+#
+# I (!)
+# Hours as decimal number (01–12 or 1–12).
+#
+# j
+# Day of year as decimal number (001–366 or 1–366).
+#
+# q (!*)
+# Quarter (1–4). The quarter month is added to the parsed month if m element is present.
+#
+# m (!*)
+# Month as decimal number (01–12 or 1–12). For parse_date_time also matches abbreviated and full months names as b and B formats. C parser understands only English month names.
+#
+# M (!)
+# Minute as decimal number (00–59 or 0–59).
+#
+# p (!)
+# AM/PM indicator in the locale. Commonly used in conjunction with I and not with H. But lubridate's C parser accepts H format as long as hour is not greater than 12. C parser understands only English locale AM/PM indicator.
+#
+#   S (!)
+#   Second as decimal number (00–61 or 0–61), allowing for up to two leap-seconds (but POSIX-compliant implementations will ignore leap seconds).
+#
+#   OS
+#   Fractional second.
+#
+#   U
+#   Week of the year as decimal number (00–53 or 0–53) using Sunday as the first day 1 of the week (and typically with the first Sunday of the year as day 1 of week 1). The US convention.
+#
+#   w
+#   Weekday as decimal number (0–6, Sunday is 0).
+#
+#   W
+#   Week of the year as decimal number (00–53 or 0–53) using Monday as the first day of week (and typically with the first Monday of the year as day 1 of week 1). The UK convention.
+#
+#   y (!*)
+#   Year without century (00–99 or 0–99). In parse_date_time() also matches year with century (Y format).
+#
+#   Y (!)
+#   Year with century.
+#
+#   z (!*)
+#   ISO8601 signed offset in hours and minutes from UTC. For example -0800, -08:00 or -08, all represent 8 hours behind UTC. This format also matches the Z (Zulu) UTC indicator. Because base::strptime() doesn't fully support ISO8601 this format is implemented as an union of 4 formats: Ou (Z), Oz (-0800), OO (-08:00) and Oo (-08). You can use these formats as any other but it is rarely necessary. parse_date_time2() and fast_strptime() support all of these formats.
+#
+# Om (!*)
+# Matches numeric month and English alphabetic months (Both, long and abbreviated forms).
+#
+# Op (!*)
+# Matches AM/PM English indicator.
+#
+# r (*)
+# Matches Ip and H orders.
+#
+# R (*)
+# Matches HM andIMp orders.
+#
+# T (*)
+# Matches IMSp, HMS, and HMOS orders.
 })
