@@ -33,7 +33,6 @@ from pyarrow._compute import (  # noqa
     AssumeTimezoneOptions,
     CastOptions,
     CountOptions,
-    CumulativeSumOptions,
     DayOfWeekOptions,
     DictionaryEncodeOptions,
     ElementWiseAggregateOptions,
@@ -77,9 +76,6 @@ from pyarrow._compute import (  # noqa
     get_function,
     list_functions,
     _group_by,
-    # Udf
-    register_scalar_function,
-    ScalarUdfContext,
     # Expressions
     Expression,
 )
@@ -322,7 +318,7 @@ def _make_global_functions():
 _make_global_functions()
 
 
-def cast(arr, target_type, safe=True):
+def cast(arr, target_type, safe=None, options=None):
     """
     Cast array values to another data type. Can also be invoked as an array
     instance method.
@@ -334,6 +330,8 @@ def cast(arr, target_type, safe=True):
         Type to cast to
     safe : bool, default True
         Check for overflows or other unsafe conversions
+    options : CastOptions, default None
+        Additional checks pass by CastOptions
 
     Examples
     --------
@@ -346,7 +344,7 @@ def cast(arr, target_type, safe=True):
     You can use ``pyarrow.DataType`` objects to specify the target type:
 
     >>> cast(arr, pa.timestamp('ms'))
-    <pyarrow.lib.TimestampArray object at ...>
+    <pyarrow.lib.TimestampArray object at 0x7fe93c0f6910>
     [
       2010-01-01 00:00:00.000,
       2015-01-01 00:00:00.000
@@ -359,10 +357,10 @@ def cast(arr, target_type, safe=True):
     types:
 
     >>> arr.cast('timestamp[ms]')
-    <pyarrow.lib.TimestampArray object at ...>
+    <pyarrow.lib.TimestampArray object at 0x10420eb88>
     [
-      2010-01-01 00:00:00.000,
-      2015-01-01 00:00:00.000
+      1262304000000,
+      1420070400000
     ]
     >>> arr.cast('timestamp[ms]').type
     TimestampType(timestamp[ms])
@@ -373,10 +371,14 @@ def cast(arr, target_type, safe=True):
     """
     if target_type is None:
         raise ValueError("Cast target type must not be None")
-    if safe:
-        options = CastOptions.safe(target_type)
-    else:
-        options = CastOptions.unsafe(target_type)
+    if (safe is not None) and (options is not None):
+        raise ValueError(
+            "Must past only a value for 'safe' or only a value for 'options'")
+    if options is None:
+        if safe is False:
+            options = CastOptions.unsafe(target_type)
+        else:
+            options = CastOptions.safe(target_type)
     return call_function("cast", [arr], options)
 
 
@@ -449,7 +451,7 @@ def take(data, indices, *, boundscheck=True, memory_pool=None):
     >>> arr = pa.array(["a", "b", "c", None, "e", "f"])
     >>> indices = pa.array([0, None, 4, 3])
     >>> arr.take(indices)
-    <pyarrow.lib.StringArray object at ...>
+    <pyarrow.lib.StringArray object at 0x7ffa4fc7d368>
     [
       "a",
       null,
@@ -487,7 +489,7 @@ def fill_null(values, fill_value):
     >>> arr = pa.array([1, 2, None, 3], type=pa.int8())
     >>> fill_value = pa.scalar(5, type=pa.int8())
     >>> arr.fill_null(fill_value)
-    <pyarrow.lib.Int8Array object at ...>
+    pyarrow.lib.Int8Array object at 0x7f95437f01a0>
     [
       1,
       2,
@@ -532,7 +534,7 @@ def top_k_unstable(values, k, sort_keys=None, *, memory_pool=None):
     >>> import pyarrow.compute as pc
     >>> arr = pa.array(["a", "b", "c", None, "e", "f"])
     >>> pc.top_k_unstable(arr, k=3)
-    <pyarrow.lib.UInt64Array object at ...>
+    <pyarrow.lib.UInt64Array object at 0x7fdcb19d7f30>
     [
       5,
       4,
@@ -578,7 +580,7 @@ def bottom_k_unstable(values, k, sort_keys=None, *, memory_pool=None):
     >>> import pyarrow.compute as pc
     >>> arr = pa.array(["a", "b", "c", None, "e", "f"])
     >>> pc.bottom_k_unstable(arr, k=3)
-    <pyarrow.lib.UInt64Array object at ...>
+    <pyarrow.lib.UInt64Array object at 0x7fdcb19d7fa0>
     [
       0,
       1,
@@ -593,32 +595,6 @@ def bottom_k_unstable(values, k, sort_keys=None, *, memory_pool=None):
         sort_keys = map(lambda key_name: (key_name, "ascending"), sort_keys)
     options = SelectKOptions(k, sort_keys)
     return call_function("select_k_unstable", [values], options, memory_pool)
-
-
-def random(n, *, initializer='system', options=None, memory_pool=None):
-    """
-    Generate numbers in the range [0, 1).
-
-    Generated values are uniformly-distributed, double-precision
-    in range [0, 1). Algorithm and seed can be changed via RandomOptions.
-
-    Parameters
-    ----------
-    n : int
-        Number of values to generate, must be greater than or equal to 0
-    initializer : int or str
-        How to initialize the underlying random generator.
-        If an integer is given, it is used as a seed.
-        If "system" is given, the random generator is initialized with
-        a system-specific source of (hopefully true) randomness.
-        Other values are invalid.
-    options : pyarrow.compute.RandomOptions, optional
-        Alternative way of passing options.
-    memory_pool : pyarrow.MemoryPool, optional
-        If not passed, will allocate memory from the default memory pool.
-    """
-    options = RandomOptions(initializer=initializer)
-    return call_function("random", [], options, memory_pool, length=n)
 
 
 def field(*name_or_index):
