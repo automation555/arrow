@@ -28,57 +28,25 @@ register_bindings_datetime <- function() {
 }
 
 register_bindings_datetime_utility <- function() {
-  register_binding("strptime", function(x,
-                                        format = "%Y-%m-%d %H:%M:%S",
-                                        tz = "",
+  register_binding("strptime", function(x, format = "%Y-%m-%d %H:%M:%S", tz = NULL,
                                         unit = "ms") {
     # Arrow uses unit for time parsing, strptime() does not.
     # Arrow has no default option for strptime (format, unit),
     # we suggest following format = "%Y-%m-%d %H:%M:%S", unit = MILLI/1L/"ms",
     # (ARROW-12809)
 
-    unit <- make_valid_time_unit(
-      unit,
-      c(valid_time64_units, valid_time32_units)
-    )
-
-    output <- build_expr(
-      "strptime",
-      x,
-      options =
-        list(
-          format = format,
-          unit = unit,
-          error_is_null = TRUE
-        )
-    )
-
-    if (tz == "") {
-      tz <- Sys.timezone()
+    # ParseTimestampStrptime currently ignores the timezone information (ARROW-12820).
+    # Stop if tz is provided.
+    if (is.character(tz)) {
+      arrow_not_supported("Time zone argument")
     }
 
-    # if a timestamp does not contain timezone information (i.e. it is
-    # "timezone-naive") we can attach timezone information (i.e. convert it into
-    # a "timezone-aware" timestamp) with `assume_timezone`
-    # if we want to cast to a different timezone, we can only do it for
-    # timezone-aware timestamps, not for timezone-naive ones
-    if (!is.null(tz)) {
-      output <- build_expr(
-        "assume_timezone",
-        output,
-        options =
-          list(
-            timezone = tz
-          )
-      )
-    }
-    output
+    unit <- make_valid_time_unit(unit, c(valid_time64_units, valid_time32_units))
+
+    build_expr("strptime", x, options = list(format = format, unit = unit, error_is_null = TRUE))
   })
 
-  register_binding("strftime", function(x,
-                                        format = "",
-                                        tz = "",
-                                        usetz = FALSE) {
+  register_binding("strftime", function(x, format = "", tz = "", usetz = FALSE) {
     if (usetz) {
       format <- paste(format, "%Z")
     }
@@ -520,105 +488,34 @@ register_bindings_duration_helpers <- function() {
 register_bindings_datetime_parsers <- function() {
   register_binding("parse_date_time", function(x,
                                                orders,
-                                               tz = "UTC") {
-
-    # each order is translated into possible formats
-    formats <- build_formats(orders)
-
-    x <- x$cast(string())
-
-    # make all separators (non-letters and non-numbers) into "-"
-    x <- call_binding("gsub", "[^A-Za-z0-9]", "-", x)
-    # collapse multiple separators into a single one
-    x <- call_binding("gsub", "-{2,}", "-", x)
-
-    # we need to transform `x` when orders are `ym`, `my`, and `yq`
-    # for `ym` and `my` orders we add a day ("01")
-    augmented_x <- NULL
-    if (any(orders %in% c("ym", "my"))) {
-      augmented_x <- call_binding("paste0", x, "-01")
+                                               tz = "UTC",
+                                               truncated = 0,
+                                               quiet = TRUE,
+                                               exact = FALSE) {
+    if (!quiet) {
+      arrow_not_supported("`quiet = FALSE`")
     }
 
-    # for `yq` we need to transform the quarter into the start month (lubridate
-    # behaviour) and then add 01 to parse to the first day of the quarter
-    augmented_x2 <- NULL
-    if (any(orders == "yq")) {
-      # extract everything that comes after the `-` separator, i.e. the quarter
-      # (e.g. 4 from 2022-4)
-      quarter_x <- call_binding("gsub", "^.*?-", "", x)
-      # we should probably error if quarter is not in 1:4
-      # extract everything that comes before the `-`, i.e. the year (e.g. 2002
-      # in 2002-4)
-      year_x <- call_binding("gsub", "-.*$", "", x)
-      quarter_x <- quarter_x$cast(int32())
-      month_x <- (quarter_x - 1) * 3 + 1
-      augmented_x2 <- call_binding("paste0", year_x, "-", month_x, "-01")
+    if (truncated > 0) {
+      if (truncated > (nchar(orders) - 3)) {
+        arrow_not_supported(paste0("a value for `truncated` > ", nchar(orders) - 3))
+      }
+      # build several orders for truncated formats
+      orders <- map_chr(0:truncated, ~ substr(orders, start = 1, stop = nchar(orders) - .x))
     }
 
-    # TODO figure out how to parse strings that have no separators
-    # https://issues.apache.org/jira/browse/ARROW-16446
-    # we could insert separators at the "likely" positions, but it might be
-    # tricky given the possible combinations between dmy formats + locale
-
-    # build a list of expressions for each format
-    parse_attempt_expressions <- map(
-      formats,
-      ~ build_expr(
-        "strptime",
-        x,
-        options = list(
-          format = .x,
-          unit = 0L,
-          error_is_null = TRUE
-        )
-      )
-    )
-
-    # build separate expression lists of parsing attempts for the orders that
-    # need an augmented `x`
-    # list for attempts when orders %in% c("ym", "my")
-    parse_attempt_exp_augmented_x <- list()
-
-    if (!is.null(augmented_x)) {
-      parse_attempt_exp_augmented_x <- map(
-        formats,
-        ~ build_expr(
-          "strptime",
-          augmented_x,
-          options = list(
-            format = .x,
-            unit = 0L,
-            error_is_null = TRUE
-          )
-        )
-      )
+    if (!inherits(x, "Expression")) {
+      x <- Expression$scalar(x)
     }
 
-    # list for attempts when orders %in% c("yq")
-    parse_attempt_exp_augmented_x2 <- list()
-    if (!is.null(augmented_x2)) {
-      parse_attempt_exp_augmented_x2 <- map(
-        formats,
-        ~ build_expr(
-          "strptime",
-          augmented_x2,
-          options = list(
-            format = .x,
-            unit = 0L,
-            error_is_null = TRUE
-          )
-        )
-      )
+    if (exact == TRUE) {
+      # no data processing takes place & we don't derive formats
+      parse_attempts <- build_strptime_exprs(x, orders)
+    } else {
+      parse_attempts <- attempt_parsing(x, orders = orders)
     }
 
-    # combine all attempts expressions in prep for coalesce
-    parse_attempt_expressions <- c(
-      parse_attempt_expressions,
-      parse_attempt_exp_augmented_x,
-      parse_attempt_exp_augmented_x2
-    )
-
-    coalesce_output <- build_expr("coalesce", args = parse_attempt_expressions)
+    coalesce_output <- build_expr("coalesce", args = parse_attempts)
 
     # we need this binding to be able to handle a NULL `tz`, which will then be
     # used by bindings such as `ymd` to return, based on whether tz is NULL or
