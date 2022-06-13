@@ -118,12 +118,16 @@ if(NOT DEFINED CMAKE_C_STANDARD)
   set(CMAKE_C_STANDARD 11)
 endif()
 
-# This ensures that things like c++11 get passed correctly
+# This ensures that things like c++11/c++14 get passed correctly
 if(NOT DEFINED CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 11)
+  if(ARROW_AZURE)
+    set(CMAKE_CXX_STANDARD 14)
+  else()
+    set(CMAKE_CXX_STANDARD 11)
+  endif()
 endif()
 
-# We require a C++11 compliant compiler
+# We require a C++11/14 compliant compiler
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ARROW-6848: Do not use GNU (or other CXX) extensions
@@ -290,6 +294,7 @@ if("${BUILD_WARNING_LEVEL}" STREQUAL "CHECKIN")
   elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wall")
     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-conversion")
+    set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-deprecated-declarations")
     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-sign-conversion")
     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wunused-result")
   elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Intel")
@@ -547,8 +552,8 @@ if(NOT WIN32 AND NOT APPLE)
                     OUTPUT_VARIABLE GOLD_LOCATION
                     OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
     if("${GOLD_LOCATION}" MATCHES "^/opt/rh/devtoolset")
-      message(STATUS "Skipping optional gold linker (version ${GOLD_VERSION}) because "
-                     "it's in devtoolset")
+      message("Skipping optional gold linker (version ${GOLD_VERSION}) because "
+              "it's in devtoolset")
       set(GOLD_VERSION)
     endif()
   endif()
@@ -570,7 +575,7 @@ if(NOT WIN32 AND NOT APPLE)
       set(ARROW_BUGGY_GOLD 1)
     endif()
     if(MUST_USE_GOLD)
-      message(STATUS "Using hard-wired gold linker (version ${GOLD_VERSION})")
+      message("Using hard-wired gold linker (version ${GOLD_VERSION})")
       if(ARROW_BUGGY_GOLD)
         if("${ARROW_LINK}" STREQUAL "d" AND "${CMAKE_BUILD_TYPE}" STREQUAL "RELEASE")
           message(SEND_ERROR "Configured to use buggy gold with dynamic linking "
@@ -581,12 +586,12 @@ if(NOT WIN32 AND NOT APPLE)
       # The Gold linker must be manually enabled.
       set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fuse-ld=gold")
       set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fuse-ld=gold")
-      message(STATUS "Using optional gold linker (version ${GOLD_VERSION})")
+      message("Using optional gold linker (version ${GOLD_VERSION})")
     else()
-      message(STATUS "Optional gold linker is buggy, using ld linker instead")
+      message("Optional gold linker is buggy, using ld linker instead")
     endif()
   else()
-    message(STATUS "Using ld linker")
+    message("Using ld linker")
   endif()
 endif()
 
@@ -624,7 +629,7 @@ set(CXX_FLAGS_PROFILE_GEN "${CXX_FLAGS_RELEASE} -fprofile-generate")
 set(CXX_FLAGS_PROFILE_BUILD "${CXX_FLAGS_RELEASE} -fprofile-use")
 
 # Set compile flags based on the build type.
-message(STATUS "Configured for ${CMAKE_BUILD_TYPE} build (set with cmake -DCMAKE_BUILD_TYPE={release,debug,...})"
+message("Configured for ${CMAKE_BUILD_TYPE} build (set with cmake -DCMAKE_BUILD_TYPE={release,debug,...})"
 )
 if("${CMAKE_BUILD_TYPE}" STREQUAL "DEBUG")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${C_FLAGS_DEBUG}")

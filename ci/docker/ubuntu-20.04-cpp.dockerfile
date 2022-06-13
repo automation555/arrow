@@ -96,7 +96,6 @@ RUN apt-get update -y -q && \
         nlohmann-json3-dev \
         pkg-config \
         protobuf-compiler \
-        python3-dev \
         python3-pip \
         python3-rados \
         rados-objclass-dev \
@@ -123,7 +122,8 @@ RUN /arrow/ci/scripts/install_ceph.sh
 # - flatbuffer is not packaged
 # - libgtest-dev only provide sources
 # - libprotobuf-dev only provide sources
-ENV ARROW_BUILD_TESTS=ON \
+ENV ARROW_AZURE: ON \
+    ARROW_BUILD_TESTS=ON \
     ARROW_DEPENDENCY_SOURCE=SYSTEM \
     ARROW_DATASET=ON \
     ARROW_FLIGHT=OFF \

@@ -432,6 +432,47 @@ else()
            "${THIRDPARTY_MIRROR_URL}/aws-sdk-cpp-${ARROW_AWSSDK_BUILD_VERSION}.tar.gz")
 endif()
 
+if(DEFINED ENV{ARROW_AZURE_CORE_URL})
+  set(AZURE_CORE_SOURCE_URL "$ENV{ARROW_AZURE_CORE_URL}")
+else()
+  set_urls(AZURE_CORE_SOURCE_URL
+           "https://github.com/Azure/azure-sdk-for-cpp/archive/azure-core_${ARROW_AZURE_CORE_BUILD_VERSION}.tar.gz"
+  )
+endif()
+
+if(DEFINED ENV{ARROW_AZURE_IDENTITY_URL})
+  set(AZURE_IDENTITY_SOURCE_URL "$ENV{ARROW_AZURE_IDENTITY_URL}")
+else()
+  set_urls(AZURE_IDENTITY_SOURCE_URL
+           "https://github.com/Azure/azure-sdk-for-cpp/archive/azure-identity_${ARROW_AZURE_IDENTITY_BUILD_VERSION}.tar.gz"
+  )
+endif()
+
+if(DEFINED ENV{ARROW_AZURE_STORAGE_BLOB_URL})
+  set(AZURE_STORAGE_BLOB_SOURCE_URL "$ENV{ARROW_AZURE_STORAGE_BLOB_URL}")
+else()
+  set_urls(AZURE_STORAGE_BLOB_SOURCE_URL
+           "https://github.com/Azure/azure-sdk-for-cpp/archive/azure-storage-blobs_${ARROW_AZURE_STORAGE_BLOB_BUILD_VERSION}.tar.gz"
+  )
+endif()
+
+if(DEFINED ENV{ARROW_AZURE_STORAGE_COMMON_URL})
+  set(AZURE_STORAGE_COMMON_SOURCE_URL "$ENV{ARROW_AZURE_STORAGE_COMMON_URL}")
+else()
+  set_urls(AZURE_STORAGE_COMMON_SOURCE_URL
+           "https://github.com/Azure/azure-sdk-for-cpp/archive/azure-storage-common_${ARROW_AZURE_STORAGE_COMMON_BUILD_VERSION}.tar.gz"
+  )
+endif()
+
+if(DEFINED ENV{ARROW_AZURE_STORAGE_FILES_DATALAKE_URL})
+  set(AZURE_STORAGE_FILES_DATALAKE_SOURCE_URL
+      "$ENV{ARROW_AZURE_STORAGE_FILES_DATALAKE_URL}")
+else()
+  set_urls(AZURE_STORAGE_FILES_DATALAKE_SOURCE_URL
+           "https://github.com/Azure/azure-sdk-for-cpp/archive/azure-storage-files-datalake_${ARROW_AZURE_STORAGE_FILES_DATALAKE_BUILD_VERSION}.tar.gz"
+  )
+endif()
+
 if(DEFINED ENV{ARROW_BOOST_URL})
   set(BOOST_SOURCE_URL "$ENV{ARROW_BOOST_URL}")
 else()
@@ -956,6 +997,34 @@ set(Boost_ADDITIONAL_VERSIONS
     "1.60.0"
     "1.60")
 
+# Thrift needs Boost if we're building the bundled version with version < 0.13,
+# so we first need to determine whether we're building it
+if(ARROW_WITH_THRIFT AND Thrift_SOURCE STREQUAL "AUTO")
+  find_package(Thrift 0.11.0 MODULE COMPONENTS ${ARROW_THRIFT_REQUIRED_COMPONENTS})
+  if(Thrift_FOUND)
+    find_package(PkgConfig QUIET)
+    pkg_check_modules(THRIFT_PC
+                      thrift
+                      NO_CMAKE_PATH
+                      NO_CMAKE_ENVIRONMENT_PATH
+                      QUIET)
+    if(THRIFT_PC_FOUND)
+      string(APPEND ARROW_PC_REQUIRES_PRIVATE " thrift")
+    endif()
+  else()
+    set(Thrift_SOURCE "BUNDLED")
+  endif()
+endif()
+
+# Thrift < 0.13 has a compile-time header dependency on boost
+if(Thrift_SOURCE STREQUAL "BUNDLED" AND ARROW_THRIFT_BUILD_VERSION VERSION_LESS "0.13")
+  set(THRIFT_REQUIRES_BOOST TRUE)
+elseif(THRIFT_VERSION VERSION_LESS "0.13")
+  set(THRIFT_REQUIRES_BOOST TRUE)
+else()
+  set(THRIFT_REQUIRES_BOOST FALSE)
+endif()
+
 # Compilers that don't support int128_t have a compile-time
 # (header-only) dependency on Boost for int128_t.
 if(ARROW_USE_UBSAN)
@@ -983,7 +1052,7 @@ if(ARROW_BUILD_INTEGRATION
   set(ARROW_USE_BOOST TRUE)
   set(ARROW_BOOST_REQUIRE_LIBRARY TRUE)
 elseif(ARROW_GANDIVA
-       OR ARROW_WITH_THRIFT
+       OR (ARROW_WITH_THRIFT AND THRIFT_REQUIRES_BOOST)
        OR (NOT ARROW_USE_NATIVE_INT128))
   set(ARROW_USE_BOOST TRUE)
   set(ARROW_BOOST_REQUIRE_LIBRARY FALSE)
@@ -1351,7 +1420,6 @@ macro(build_gflags)
   add_dependencies(toolchain gflags_ep)
 
   add_thirdparty_lib(gflags::gflags_static STATIC ${GFLAGS_STATIC_LIB})
-  add_dependencies(gflags::gflags_static gflags_ep)
   set(GFLAGS_LIBRARY gflags::gflags_static)
   set_target_properties(${GFLAGS_LIBRARY}
                         PROPERTIES INTERFACE_COMPILE_DEFINITIONS "GFLAGS_IS_A_DLL=0"
@@ -1396,7 +1464,7 @@ macro(build_thrift)
     message(FATAL_ERROR "Building thrift using ExternalProject requires at least CMake 3.10"
     )
   endif()
-  message(STATUS "Building Apache Thrift from source")
+  message("Building Apache Thrift from source")
   set(THRIFT_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/thrift_ep-install")
   set(THRIFT_INCLUDE_DIR "${THRIFT_PREFIX}/include")
   set(THRIFT_CMAKE_ARGS
@@ -1464,40 +1532,42 @@ macro(build_thrift)
   set_target_properties(thrift::thrift
                         PROPERTIES IMPORTED_LOCATION "${THRIFT_LIB}"
                                    INTERFACE_INCLUDE_DIRECTORIES "${THRIFT_INCLUDE_DIR}")
-  if(ARROW_USE_BOOST)
-    if(CMAKE_VERSION VERSION_LESS 3.11)
-      set_target_properties(thrift::thrift PROPERTIES INTERFACE_LINK_LIBRARIES
+  if(CMAKE_VERSION VERSION_LESS 3.11)
+    set_target_properties(${BOOST_LIBRARY} PROPERTIES INTERFACE_LINK_LIBRARIES
                                                       Boost::headers)
-    else()
-      target_link_libraries(thrift::thrift INTERFACE Boost::headers)
-    endif()
+  else()
+    target_link_libraries(thrift::thrift INTERFACE Boost::headers)
   endif()
   add_dependencies(toolchain thrift_ep)
   add_dependencies(thrift::thrift thrift_ep)
-  set(Thrift_VERSION ${ARROW_THRIFT_BUILD_VERSION})
+  set(THRIFT_VERSION ${ARROW_THRIFT_BUILD_VERSION})
 
   list(APPEND ARROW_BUNDLED_STATIC_LIBS thrift::thrift)
 endmacro()
 
 if(ARROW_WITH_THRIFT)
-  # Thrift c++ code generated by 0.13 requires 0.11 or greater
-  resolve_dependency(Thrift
-                     REQUIRED_VERSION
-                     0.11.0
-                     PC_PACKAGE_NAMES
-                     thrift)
+  # We already may have looked for Thrift earlier, when considering whether
+  # to build Boost, so don't look again if already found.
+  if(NOT Thrift_FOUND)
+    # Thrift c++ code generated by 0.13 requires 0.11 or greater
+    resolve_dependency(Thrift
+                       REQUIRED_VERSION
+                       0.11.0
+                       PC_PACKAGE_NAMES
+                       thrift)
+  endif()
 
-  string(REPLACE "." ";" Thrift_VERSION_LIST ${Thrift_VERSION})
-  list(GET Thrift_VERSION_LIST 0 Thrift_VERSION_MAJOR)
-  list(GET Thrift_VERSION_LIST 1 Thrift_VERSION_MINOR)
-  list(GET Thrift_VERSION_LIST 2 Thrift_VERSION_PATCH)
+  string(REPLACE "." ";" VERSION_LIST ${THRIFT_VERSION})
+  list(GET VERSION_LIST 0 THRIFT_VERSION_MAJOR)
+  list(GET VERSION_LIST 1 THRIFT_VERSION_MINOR)
+  list(GET VERSION_LIST 2 THRIFT_VERSION_PATCH)
 endif()
 
 # ----------------------------------------------------------------------
 # Protocol Buffers (required for ORC, Flight, Gandiva and Substrait libraries)
 
 macro(build_protobuf)
-  message(STATUS "Building Protocol Buffers from source")
+  message("Building Protocol Buffers from source")
   set(PROTOBUF_VENDORED TRUE)
   set(PROTOBUF_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/protobuf_ep-install")
   set(PROTOBUF_INCLUDE_DIR "${PROTOBUF_PREFIX}/include")
@@ -1681,7 +1751,7 @@ endif()
 # Substrait (required by compute engine)
 
 macro(build_substrait)
-  message(STATUS "Building Substrait from source")
+  message("Building Substrait from source")
 
   set(SUBSTRAIT_PROTOS
       capabilities
@@ -1850,16 +1920,14 @@ if(ARROW_MIMALLOC)
   endif()
 
   set(MIMALLOC_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/mimalloc_ep/src/mimalloc_ep")
-  set(MIMALLOC_INCLUDE_DIR "${MIMALLOC_PREFIX}/include/mimalloc-2.0")
+  set(MIMALLOC_INCLUDE_DIR "${MIMALLOC_PREFIX}/include/mimalloc-1.7")
   set(MIMALLOC_STATIC_LIB
-      "${MIMALLOC_PREFIX}/lib/mimalloc-2.0/${CMAKE_STATIC_LIBRARY_PREFIX}${MIMALLOC_LIB_BASE_NAME}${CMAKE_STATIC_LIBRARY_SUFFIX}"
+      "${MIMALLOC_PREFIX}/lib/mimalloc-1.7/${CMAKE_STATIC_LIBRARY_PREFIX}${MIMALLOC_LIB_BASE_NAME}${CMAKE_STATIC_LIBRARY_SUFFIX}"
   )
 
-  # Override CMAKE_INSTALL_LIBDIR to avoid lib64 installation on RedHat derivatives
   set(MIMALLOC_CMAKE_ARGS
       ${EP_COMMON_CMAKE_ARGS}
       "-DCMAKE_INSTALL_PREFIX=${MIMALLOC_PREFIX}"
-      "-DCMAKE_INSTALL_LIBDIR=lib"
       -DMI_OVERRIDE=OFF
       -DMI_LOCAL_DYNAMIC_TLS=ON
       -DMI_BUILD_OBJECT=OFF
@@ -2440,17 +2508,15 @@ if(ARROW_WITH_RE2)
   # source not uses C++ 11.
   resolve_dependency(re2 HAVE_ALT TRUE)
   if(${re2_SOURCE} STREQUAL "SYSTEM")
-    get_target_property(RE2_TYPE re2::re2 TYPE)
-    if(NOT RE2_TYPE STREQUAL "INTERFACE_LIBRARY")
-      get_target_property(RE2_LIB re2::re2 IMPORTED_LOCATION_${UPPERCASE_BUILD_TYPE})
-      if(NOT RE2_LIB)
-        get_target_property(RE2_LIB re2::re2 IMPORTED_LOCATION_RELEASE)
-      endif()
-      if(NOT RE2_LIB)
-        get_target_property(RE2_LIB re2::re2 IMPORTED_LOCATION)
-      endif()
-      string(APPEND ARROW_PC_LIBS_PRIVATE " ${RE2_LIB}")
+    get_target_property(RE2_LIB re2::re2 IMPORTED_LOCATION_${UPPERCASE_BUILD_TYPE})
+    if(NOT RE2_LIB)
+      get_target_property(RE2_LIB re2::re2 IMPORTED_LOCATION_RELEASE)
     endif()
+    if(NOT RE2_LIB)
+      get_target_property(RE2_LIB re2::re2 IMPORTED_LOCATION)
+    endif()
+
+    string(APPEND ARROW_PC_LIBS_PRIVATE " ${RE2_LIB}")
   endif()
   add_definitions(-DARROW_WITH_RE2)
 endif()
@@ -2640,11 +2706,6 @@ macro(resolve_dependency_absl)
         city
         civil_time
         cord
-        cord_internal
-        cordz_functions
-        cordz_handle
-        cordz_info
-        cordz_sample_token
         debugging_internal
         demangle_internal
         examine_stack
@@ -2669,7 +2730,6 @@ macro(resolve_dependency_absl)
         leak_check
         leak_check_disable
         log_severity
-        low_level_hash
         malloc_internal
         periodic_sampler
         random_distributions
@@ -2698,7 +2758,8 @@ macro(resolve_dependency_absl)
         synchronization
         throw_delegate
         time
-        time_zone)
+        time_zone
+        wyhash)
     # Abseil creates a number of header-only targets, which are needed to resolve dependencies.
     # The list can be refreshed using:
     #   comm -13 <(ls -l $PREFIX/lib/libabsl_*.a | sed -e 's/.*libabsl_//' -e 's/.a$//' | sort -u) \
@@ -2720,9 +2781,6 @@ macro(resolve_dependency_absl)
         config
         container_common
         container_memory
-        cordz_statistics
-        cordz_update_scope
-        cordz_update_tracker
         core_headers
         counting_allocator
         debugging
@@ -2769,7 +2827,6 @@ macro(resolve_dependency_absl)
         random_internal_wide_multiply
         random_random
         raw_hash_map
-        sample_recorder
         span
         str_format
         type_traits
@@ -2878,28 +2935,12 @@ macro(resolve_dependency_absl)
                           absl::memory
                           absl::type_traits
                           absl::utility)
-    set_property(TARGET absl::cord_internal
-                 PROPERTY INTERFACE_LINK_LIBRARIES
-                          absl::base_internal
-                          absl::compressed_tuple
-                          absl::config
-                          absl::core_headers
-                          absl::endian
-                          absl::inlined_vector
-                          absl::layout
-                          absl::raw_logging_internal
-                          absl::strings
-                          absl::throw_delegate
-                          absl::type_traits)
     set_property(TARGET absl::cord
                  PROPERTY INTERFACE_LINK_LIBRARIES
                           absl::base
+                          absl::base_internal
+                          absl::compressed_tuple
                           absl::config
-                          absl::cord_internal
-                          absl::cordz_functions
-                          absl::cordz_info
-                          absl::cordz_update_scope
-                          absl::cordz_update_tracker
                           absl::core_headers
                           absl::endian
                           absl::fixed_array
@@ -2908,52 +2949,9 @@ macro(resolve_dependency_absl)
                           absl::optional
                           absl::raw_logging_internal
                           absl::strings
+                          absl::strings_internal
+                          absl::throw_delegate
                           absl::type_traits)
-    set_property(TARGET absl::cordz_functions
-                 PROPERTY INTERFACE_LINK_LIBRARIES
-                          absl::config
-                          absl::core_headers
-                          absl::exponential_biased
-                          absl::raw_logging_internal)
-    set_property(TARGET absl::cordz_handle
-                 PROPERTY INTERFACE_LINK_LIBRARIES
-                          absl::base
-                          absl::config
-                          absl::raw_logging_internal
-                          absl::synchronization)
-    set_property(TARGET absl::cordz_info
-                 PROPERTY INTERFACE_LINK_LIBRARIES
-                          absl::base
-                          absl::config
-                          absl::cord_internal
-                          absl::cordz_functions
-                          absl::cordz_handle
-                          absl::cordz_statistics
-                          absl::cordz_update_tracker
-                          absl::core_headers
-                          absl::inlined_vector
-                          absl::span
-                          absl::raw_logging_internal
-                          absl::stacktrace
-                          absl::synchronization)
-    set_property(TARGET absl::cordz_sample_token
-                 PROPERTY INTERFACE_LINK_LIBRARIES absl::config absl::cordz_handle
-                          absl::cordz_info)
-    set_property(TARGET absl::cordz_statistics
-                 PROPERTY INTERFACE_LINK_LIBRARIES
-                          absl::config
-                          absl::core_headers
-                          absl::cordz_update_tracker
-                          absl::synchronization)
-    set_property(TARGET absl::cordz_update_scope
-                 PROPERTY INTERFACE_LINK_LIBRARIES
-                          absl::config
-                          absl::cord_internal
-                          absl::cordz_info
-                          absl::cordz_update_tracker
-                          absl::core_headers)
-    set_property(TARGET absl::cordz_update_tracker PROPERTY INTERFACE_LINK_LIBRARIES
-                                                            absl::config)
     set_property(TARGET absl::core_headers PROPERTY INTERFACE_LINK_LIBRARIES absl::config)
     set_property(TARGET absl::counting_allocator PROPERTY INTERFACE_LINK_LIBRARIES
                                                           absl::config)
@@ -3096,7 +3094,6 @@ macro(resolve_dependency_absl)
                           absl::flags_private_handle_accessor
                           absl::flags_program_name
                           absl::flags_reflection
-                          absl::flat_hash_map
                           absl::strings
                           absl::synchronization)
     set_property(TARGET absl::flags_usage
@@ -3121,9 +3118,8 @@ macro(resolve_dependency_absl)
                           absl::algorithm_container
                           absl::core_headers
                           absl::memory)
-    set_property(TARGET absl::function_ref
-                 PROPERTY INTERFACE_LINK_LIBRARIES absl::base_internal absl::core_headers
-                          absl::meta)
+    set_property(TARGET absl::function_ref PROPERTY INTERFACE_LINK_LIBRARIES
+                                                    absl::base_internal absl::meta)
     set_property(TARGET absl::graphcycles_internal
                  PROPERTY INTERFACE_LINK_LIBRARIES
                           absl::base
@@ -3151,7 +3147,7 @@ macro(resolve_dependency_absl)
                           absl::optional
                           absl::variant
                           absl::utility
-                          absl::low_level_hash)
+                          absl::wyhash)
     set_property(TARGET absl::hash_policy_traits PROPERTY INTERFACE_LINK_LIBRARIES
                                                           absl::meta)
     set_property(TARGET absl::hashtable_debug_hooks PROPERTY INTERFACE_LINK_LIBRARIES
@@ -3163,7 +3159,6 @@ macro(resolve_dependency_absl)
                           absl::base
                           absl::exponential_biased
                           absl::have_sse
-                          absl::sample_recorder
                           absl::synchronization)
     set_property(TARGET absl::inlined_vector_internal
                  PROPERTY INTERFACE_LINK_LIBRARIES
@@ -3196,12 +3191,6 @@ macro(resolve_dependency_absl)
                                                   absl::core_headers)
     set_property(TARGET absl::log_severity PROPERTY INTERFACE_LINK_LIBRARIES
                                                     absl::core_headers)
-    set_property(TARGET absl::low_level_hash
-                 PROPERTY INTERFACE_LINK_LIBRARIES
-                          absl::bits
-                          absl::config
-                          absl::endian
-                          absl::int128)
     set_property(TARGET absl::malloc_internal
                  PROPERTY INTERFACE_LINK_LIBRARIES
                           absl::base
@@ -3397,6 +3386,7 @@ macro(resolve_dependency_absl)
                           absl::hash_policy_traits
                           absl::hashtable_debug_hooks
                           absl::have_sse
+                          absl::layout
                           absl::memory
                           absl::meta
                           absl::optional
@@ -3408,8 +3398,6 @@ macro(resolve_dependency_absl)
                           absl::config
                           absl::core_headers
                           absl::log_severity)
-    set_property(TARGET absl::sample_recorder PROPERTY INTERFACE_LINK_LIBRARIES
-                                                       absl::base absl::synchronization)
     set_property(TARGET absl::scoped_set_env
                  PROPERTY INTERFACE_LINK_LIBRARIES absl::config
                           absl::raw_logging_internal)
@@ -3427,7 +3415,6 @@ macro(resolve_dependency_absl)
                           absl::core_headers)
     set_property(TARGET absl::statusor
                  PROPERTY INTERFACE_LINK_LIBRARIES
-                          absl::base
                           absl::status
                           absl::core_headers
                           absl::raw_logging_internal
@@ -3440,7 +3427,6 @@ macro(resolve_dependency_absl)
                           absl::atomic_hook
                           absl::config
                           absl::core_headers
-                          absl::function_ref
                           absl::raw_logging_internal
                           absl::inlined_vector
                           absl::stacktrace
@@ -3521,19 +3507,6 @@ macro(resolve_dependency_absl)
                           absl::raw_logging_internal
                           absl::strings
                           absl::time_zone)
-    set_property(TARGET absl::type_traits PROPERTY INTERFACE_LINK_LIBRARIES absl::config)
-    set_property(TARGET absl::utility
-                 PROPERTY INTERFACE_LINK_LIBRARIES absl::base_internal absl::config
-                          absl::type_traits)
-    set_property(TARGET absl::variant
-                 PROPERTY INTERFACE_LINK_LIBRARIES
-                          absl::bad_variant_access
-                          absl::base_internal
-                          absl::config
-                          absl::core_headers
-                          absl::type_traits
-                          absl::utility)
-
     if(APPLE)
       # This is due to upstream absl::cctz issue
       # https://github.com/abseil/abseil-cpp/issues/283
@@ -3554,6 +3527,8 @@ macro(resolve_dependency_absl)
                           absl::core_headers
                           absl::type_traits
                           absl::utility)
+    set_property(TARGET absl::wyhash PROPERTY INTERFACE_LINK_LIBRARIES absl::config
+                                              absl::endian absl::int128)
 
     externalproject_add(absl_ep
                         ${EP_LOG_OPTIONS}
@@ -3641,9 +3616,6 @@ macro(build_grpc)
   get_target_property(GRPC_RE2_INCLUDE_DIR re2::re2 INTERFACE_INCLUDE_DIRECTORIES)
   get_filename_component(GRPC_RE2_ROOT "${GRPC_RE2_INCLUDE_DIR}" DIRECTORY)
 
-  # Put Abseil, etc. first so that local directories are searched
-  # before (what are likely) system directories
-  set(GRPC_CMAKE_PREFIX "${GRPC_CMAKE_PREFIX};${ABSL_PREFIX}")
   set(GRPC_CMAKE_PREFIX "${GRPC_CMAKE_PREFIX};${GRPC_PB_ROOT}")
   set(GRPC_CMAKE_PREFIX "${GRPC_CMAKE_PREFIX};${GRPC_GFLAGS_ROOT}")
   set(GRPC_CMAKE_PREFIX "${GRPC_CMAKE_PREFIX};${GRPC_CARES_ROOT}")
@@ -3651,6 +3623,7 @@ macro(build_grpc)
 
   # ZLIB is never vendored
   set(GRPC_CMAKE_PREFIX "${GRPC_CMAKE_PREFIX};${ZLIB_ROOT}")
+  set(GRPC_CMAKE_PREFIX "${GRPC_CMAKE_PREFIX};${ABSL_PREFIX}")
 
   if(RAPIDJSON_VENDORED)
     add_dependencies(grpc_dependencies rapidjson_ep)
@@ -3659,25 +3632,8 @@ macro(build_grpc)
   # Yuck, see https://stackoverflow.com/a/45433229/776560
   string(REPLACE ";" "|" GRPC_PREFIX_PATH_ALT_SEP "${GRPC_CMAKE_PREFIX}")
 
-  set(GRPC_C_FLAGS "${EP_C_FLAGS}")
-  set(GRPC_CXX_FLAGS "${EP_CXX_FLAGS}")
-  if(NOT MSVC)
-    # Negate warnings that gRPC cannot build under
-    # See https://github.com/grpc/grpc/issues/29417
-    set(GRPC_C_FLAGS
-        "${GRPC_C_FLAGS} -Wno-attributes -Wno-format-security -Wno-unknown-warning-option"
-    )
-    set(GRPC_CXX_FLAGS
-        "${GRPC_CXX_FLAGS} -Wno-attributes -Wno-format-security -Wno-unknown-warning-option"
-    )
-  endif()
-
   set(GRPC_CMAKE_ARGS
       "${EP_COMMON_CMAKE_ARGS}"
-      "-DCMAKE_C_FLAGS=${GRPC_C_FLAGS}"
-      "-DCMAKE_CXX_FLAGS=${GRPC_CXX_FLAGS}"
-      "-DCMAKE_C_FLAGS_${UPPERCASE_BUILD_TYPE}=${GRPC_C_FLAGS}"
-      "-DCMAKE_CXX_FLAGS_${UPPERCASE_BUILD_TYPE}=${GRPC_CXX_FLAGS}"
       -DCMAKE_PREFIX_PATH='${GRPC_PREFIX_PATH_ALT_SEP}'
       -DgRPC_ABSL_PROVIDER=package
       -DgRPC_BUILD_CSHARP_EXT=OFF
@@ -3737,11 +3693,8 @@ macro(build_grpc)
       absl::debugging_internal
       absl::demangle_internal
       absl::graphcycles_internal
-      absl::hash
       absl::int128
       absl::malloc_internal
-      absl::random_internal_pool_urbg
-      absl::random_internal_randen
       absl::raw_logging_internal
       absl::spinlock_wait
       absl::stacktrace
@@ -4107,7 +4060,7 @@ endif()
 # Apache ORC
 
 macro(build_orc)
-  message(STATUS "Building Apache ORC from source")
+  message("Building Apache ORC from source")
 
   set(ORC_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/orc_ep-install")
   set(ORC_HOME "${ORC_PREFIX}")
@@ -4409,7 +4362,7 @@ endif()
 # AWS SDK for C++
 
 macro(build_awssdk)
-  message(STATUS "Building AWS C++ SDK from source")
+  message("Building AWS C++ SDK from source")
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS
                                               "4.9")
     message(FATAL_ERROR "AWS C++ SDK requires gcc >= 4.9")
@@ -4639,6 +4592,100 @@ if(ARROW_S3)
                           PROPERTIES INTERFACE_LINK_LIBRARIES
                                      "-pthread;pthread;-framework CoreFoundation")
   endif()
+endif()
+
+macro(build_azuresdk)
+  message(STATUS "Building Azure C++ SDK from source")
+
+  set(AZURESDK_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/azuresdk_ep-install")
+  set(AZURESDK_INCLUDE_DIR "${AZURESDK_PREFIX}/include")
+
+  set(AZURESDK_CMAKE_ARGS
+      ${EP_COMMON_CMAKE_ARGS}
+      -DBUILD_TESTING=OFF
+      -DCMAKE_INSTALL_LIBDIR=lib
+      "-DCMAKE_INSTALL_PREFIX=${AZURESDK_PREFIX}"
+      -DCMAKE_PREFIX_PATH=${AZURESDK_PREFIX})
+
+  file(MAKE_DIRECTORY ${AZURESDK_INCLUDE_DIR})
+
+  # Azure C++ SDK related libraries to link statically
+  set(_AZURESDK_LIBS
+      azure-core
+      azure-identity
+      azure-storage-blobs
+      azure-storage-common
+      azure-storage-files-datalake)
+  set(AZURESDK_LIBRARIES)
+  set(AZURESDK_LIBRARIES_CPP)
+  foreach(_AZURESDK_LIB ${_AZURESDK_LIBS})
+    string(TOUPPER ${_AZURESDK_LIB} _AZURESDK_LIB_UPPER)
+    string(REPLACE "-" "_" _AZURESDK_LIB_NAME_PREFIX ${_AZURESDK_LIB_UPPER})
+    list(APPEND AZURESDK_LIBRARIES_CPP "${_AZURESDK_LIB}-cpp")
+    set(_AZURESDK_TARGET_NAME Azure::${_AZURESDK_LIB})
+    set(_AZURESDK_STATIC_LIBRARY
+        "${AZURESDK_PREFIX}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}${_AZURESDK_LIB}${CMAKE_STATIC_LIBRARY_SUFFIX}"
+    )
+    add_library(${_AZURESDK_TARGET_NAME} STATIC IMPORTED)
+    set_target_properties(${_AZURESDK_TARGET_NAME}
+                          PROPERTIES IMPORTED_LOCATION ${_AZURESDK_STATIC_LIBRARY}
+                                     INTERFACE_INCLUDE_DIRECTORIES
+                                     "${AZURESDK_INCLUDE_DIR}")
+    set("${_AZURESDK_LIB_NAME_PREFIX}_STATIC_LIBRARY" ${_AZURESDK_STATIC_LIBRARY})
+    target_link_libraries(${_AZURESDK_TARGET_NAME} INTERFACE LibXml2::LibXml2)
+    list(APPEND AZURESDK_LIBRARIES ${_AZURESDK_TARGET_NAME})
+  endforeach()
+
+  externalproject_add(azure_core_ep
+                      ${EP_LOG_OPTIONS}
+                      URL ${AZURE_CORE_SOURCE_URL}
+                      URL_HASH "SHA256=${ARROW_AZURE_CORE_BUILD_SHA256_CHECKSUM}"
+                      CMAKE_ARGS ${AZURESDK_CMAKE_ARGS}
+                      BUILD_BYPRODUCTS ${AZURE_CORE_STATIC_LIBRARY})
+  add_dependencies(Azure::azure-core azure_core_ep)
+
+  externalproject_add(azure_identity_ep
+                      ${EP_LOG_OPTIONS}
+                      URL ${AZURE_IDENTITY_SOURCE_URL}
+                      URL_HASH "SHA256=${ARROW_AZURE_IDENTITY_BUILD_SHA256_CHECKSUM}"
+                      CMAKE_ARGS ${AZURESDK_CMAKE_ARGS}
+                      BUILD_BYPRODUCTS ${AZURE_IDENTITY_STATIC_LIBRARY})
+  add_dependencies(Azure::azure-identity azure_identity_ep)
+
+  externalproject_add(azure_storage_blobs_ep
+                      ${EP_LOG_OPTIONS}
+                      URL ${AZURE_STORAGE_BLOB_SOURCE_URL}
+                      URL_HASH "SHA256=${ARROW_AZURE_STORAGE_BLOB_BUILD_SHA256_CHECKSUM}"
+                      CMAKE_ARGS ${AZURESDK_CMAKE_ARGS}
+                      BUILD_BYPRODUCTS ${AZURE_STORAGE_BLOBS_STATIC_LIBRARY})
+  add_dependencies(Azure::azure-storage-blobs azure_storage_blobs_ep)
+
+  externalproject_add(azure_storage_common_ep
+                      ${EP_LOG_OPTIONS}
+                      URL ${AZURE_STORAGE_COMMON_SOURCE_URL}
+                      URL_HASH "SHA256=${ARROW_AZURE_STORAGE_COMMON_BUILD_SHA256_CHECKSUM}"
+                      CMAKE_ARGS ${AZURESDK_CMAKE_ARGS}
+                      BUILD_BYPRODUCTS ${AZURE_STORAGE_COMMON_STATIC_LIBRARY})
+  add_dependencies(Azure::azure-storage-common azure_storage_common_ep)
+
+  externalproject_add(azure_storage_files_datalake_ep
+                      ${EP_LOG_OPTIONS}
+                      URL ${AZURE_STORAGE_FILES_DATALAKE_SOURCE_URL}
+                      URL_HASH "SHA256=${ARROW_AZURE_STORAGE_FILES_DATALAKE_BUILD_SHA256_CHECKSUM}"
+                      CMAKE_ARGS ${AZURESDK_CMAKE_ARGS}
+                      BUILD_BYPRODUCTS ${AZURE_STORAGE_FILES_DATALAKE_STATIC_LIBRARY})
+  add_dependencies(Azure::azure-storage-files-datalake azure_storage_files_datalake_ep)
+
+  set(AZURESDK_LINK_LIBRARIES ${AZURESDK_LIBRARIES})
+endmacro()
+
+if(ARROW_AZURE)
+  build_azuresdk()
+  find_curl()
+  find_package(OpenSSL ${ARROW_OPENSSL_REQUIRED_VERSION} REQUIRED)
+  find_package(LibXml2 REQUIRED)
+  message(STATUS "Found Azure SDK headers: ${AZURESDK_INCLUDE_DIR}")
+  message(STATUS "Found Azure SDK libraries: ${AZURESDK_LINK_LIBRARIES}")
 endif()
 
 # ----------------------------------------------------------------------
