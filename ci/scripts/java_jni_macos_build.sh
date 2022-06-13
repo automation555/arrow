@@ -39,6 +39,7 @@ echo "=== Building Arrow C++ libraries ==="
 : ${ARROW_PLASMA_JAVA_CLIENT:=ON}
 : ${ARROW_PLASMA:=ON}
 : ${ARROW_PYTHON:=OFF}
+: ${ARROW_S3:=ON}
 : ${CMAKE_BUILD_TYPE:=Release}
 : ${CMAKE_UNITY_BUILD:=ON}
 
@@ -72,10 +73,12 @@ cmake \
   -DARROW_PLASMA=${ARROW_PLASMA} \
   -DARROW_PROTOBUF_USE_SHARED=OFF \
   -DARROW_PYTHON=${ARROW_PYTHON} \
+  -DARROW_S3=${ARROW_S3} \
   -DARROW_SNAPPY_USE_SHARED=OFF \
   -DARROW_THRIFT_USE_SHARED=OFF \
   -DARROW_UTF8PROC_USE_SHARED=OFF \
   -DARROW_ZSTD_USE_SHARED=OFF \
+  -DAWSSDK_SOURCE=BUNDLED \
   -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
   -DCMAKE_INSTALL_LIBDIR=lib \
   -DCMAKE_INSTALL_PREFIX=${build_dir} \
@@ -103,12 +106,14 @@ echo "=== Checking shared dependencies for libraries ==="
 
 pushd ${dist_dir}
 archery linking check-dependencies \
+  --allow CoreFoundation \
+  --allow libSystem \
   --allow libarrow_dataset_jni \
   --allow libarrow_orc_jni \
   --allow libc++ \
+  --allow libcurl \
   --allow libgandiva_jni \
   --allow libncurses \
-  --allow libSystem \
   --allow libz \
   libgandiva_jni.dylib \
   libarrow_dataset_jni.dylib \
