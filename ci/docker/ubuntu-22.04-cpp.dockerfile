@@ -150,13 +150,13 @@ RUN /arrow/ci/scripts/install_gcs_testbench.sh default
 # - flatbuffer is not packaged
 # - libgtest-dev only provide sources
 # - libprotobuf-dev only provide sources
-ENV ARROW_BUILD_TESTS=ON \
+ENV ARROW_AZURE: ON \
+    ARROW_BUILD_TESTS=ON \
     ARROW_DEPENDENCY_SOURCE=SYSTEM \
     ARROW_DATASET=ON \
     ARROW_FLIGHT=ON \
     ARROW_FLIGHT_SQL=ON \
     ARROW_GANDIVA=ON \
-    ARROW_GCS=ON \
     ARROW_HDFS=ON \
     ARROW_HOME=/usr/local \
     ARROW_INSTALL_NAME_RPATH=OFF \
@@ -176,7 +176,6 @@ ENV ARROW_BUILD_TESTS=ON \
     ARROW_WITH_ZLIB=ON \
     ARROW_WITH_ZSTD=ON \
     AWSSDK_SOURCE=BUNDLED \
-    google_cloud_cpp_storage_SOURCE=BUNDLED \
     GTest_SOURCE=BUNDLED \
     ORC_SOURCE=BUNDLED \
     PARQUET_BUILD_EXAMPLES=ON \

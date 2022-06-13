@@ -83,12 +83,6 @@ endmacro()
 
 # Top level cmake dir
 if("${CMAKE_SOURCE_DIR}" STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}")
-  set(ARROW_DEFINE_OPTIONS_DEFAULT ON)
-else()
-  set(ARROW_DEFINE_OPTIONS_DEFAULT OFF)
-endif()
-option(ARROW_DEFINE_OPTIONS "Define Arrow options" ${ARROW_DEFINE_OPTIONS_DEFAULT})
-if(ARROW_DEFINE_OPTIONS)
   #----------------------------------------------------------------------
   set_option_category("Compile and link")
 
@@ -221,6 +215,9 @@ if(ARROW_DEFINE_OPTIONS)
   #----------------------------------------------------------------------
   set_option_category("Project component")
 
+  define_option(ARROW_AZURE
+                "Build Arrow with Azure support (requires the Azure SDK for C++)" OFF)
+
   define_option(ARROW_BUILD_UTILITIES "Build Arrow commandline utilities" OFF)
 
   define_option(ARROW_COMPUTE "Build the Arrow Compute Modules" OFF)
@@ -331,7 +328,7 @@ if(ARROW_DEFINE_OPTIONS)
 
   define_option(ARROW_DEPENDENCY_USE_SHARED "Link to shared libraries" ON)
 
-  define_option(ARROW_BOOST_USE_SHARED "Rely on Boost shared libraries where relevant"
+  define_option(ARROW_BOOST_USE_SHARED "Rely on boost shared libraries where relevant"
                 ${ARROW_DEPENDENCY_USE_SHARED})
 
   define_option(ARROW_BROTLI_USE_SHARED "Rely on Brotli shared libraries where relevant"
