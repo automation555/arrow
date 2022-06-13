@@ -27,16 +27,16 @@ check_time_locale <- function(locale = Sys.getlocale("LC_TIME")) {
 }
 
 .helpers_function_map <- list(
-  "dminutes" = list(60, "s"),
-  "dhours" = list(3600, "s"),
-  "ddays" = list(86400, "s"),
-  "dweeks" = list(604800, "s"),
-  "dmonths" = list(2629800, "s"),
-  "dyears" = list(31557600, "s"),
-  "dseconds" = list(1, "s"),
-  "dmilliseconds" = list(1, "ms"),
-  "dmicroseconds" = list(1, "us"),
-  "dnanoseconds" = list(1, "ns")
+  "lubridate::dminutes" = list(60, "s"),
+  "lubridate::dhours" = list(3600, "s"),
+  "lubridate::ddays" = list(86400, "s"),
+  "lubridate::dweeks" = list(604800, "s"),
+  "lubridate::dmonths" = list(2629800, "s"),
+  "lubridate::dyears" = list(31557600, "s"),
+  "lubridate::dseconds" = list(1, "s"),
+  "lubridate::dmilliseconds" = list(1, "ms"),
+  "lubridate::dmicroseconds" = list(1, "us"),
+  "lubridate::dnanoseconds" = list(1, "ns")
 )
 make_duration <- function(x, unit) {
   x <- build_expr("cast", x, options = cast_options(to_type = int64()))
@@ -159,26 +159,6 @@ build_formats <- function(orders) {
   orders <- gsub("[^A-Za-z_]", "", orders)
   orders <- gsub("Y", "y", orders)
 
-  # we separate "ym', "my", and "yq" from the rest of the `orders` vector and
-  # transform them. `ym` and `yq` -> `ymd` & `my` -> `myd`
-  # this is needed for 2 reasons:
-  # 1. strptime does not parse "2022-05" -> we add "-01", thus changing the format,
-  # 2. for equivalence to lubridate, which parses `ym` to the first day of the month
-  short_orders <- c("ym", "my")
-
-  if (any(orders %in% short_orders)) {
-    orders1 <- setdiff(orders, short_orders)
-    orders2 <- intersect(orders, short_orders)
-    orders2 <- paste0(orders2, "d")
-    orders <- unique(c(orders1, orders2))
-  }
-
-  if (any(orders == "yq")) {
-    orders1 <- setdiff(orders, "yq")
-    orders2 <- "ymd"
-    orders <- unique(c(orders1, orders2))
-  }
-
   supported_orders <- c("ymd", "ydm", "mdy", "myd", "dmy", "dym")
   unsupported_passed_orders <- setdiff(orders, supported_orders)
   supported_passed_orders <- intersect(orders, supported_orders)
@@ -196,8 +176,7 @@ build_formats <- function(orders) {
   }
 
   formats_list <- map(orders, build_format_from_order)
-  formats <- purrr::flatten_chr(formats_list)
-  unique(formats)
+  purrr::flatten_chr(formats_list)
 }
 
 build_format_from_order <- function(order) {
