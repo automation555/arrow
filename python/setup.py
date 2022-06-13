@@ -93,6 +93,7 @@ class build_ext(_build_ext):
         _build_ext.build_extensions(self)
 
     def run(self):
+        self._run_cmake_cpyarrow()
         self._run_cmake()
         _build_ext.run(self)
 
@@ -113,8 +114,6 @@ class build_ext(_build_ext):
                      ('with-parquet', None, 'build the Parquet extension'),
                      ('with-parquet-encryption', None,
                       'build the Parquet encryption extension'),
-                     ('with-gcs', None,
-                      'build the Google Cloud Storage (GCS) extension'),
                      ('with-s3', None, 'build the Amazon S3 extension'),
                      ('with-static-parquet', None, 'link parquet statically'),
                      ('with-static-boost', None, 'link boost statically'),
@@ -157,8 +156,6 @@ class build_ext(_build_ext):
             if not hasattr(sys, 'gettotalrefcount'):
                 self.build_type = 'release'
 
-        self.with_gcs = strtobool(
-            os.environ.get('PYARROW_WITH_GCS', '0'))
         self.with_s3 = strtobool(
             os.environ.get('PYARROW_WITH_S3', '0'))
         self.with_hdfs = strtobool(
@@ -220,12 +217,54 @@ class build_ext(_build_ext):
         '_parquet_encryption',
         '_orc',
         '_plasma',
-        '_gcsfs',
         '_s3fs',
         '_substrait',
         '_hdfs',
         '_hdfsio',
         'gandiva']
+
+    def _run_cmake_cpyarrow(self):
+        # check if build_type is correctly passed / set
+        if self.build_type.lower() not in ('release', 'debug'):
+            raise ValueError("--build-type (or PYARROW_BUILD_TYPE) needs to "
+                             "be 'release' or 'debug'")
+
+        # The directory containing this setup.py
+        source = os.path.dirname(os.path.abspath(__file__))
+        # The directory containing this C PyArrow CMakeLists.txt
+        source_cpyarrow = pjoin(source, "pyarrow/src_arrow")
+
+        # The directory for the module being built
+        saved_cwd = os.getcwd()
+        build_temp = pjoin(saved_cwd, 'build/dist/temp')
+        build_lib = pjoin(saved_cwd, 'build/dist/lib')
+        build_include = pjoin(saved_cwd, 'build/dist/include')
+
+        if not os.path.isdir(build_temp):
+            self.mkpath(build_temp)
+        if not os.path.isdir(build_lib):
+            self.mkpath(build_lib)
+        if not os.path.isdir(build_include):
+            self.mkpath(build_include)
+
+        # Change to the build directory
+        with changed_dir(build_temp):
+            # cmake args
+            cmake_options = [
+                '-DCMAKE_INSTALL_PREFIX=' +
+                str(pjoin(saved_cwd, 'build/dist')),
+                '-DCMAKE_BUILD_TYPE={0}'.format(self.build_type.lower()),
+            ]
+
+            # run cmake
+            print("-- Running cmake for C pyarrow")
+            self.spawn(['cmake'] + cmake_options + [source_cpyarrow])
+            print("-- Finished cmake for C pyarrow")
+            # run make & install
+            print("-- Running make build and install for C pyarrow")
+            self.spawn(['make', '-j4'])
+            self.spawn(['make', 'install'])
+            print("-- Finished make build and install for C pyarrow")
 
     def _run_cmake(self):
         # check if build_type is correctly passed / set
@@ -241,6 +280,9 @@ class build_ext(_build_ext):
         build_temp = pjoin(os.getcwd(), build_cmd.build_temp)
         build_lib = pjoin(os.getcwd(), build_cmd.build_lib)
         saved_cwd = os.getcwd()
+
+        # The directory containing C PyArrow headers and libs
+        build_dist = pjoin(saved_cwd, 'build/dist')
 
         if not os.path.isdir(build_temp):
             self.mkpath(build_temp)
@@ -266,6 +308,7 @@ class build_ext(_build_ext):
             cmake_options = [
                 '-DPYTHON_EXECUTABLE=%s' % sys.executable,
                 '-DPython3_EXECUTABLE=%s' % sys.executable,
+                '-DCPYARROW_HOME=' + str(build_dist),
                 static_lib_option,
             ]
 
@@ -286,7 +329,6 @@ class build_ext(_build_ext):
             append_cmake_bool(self.with_parquet_encryption,
                               'PYARROW_BUILD_PARQUET_ENCRYPTION')
             append_cmake_bool(self.with_plasma, 'PYARROW_BUILD_PLASMA')
-            append_cmake_bool(self.with_gcs, 'PYARROW_BUILD_GCS')
             append_cmake_bool(self.with_s3, 'PYARROW_BUILD_S3')
             append_cmake_bool(self.with_hdfs, 'PYARROW_BUILD_HDFS')
             append_cmake_bool(self.with_tensorflow, 'PYARROW_USE_TENSORFLOW')
@@ -452,8 +494,6 @@ class build_ext(_build_ext):
         if name == '_flight' and not self.with_flight:
             return True
         if name == '_substrait' and not self.with_substrait:
-            return True
-        if name == '_gcsfs' and not self.with_gcs:
             return True
         if name == '_s3fs' and not self.with_s3:
             return True
