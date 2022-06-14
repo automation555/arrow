@@ -54,13 +54,6 @@ cdef extern from "arrow/util/decimal.h" namespace "arrow" nogil:
     cdef cppclass CDecimal256" arrow::Decimal256":
         c_string ToString(int32_t scale) const
 
-cdef extern from "arrow/util/optional.h" namespace "arrow::util" nogil:
-    cdef cppclass c_optional"arrow::util::optional"[T]:
-        c_bool has_value()
-        T value()
-        c_optional(T&)
-        c_optional& operator=[U](U&)
-
 
 cdef extern from "arrow/config.h" namespace "arrow" nogil:
     cdef cppclass CBuildInfo" arrow::BuildInfo":
@@ -1890,9 +1883,6 @@ cdef extern from "arrow/compute/api.h" namespace "arrow::compute" nogil:
         CResult[CDatum] Execute(const vector[CDatum]& args,
                                 const CFunctionOptions* options,
                                 CExecContext* ctx) const
-        CResult[CDatum] Execute(const CExecBatch& args,
-                                const CFunctionOptions* options,
-                                CExecContext* ctx) const
 
     cdef cppclass CScalarFunction" arrow::compute::ScalarFunction"(CFunction):
         vector[const CScalarKernel*] kernels() const
@@ -1983,12 +1973,14 @@ cdef extern from "arrow/compute/api.h" namespace "arrow::compute" nogil:
         CRoundTemporalOptions(int multiple, CCalendarUnit unit,
                               c_bool week_starts_monday,
                               c_bool ceil_is_strictly_greater,
-                              c_bool calendar_based_origin)
+                              c_bool calendar_based_origin,
+                              c_bool preserve_wall_time_order)
         int multiple
         CCalendarUnit unit
         c_bool week_starts_monday
         c_bool ceil_is_strictly_greater
         c_bool calendar_based_origin
+        c_bool preserve_wall_time_order
 
     cdef cppclass CRoundToMultipleOptions \
             "arrow::compute::RoundToMultipleOptions"(CFunctionOptions):
@@ -2339,10 +2331,10 @@ cdef extern from "arrow/compute/api.h" namespace "arrow::compute" nogil:
         CRandomOptions(CRandomOptions)
 
         @staticmethod
-        CRandomOptions FromSystemRandom()
+        CRandomOptions FromSystemRandom(int64_t length)
 
         @staticmethod
-        CRandomOptions FromSeed(uint64_t seed)
+        CRandomOptions FromSeed(int64_t length, uint64_t seed)
 
     cdef enum DatumType" arrow::Datum::type":
         DatumType_NONE" arrow::Datum::NONE"
@@ -2539,8 +2531,7 @@ cdef extern from "arrow/compute/exec/exec_plan.h" namespace "arrow::compute" nog
         const shared_ptr[CSchema]& output_schema() const
 
     cdef cppclass CExecBatch "arrow::compute::ExecBatch":
-        vector[CDatum] values
-        int64_t length
+        pass
 
     shared_ptr[CRecordBatchReader] MakeGeneratorReader(
         shared_ptr[CSchema] schema,
