@@ -60,15 +60,16 @@ void PrintTo(const WriterTestParams& p, std::ostream* os) {
 WriteOptions DefaultTestOptions(bool include_header = false,
                                 const std::string& null_string = "",
                                 QuotingStyle quoting_style = QuotingStyle::Needed,
-                                const std::string& eol = "\n", char delimiter = ',',
-                                int batch_size = 5) {
+                                bool escaping = true, char escape_char = '"',
+                                const std::string& eol = "\n") {
   WriteOptions options;
-  options.batch_size = batch_size;
+  options.batch_size = 5;
   options.include_header = include_header;
   options.null_string = null_string;
-  options.eol = eol;
+  options.escaping = escaping;
+  options.escape_char = escape_char;
   options.quoting_style = quoting_style;
-  options.delimiter = delimiter;
+  options.eol = eol;
   return options;
 }
 
@@ -173,33 +174,13 @@ std::vector<WriterTestParams> GenerateTestCases() {
         "style is \"None\". See RFC4180. Invalid value: ",
         value);
   };
-
-  auto reject_structural_params = [&](std::vector<const char*> rows,
+  auto reject_structural_params = [&](const char* json_val,
                                       const char* error_val) -> WriterTestParams {
-    std::string json_rows = "[";
-    for (size_t i = 0; i < rows.size(); ++i) {
-      if (rows[i]) {
-        json_rows += std::string(R"({"a": ")") + rows[i] + R"("})";
-      } else {
-        json_rows += std::string(R"({"a": null})");
-      }
-      if (i != rows.size() - 1) json_rows += ',';
-    }
-    json_rows += ']';
-    return {schema_custom_reject_structural, json_rows,
+    return {schema_custom_reject_structural,
+            std::string(R"([{"a": ")") + json_val + R"("}])",
             DefaultTestOptions(/*include_header=*/false,
                                /*null_string=*/"", QuotingStyle::None),
             /*expected_output*/ "", expected_status_no_quotes_with_structural(error_val)};
-  };
-
-  // Schema/expected message for delimiter test
-  auto schema_custom_delimiter = schema({field("a", int64()), field("b", int64())});
-  auto batch_custom_delimiter = R"([{"a": 42, "b": -12}])";
-  auto expected_output_delimiter_tabs = "42\t-12\n";
-  auto expected_status_illegal_delimiter = [](const char value) {
-    return Status::Invalid(
-        "WriteOptions: delimiter cannot be \\r or \\n or \" or EOL. Invalid value: ",
-        value);
   };
 
   return std::vector<WriterTestParams>{
@@ -208,7 +189,7 @@ std::vector<WriterTestParams> GenerateTestCases() {
       {abc_schema, populated_batch, DefaultTestOptions(), expected_without_header},
       {abc_schema, populated_batch,
        DefaultTestOptions(/*include_header=*/false, /*null_string=*/"",
-                          QuotingStyle::Needed, "_EOL_"),
+                          QuotingStyle::Needed, true, '\"', "_EOL_"),
        expected_with_custom_eol},
       {abc_schema, populated_batch, DefaultTestOptions(/*include_header=*/true),
        expected_header + expected_without_header},
@@ -234,44 +215,10 @@ std::vector<WriterTestParams> GenerateTestCases() {
        DefaultTestOptions(/*include_header=*/false, /*null_string=*/"",
                           QuotingStyle::None),
        /*expected_output*/ "", expected_status_no_quotes_with_structural("abc\"efg")},
-      reject_structural_params({"hi\\nbye"}, "hi\nbye"),
-      reject_structural_params({",xyz"}, ",xyz"),
-      reject_structural_params({"a\\\"sdf"}, "a\"sdf"),
-      reject_structural_params({"foo\\r"}, "foo\r"),
-      reject_structural_params({nullptr, "a", nullptr, "c,d", nullptr, ",e", "f"}, "c,d"),
-      reject_structural_params({"a", "b", nullptr, "c,d", nullptr, nullptr}, "c,d"),
-      // exercise simd code with strings total length >= 16
-      {abc_schema, populated_batch,
-       DefaultTestOptions(/*include_header=*/false, "", QuotingStyle::AllValid, "\n", ',',
-                          /*batch_size=*/100),
-       expected_quoting_style_all_valid},
-      reject_structural_params({nullptr, "0123456789\\nabcdef"}, "0123456789\nabcdef"),
-      reject_structural_params({"0123456\\r789", nullptr, "abcdef"}, "0123456\r789"),
-      reject_structural_params({"0123456789", nullptr, "abcde,", nullptr}, "abcde,"),
-      reject_structural_params({"0123456789", nullptr, "abcdef,", nullptr}, "abcdef,"),
-      reject_structural_params({nullptr, nullptr, ",0123456789", "abcde"}, ",0123456789"),
-      reject_structural_params({"0123456", nullptr, "7\\\"89", ",abcdef"}, "7\"89"),
-      // exercise custom delimiter
-      {schema_custom_delimiter, batch_custom_delimiter,
-       DefaultTestOptions(/*include_header=*/false, /*null_string=*/"",
-                          QuotingStyle::Needed, "\n", /*delimiter=*/'\t'),
-       expected_output_delimiter_tabs},
-      {schema_custom_delimiter, batch_custom_delimiter,
-       DefaultTestOptions(/*include_header=*/false, /*null_string=*/"",
-                          QuotingStyle::Needed, /*eol=*/"\n", /*delimiter=*/'\r'),
-       /*expected_output*/ "", expected_status_illegal_delimiter('\r')},
-      {schema_custom_delimiter, batch_custom_delimiter,
-       DefaultTestOptions(/*include_header=*/false, /*null_string=*/"",
-                          QuotingStyle::Needed, /*eol=*/"\n", /*delimiter=*/'\n'),
-       /*expected_output*/ "", expected_status_illegal_delimiter('\n')},
-      {schema_custom_delimiter, batch_custom_delimiter,
-       DefaultTestOptions(/*include_header=*/false, /*null_string=*/"",
-                          QuotingStyle::Needed, /*eol=*/"\n", /*delimiter=*/'"'),
-       /*expected_output*/ "", expected_status_illegal_delimiter('"')},
-      {schema_custom_delimiter, batch_custom_delimiter,
-       DefaultTestOptions(/*include_header=*/false, /*null_string=*/"",
-                          QuotingStyle::Needed, /*eol=*/";", /*delimiter=*/';'),
-       /*expected_output*/ "", expected_status_illegal_delimiter(';')}};
+      reject_structural_params("hi\\nbye", "hi\nbye"),
+      reject_structural_params(",xyz", ",xyz"),
+      reject_structural_params("a\\\"sdf", "a\"sdf"),
+      reject_structural_params("foo\\r", "foo\r")};
 }
 
 class TestWriteCSV : public ::testing::TestWithParam<WriterTestParams> {
@@ -356,6 +303,30 @@ INSTANTIATE_TEST_SUITE_P(SingleColumnWriteCSVTest, TestWriteCSV,
                              R"("int64")"
                              "\n9999\n\n-15\n",
                              Status::OK())));
+
+INSTANTIATE_TEST_SUITE_P(BackslashEscapeWriteCSVTest, TestWriteCSV,
+                         ::testing::Values(WriterTestParams{
+                             schema({field("string\"", utf8())}),
+                             R"([{ "string\"": "abc\"def"}])",
+                             DefaultTestOptions(true, "", QuotingStyle::Needed, true,
+                                                '\\'),
+                             R"("string\"")"
+                             "\n\"abc\\\"def\"\n",
+                         }));
+
+INSTANTIATE_TEST_SUITE_P(
+    EscapeFailureInDataWriteCSVTest, TestWriteCSV,
+    ::testing::Values(WriterTestParams{
+        schema({field("string", utf8())}), R"([{ "string": "abc\"def"}])",
+        DefaultTestOptions(true, "", QuotingStyle::Needed, false), "",
+        Status::Invalid("Need to escape in CSV data, but escaping is disabled.")}));
+
+INSTANTIATE_TEST_SUITE_P(
+    EscapeFailureInHeaderWriteCSVTest, TestWriteCSV,
+    ::testing::Values(WriterTestParams{
+        schema({field("string\"", utf8())}), R"([{ "string\"": "abcdef"}])",
+        DefaultTestOptions(true, "", QuotingStyle::Needed, false), "",
+        Status::Invalid("Need to escape in CSV header, but escaping is disabled.")}));
 
 #ifndef _WIN32
 // TODO(ARROW-13168):
