@@ -45,11 +45,14 @@ namespace py {
 // Returns 0 on success, -1 on error.
 ARROW_PYTHON_EXPORT int import_pyarrow();
 
-#define DECLARE_WRAP_FUNCTIONS(FUNC_SUFFIX, TYPE_NAME)                         \
-  ARROW_PYTHON_EXPORT bool is_##FUNC_SUFFIX(PyObject*);                        \
-  ARROW_PYTHON_EXPORT Result<std::shared_ptr<TYPE_NAME>> unwrap_##FUNC_SUFFIX( \
-      PyObject*);                                                              \
-  ARROW_PYTHON_EXPORT PyObject* wrap_##FUNC_SUFFIX(const std::shared_ptr<TYPE_NAME>&);
+#define DECLARE_WRAP_FUNCTIONS(FUNC_SUFFIX, TYPE_NAME)                                 \
+  ARROW_PYTHON_EXPORT bool is_##FUNC_SUFFIX(PyObject*);                                \
+  ARROW_PYTHON_EXPORT Result<std::shared_ptr<TYPE_NAME>> unwrap_##FUNC_SUFFIX(         \
+      PyObject*);                                                                      \
+  ARROW_PYTHON_EXPORT PyObject* wrap_##FUNC_SUFFIX(const std::shared_ptr<TYPE_NAME>&); \
+  ARROW_DEPRECATED("Use Result-returning version")                                     \
+  ARROW_PYTHON_EXPORT Status unwrap_##FUNC_SUFFIX(PyObject*,                           \
+                                                  std::shared_ptr<TYPE_NAME>* out);
 
 DECLARE_WRAP_FUNCTIONS(buffer, Buffer)
 
@@ -57,12 +60,11 @@ DECLARE_WRAP_FUNCTIONS(data_type, DataType)
 DECLARE_WRAP_FUNCTIONS(field, Field)
 DECLARE_WRAP_FUNCTIONS(schema, Schema)
 
-DECLARE_WRAP_FUNCTIONS(scalar, Scalar)
-
 DECLARE_WRAP_FUNCTIONS(array, Array)
 DECLARE_WRAP_FUNCTIONS(chunked_array, ChunkedArray)
 
 DECLARE_WRAP_FUNCTIONS(sparse_coo_tensor, SparseCOOTensor)
+DECLARE_WRAP_FUNCTIONS(sparse_split_coo_tensor, SparseSplitCOOTensor)
 DECLARE_WRAP_FUNCTIONS(sparse_csc_matrix, SparseCSCMatrix)
 DECLARE_WRAP_FUNCTIONS(sparse_csf_tensor, SparseCSFTensor)
 DECLARE_WRAP_FUNCTIONS(sparse_csr_matrix, SparseCSRMatrix)

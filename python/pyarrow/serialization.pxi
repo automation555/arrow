@@ -17,16 +17,6 @@
 
 from cpython.ref cimport PyObject
 
-import warnings
-
-
-def _deprecate_serialization(name):
-    msg = (
-        "'pyarrow.{}' is deprecated as of 2.0.0 and will be removed in a "
-        "future version. Use pickle or the pyarrow IPC functionality instead."
-    ).format(name)
-    warnings.warn(msg, FutureWarning, stacklevel=3)
-
 
 def is_named_tuple(cls):
     """
@@ -234,10 +224,9 @@ _default_context_initialized = False
 
 def _get_default_context():
     global _default_context_initialized
-    from pyarrow.serialization import _register_default_serialization_handlers
+    from pyarrow.serialization import register_default_serialization_handlers
     if not _default_context_initialized:
-        _register_default_serialization_handlers(
-            _default_serialization_context)
+        register_default_serialization_handlers(_default_serialization_context)
         _default_context_initialized = True
     return _default_serialization_context
 
@@ -311,19 +300,21 @@ cdef class SerializedPyObject(_Weakrefable):
             int num_ndarrays = components['num_ndarrays']
             int num_buffers = components['num_buffers']
             list buffers = components['data']
-            SparseTensorCounts num_sparse_tensors = SparseTensorCounts()
+            SparseTensorCounts sparse_counts = SparseTensorCounts()
             SerializedPyObject result = SerializedPyObject()
 
-        num_sparse_tensors.coo = components['num_sparse_tensors']['coo']
-        num_sparse_tensors.csr = components['num_sparse_tensors']['csr']
-        num_sparse_tensors.csc = components['num_sparse_tensors']['csc']
-        num_sparse_tensors.csf = components['num_sparse_tensors']['csf']
-        num_sparse_tensors.ndim_csf = \
-            components['num_sparse_tensors']['ndim_csf']
+        num_sparse_tensors = components['num_sparse_tensors']
+        sparse_counts.coo = num_sparse_tensors['coo']
+        sparse_counts.split_coo = num_sparse_tensors['split_coo']
+        sparse_counts.ndim_split_coo = num_sparse_tensors['ndim_split_coo']
+        sparse_counts.csr = num_sparse_tensors['csr']
+        sparse_counts.csc = num_sparse_tensors['csc']
+        sparse_counts.csf = num_sparse_tensors['csf']
+        sparse_counts.ndim_csf = num_sparse_tensors['ndim_csf']
 
         with nogil:
             check_status(GetSerializedFromComponents(num_tensors,
-                                                     num_sparse_tensors,
+                                                     sparse_counts,
                                                      num_ndarrays,
                                                      num_buffers,
                                                      buffers, &result.data))
@@ -355,14 +346,10 @@ cdef class SerializedPyObject(_Weakrefable):
 
 def serialize(object value, SerializationContext context=None):
     """
-    DEPRECATED: Serialize a general Python sequence for transient storage
+    EXPERIMENTAL: Serialize a general Python sequence for transient storage
     and transport.
 
-    .. deprecated:: 2.0
-        The custom serialization functionality is deprecated in pyarrow 2.0,
-        and will be removed in a future version. Use the standard library
-        ``pickle`` or the IPC functionality of pyarrow (see :ref:`ipc` for
-        more).
+    This may have better performance and memory efficiency than Python pickle.
 
     Notes
     -----
@@ -373,7 +360,7 @@ def serialize(object value, SerializationContext context=None):
 
     Parameters
     ----------
-    value : object
+    value: object
         Python object for the sequence that is to be serialized.
     context : SerializationContext
         Custom serialization and deserialization context, uses a default
@@ -384,11 +371,6 @@ def serialize(object value, SerializationContext context=None):
     serialized : SerializedPyObject
 
     """
-    _deprecate_serialization("serialize")
-    return _serialize(value, context)
-
-
-def _serialize(object value, SerializationContext context=None):
     cdef SerializedPyObject serialized = SerializedPyObject()
     wrapped_value = [value]
 
@@ -402,44 +384,31 @@ def _serialize(object value, SerializationContext context=None):
 
 def serialize_to(object value, sink, SerializationContext context=None):
     """
-    DEPRECATED: Serialize a Python sequence to a file.
-
-    .. deprecated:: 2.0
-        The custom serialization functionality is deprecated in pyarrow 2.0,
-        and will be removed in a future version. Use the standard library
-        ``pickle`` or the IPC functionality of pyarrow (see :ref:`ipc` for
-        more).
+    EXPERIMENTAL: Serialize a Python sequence to a file.
 
     Parameters
     ----------
-    value : object
+    value: object
         Python object for the sequence that is to be serialized.
-    sink : NativeFile or file-like
+    sink: NativeFile or file-like
         File the sequence will be written to.
     context : SerializationContext
         Custom serialization and deserialization context, uses a default
         context with some standard type handlers if not specified.
     """
-    _deprecate_serialization("serialize_to")
-    serialized = _serialize(value, context)
+    serialized = serialize(value, context)
     serialized.write_to(sink)
 
 
 def read_serialized(source, base=None):
     """
-    DEPRECATED: Read serialized Python sequence from file-like object.
-
-    .. deprecated:: 2.0
-        The custom serialization functionality is deprecated in pyarrow 2.0,
-        and will be removed in a future version. Use the standard library
-        ``pickle`` or the IPC functionality of pyarrow (see :ref:`ipc` for
-        more).
+    EXPERIMENTAL: Read serialized Python sequence from file-like object.
 
     Parameters
     ----------
-    source : NativeFile
+    source: NativeFile
         File to read the sequence from.
-    base : object
+    base: object
         This object will be the base object of all the numpy arrays
         contained in the sequence.
 
@@ -447,11 +416,6 @@ def read_serialized(source, base=None):
     -------
     serialized : the serialized data
     """
-    _deprecate_serialization("read_serialized")
-    return _read_serialized(source, base=base)
-
-
-def _read_serialized(source, base=None):
     cdef shared_ptr[CRandomAccessFile] stream
     get_reader(source, True, &stream)
 
@@ -465,22 +429,16 @@ def _read_serialized(source, base=None):
 
 def deserialize_from(source, object base, SerializationContext context=None):
     """
-    DEPRECATED: Deserialize a Python sequence from a file.
-
-    .. deprecated:: 2.0
-        The custom serialization functionality is deprecated in pyarrow 2.0,
-        and will be removed in a future version. Use the standard library
-        ``pickle`` or the IPC functionality of pyarrow (see :ref:`ipc` for
-        more).
+    EXPERIMENTAL: Deserialize a Python sequence from a file.
 
     This only can interact with data produced by pyarrow.serialize or
     pyarrow.serialize_to.
 
     Parameters
     ----------
-    source : NativeFile
+    source: NativeFile
         File to read the sequence from.
-    base : object
+    base: object
         This object will be the base object of all the numpy arrays
         contained in the sequence.
     context : SerializationContext
@@ -491,21 +449,13 @@ def deserialize_from(source, object base, SerializationContext context=None):
     object
         Python object for the deserialized sequence.
     """
-    _deprecate_serialization("deserialize_from")
-    serialized = _read_serialized(source, base=base)
+    serialized = read_serialized(source, base=base)
     return serialized.deserialize(context)
 
 
 def deserialize_components(components, SerializationContext context=None):
     """
-    DEPRECATED: Reconstruct Python object from output of
-    SerializedPyObject.to_components.
-
-    .. deprecated:: 2.0
-        The custom serialization functionality is deprecated in pyarrow 2.0,
-        and will be removed in a future version. Use the standard library
-        ``pickle`` or the IPC functionality of pyarrow (see :ref:`ipc` for
-        more).
+    Reconstruct Python object from output of SerializedPyObject.to_components.
 
     Parameters
     ----------
@@ -517,21 +467,14 @@ def deserialize_components(components, SerializationContext context=None):
     -------
     object : the Python object that was originally serialized
     """
-    _deprecate_serialization("deserialize_components")
     serialized = SerializedPyObject.from_components(components)
     return serialized.deserialize(context)
 
 
 def deserialize(obj, SerializationContext context=None):
     """
-    DEPRECATED: Deserialize Python object from Buffer or other Python
+    EXPERIMENTAL: Deserialize Python object from Buffer or other Python
     object supporting the buffer protocol.
-
-    .. deprecated:: 2.0
-        The custom serialization functionality is deprecated in pyarrow 2.0,
-        and will be removed in a future version. Use the standard library
-        ``pickle`` or the IPC functionality of pyarrow (see :ref:`ipc` for
-        more).
 
     This only can interact with data produced by pyarrow.serialize or
     pyarrow.serialize_to.
@@ -546,11 +489,5 @@ def deserialize(obj, SerializationContext context=None):
     -------
     deserialized : object
     """
-    _deprecate_serialization("deserialize")
-    return _deserialize(obj, context=context)
-
-
-def _deserialize(obj, SerializationContext context=None):
     source = BufferReader(obj)
-    serialized = _read_serialized(source, base=obj)
-    return serialized.deserialize(context)
+    return deserialize_from(source, obj, context)

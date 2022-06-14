@@ -17,6 +17,7 @@
 
 #include "arrow/sparse_tensor.h"
 #include "arrow/tensor/converter.h"
+#include "arrow/tensor/util.h"
 
 #include <algorithm>
 #include <functional>
@@ -27,7 +28,7 @@
 #include "arrow/type_traits.h"
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/logging.h"
-#include "arrow/visit_type_inline.h"
+#include "arrow/visitor_inline.h"
 
 namespace arrow {
 
@@ -96,6 +97,9 @@ Status MakeSparseTensorFromTensor(const Tensor& tensor,
     case SparseTensorFormat::COO:
       return MakeSparseCOOTensorFromTensor(tensor, index_value_type, pool,
                                            out_sparse_index, out_data);
+    case SparseTensorFormat::SplitCOO:
+      return MakeSparseSplitCOOTensorFromTensor(tensor, index_value_type, pool,
+                                                out_sparse_index, out_data);
     case SparseTensorFormat::CSR:
       return MakeSparseCSXMatrixFromTensor(SparseMatrixCompressedAxis::ROW, tensor,
                                            index_value_type, pool, out_sparse_index,
@@ -111,6 +115,24 @@ Status MakeSparseTensorFromTensor(const Tensor& tensor,
     // LCOV_EXCL_START: ignore program failure
     default:
       return Status::Invalid("Invalid sparse tensor format");
+      // LCOV_EXCL_STOP
+  }
+}
+
+Status MakeSparseTensorFromTensor(
+    const Tensor& tensor, SparseTensorFormat::type sparse_format_id,
+    const std::vector<std::shared_ptr<DataType>>& index_value_types, MemoryPool* pool,
+    std::shared_ptr<SparseIndex>* out_sparse_index, std::shared_ptr<Buffer>* out_data) {
+  switch (sparse_format_id) {
+    case SparseTensorFormat::SplitCOO:
+      return MakeSparseSplitCOOTensorFromTensor(tensor, index_value_types, pool,
+                                                out_sparse_index, out_data);
+
+    // LCOV_EXCL_START: ignore program failure
+    default:
+      return Status::Invalid(
+          "Invalid sparse tensor format to use different index value types for each "
+          "dimension");
       // LCOV_EXCL_STOP
   }
 }
@@ -293,6 +315,140 @@ SparseCOOIndex::SparseCOOIndex(const std::shared_ptr<Tensor>& coords, bool is_ca
 std::string SparseCOOIndex::ToString() const { return std::string("SparseCOOIndex"); }
 
 // ----------------------------------------------------------------------
+// SparseSplitCOOIndex
+
+namespace {
+
+inline Type::type GetTypeId(const std::shared_ptr<DataType>& type) { return type->id(); }
+
+inline Type::type GetTypeId(const std::shared_ptr<Tensor>& tensor) {
+  return tensor->type_id();
+}
+
+template <typename DataTypeOrTensor>
+inline enable_if_t<std::is_same<DataTypeOrTensor, DataType>::value ||
+                       std::is_same<DataTypeOrTensor, Tensor>::value,
+                   Status>
+CheckSparseSplitCOOIndexTypesValidity(
+    const std::vector<std::shared_ptr<DataTypeOrTensor>>& objects) {
+  const auto ndim_max = static_cast<size_t>(std::numeric_limits<int>::max());
+  if (ndim_max < objects.size()) {
+    return Status::Invalid("too many dimensions are given");
+  }
+
+  const auto ndim = objects.size();
+  for (size_t i = 0; i < ndim; ++i) {
+    if (!is_integer(GetTypeId(objects[i]))) {
+      return Status::TypeError("Type of SparseSplitCOOIndex indices must be integer");
+    }
+  }
+
+  return Status::OK();
+}
+
+inline Status CheckSparseSplitCOOIndexValidity(
+    const std::vector<std::shared_ptr<DataType>>& types, int64_t non_zero_length,
+    const std::vector<std::shared_ptr<Buffer>>& buffers) {
+  RETURN_NOT_OK(CheckSparseSplitCOOIndexTypesValidity(types));
+
+  const auto ndim = types.size();
+  if (buffers.size() != ndim) {
+    return Status::Invalid(
+        "The number of buffers are inconsistent to the number of dimensions (",
+        buffers.size(), " for ", ndim, ")");
+  }
+
+  for (size_t i = 0; i < ndim; ++i) {
+    const auto& fw_type = internal::checked_cast<const FixedWidthType&>(*types[i]);
+    const int64_t least_size = non_zero_length * (fw_type.bit_width() / CHAR_BIT);
+    if (least_size > buffers[i]->size()) {
+      return Status::Invalid("The ", i, internal::ordinal_suffix(i),
+                             " buffer size is too short");
+    }
+  }
+
+  return Status::OK();
+}
+
+}  // namespace
+
+Result<std::shared_ptr<SparseSplitCOOIndex>> SparseSplitCOOIndex::Make(
+    const std::vector<std::shared_ptr<DataType>>& indices_types, int64_t non_zero_length,
+    const std::vector<std::shared_ptr<Buffer>>& indices_data_buffers) {
+  RETURN_NOT_OK(CheckSparseSplitCOOIndexValidity(indices_types, non_zero_length,
+                                                 indices_data_buffers));
+  const auto ndim = static_cast<int>(indices_types.size());
+  std::vector<std::shared_ptr<Tensor>> tensors;
+  tensors.reserve(ndim);
+  for (int i = 0; i < ndim; ++i) {
+    std::shared_ptr<Tensor> tensor;
+    ARROW_ASSIGN_OR_RAISE(tensor, Tensor::Make(indices_types[i], indices_data_buffers[i],
+                                               {non_zero_length}));
+    tensors.push_back(tensor);
+  }
+  return std::make_shared<SparseSplitCOOIndex>(tensors);
+}
+
+Result<std::shared_ptr<SparseSplitCOOIndex>> SparseSplitCOOIndex::Make(
+    const std::vector<std::shared_ptr<Tensor>>& indices) {
+  RETURN_NOT_OK(CheckSparseSplitCOOIndexTypesValidity(indices));
+  return std::make_shared<SparseSplitCOOIndex>(indices);
+}
+
+SparseSplitCOOIndex::SparseSplitCOOIndex(
+    const std::vector<std::shared_ptr<Tensor>>& indices)
+    : SparseIndexBase(), indices_(indices) {}
+
+Status SparseSplitCOOIndex::CheckValidity() const {
+  const auto ndim = static_cast<int>(indices_.size());
+
+  if (ndim == 0) {  // Empty sparse tensor
+    return Status::OK();
+  }
+
+  const int64_t non_zero_length = indices_[0]->shape()[0];
+  for (int i = 0; i < ndim; ++i) {
+    auto& shape = indices_[i]->shape();
+    if (shape.size() != 1) {
+      return Status::Invalid(
+          "all the index tensors in a SparseSplitCOOIndex must be 1-dimensional, ",
+          "but the ", i, internal::ordinal_suffix(i), " tensor is not");
+    }
+    if (shape[0] != non_zero_length) {
+      return Status::Invalid(
+          "all the index tensors are the same length, "
+          "but the ",
+          i, internal::ordinal_suffix(i), " tensor is not");
+    }
+  }
+
+  std::vector<std::shared_ptr<DataType>> types;
+  std::vector<std::shared_ptr<Buffer>> buffers;
+
+  for (int i = 0; i < ndim; ++i) {
+    auto& tensor = indices_[i];
+    types.emplace_back(tensor->type());
+    buffers.emplace_back(tensor->data());
+  }
+
+  return CheckSparseSplitCOOIndexValidity(types, non_zero_length, buffers);
+}
+
+std::string SparseSplitCOOIndex::ToString() const { return "SparseSplitCOOIndex"; }
+
+bool SparseSplitCOOIndex::Equals(const SparseSplitCOOIndex& other) const {
+  if (indices_.size() != other.indices_.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < indices_.size(); ++i) {
+    if (!indices_[i]->Equals(*other.indices_[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// ----------------------------------------------------------------------
 // SparseCSXIndex
 
 namespace internal {
@@ -417,6 +573,36 @@ bool SparseCSFIndex::Equals(const SparseCSFIndex& other) const {
 // ----------------------------------------------------------------------
 // SparseTensor
 
+Result<std::vector<std::shared_ptr<DataType>>> SparseTensor::DetectMinimumIndexDataTypes(
+    const std::vector<int64_t>& shape) {
+  std::vector<std::shared_ptr<DataType>> types;
+  types.reserve(shape.size());
+  for (auto n : shape) {
+    if (n < 0 || n > std::numeric_limits<int64_t>::max()) {
+      return Status::Invalid("Invalid value in shape");
+    }
+
+    decltype(types)::value_type type;
+    if (0 <= n && n <= std::numeric_limits<int8_t>::max()) {
+      type = int8();
+    } else if (n <= std::numeric_limits<uint8_t>::max()) {
+      type = uint8();
+    } else if (n <= std::numeric_limits<int16_t>::max()) {
+      type = int16();
+    } else if (n <= std::numeric_limits<uint16_t>::max()) {
+      type = uint16();
+    } else if (n <= std::numeric_limits<int32_t>::max()) {
+      type = int32();
+    } else if (n <= std::numeric_limits<uint32_t>::max()) {
+      type = uint32();
+    } else {
+      type = int64();
+    }
+    types.push_back(type);
+  }
+  return types;
+}
+
 // Constructor with all attributes
 SparseTensor::SparseTensor(const std::shared_ptr<DataType>& type,
                            const std::shared_ptr<Buffer>& data,
@@ -455,6 +641,10 @@ Result<std::shared_ptr<Tensor>> SparseTensor::ToTensor(MemoryPool* pool) const {
       return MakeTensorFromSparseCOOTensor(
           pool, internal::checked_cast<const SparseCOOTensor*>(this));
       break;
+
+    case SparseTensorFormat::SplitCOO:
+      return MakeTensorFromSparseSplitCOOTensor(
+          pool, internal::checked_cast<const SparseSplitCOOTensor*>(this));
 
     case SparseTensorFormat::CSR:
       return MakeTensorFromSparseCSRMatrix(

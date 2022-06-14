@@ -23,6 +23,9 @@ struct SparseMatrixIndexCSXBuilder;
 struct SparseTensorIndexCSF;
 struct SparseTensorIndexCSFBuilder;
 
+struct SparseTensorIndexSplitCOO;
+struct SparseTensorIndexSplitCOOBuilder;
+
 struct SparseTensor;
 struct SparseTensorBuilder;
 
@@ -61,33 +64,36 @@ enum class SparseTensorIndex : uint8_t {
   SparseTensorIndexCOO = 1,
   SparseMatrixIndexCSX = 2,
   SparseTensorIndexCSF = 3,
+  SparseTensorIndexSplitCOO = 4,
   MIN = NONE,
-  MAX = SparseTensorIndexCSF
+  MAX = SparseTensorIndexSplitCOO
 };
 
-inline const SparseTensorIndex (&EnumValuesSparseTensorIndex())[4] {
+inline const SparseTensorIndex (&EnumValuesSparseTensorIndex())[5] {
   static const SparseTensorIndex values[] = {
     SparseTensorIndex::NONE,
     SparseTensorIndex::SparseTensorIndexCOO,
     SparseTensorIndex::SparseMatrixIndexCSX,
-    SparseTensorIndex::SparseTensorIndexCSF
+    SparseTensorIndex::SparseTensorIndexCSF,
+    SparseTensorIndex::SparseTensorIndexSplitCOO
   };
   return values;
 }
 
 inline const char * const *EnumNamesSparseTensorIndex() {
-  static const char * const names[5] = {
+  static const char * const names[6] = {
     "NONE",
     "SparseTensorIndexCOO",
     "SparseMatrixIndexCSX",
     "SparseTensorIndexCSF",
+    "SparseTensorIndexSplitCOO",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameSparseTensorIndex(SparseTensorIndex e) {
-  if (flatbuffers::IsOutRange(e, SparseTensorIndex::NONE, SparseTensorIndex::SparseTensorIndexCSF)) return "";
+  if (flatbuffers::IsOutRange(e, SparseTensorIndex::NONE, SparseTensorIndex::SparseTensorIndexSplitCOO)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesSparseTensorIndex()[index];
 }
@@ -108,6 +114,10 @@ template<> struct SparseTensorIndexTraits<org::apache::arrow::flatbuf::SparseTen
   static const SparseTensorIndex enum_value = SparseTensorIndex::SparseTensorIndexCSF;
 };
 
+template<> struct SparseTensorIndexTraits<org::apache::arrow::flatbuf::SparseTensorIndexSplitCOO> {
+  static const SparseTensorIndex enum_value = SparseTensorIndex::SparseTensorIndexSplitCOO;
+};
+
 bool VerifySparseTensorIndex(flatbuffers::Verifier &verifier, const void *obj, SparseTensorIndex type);
 bool VerifySparseTensorIndexVector(flatbuffers::Verifier &verifier, const flatbuffers::Vector<flatbuffers::Offset<void>> *values, const flatbuffers::Vector<uint8_t> *types);
 
@@ -125,24 +135,22 @@ bool VerifySparseTensorIndexVector(flatbuffers::Verifier &verifier, const flatbu
 ///
 /// For example, let X be a 2x3x4x5 tensor, and it has the following
 /// 6 non-zero values:
-/// ```text
+///
 ///   X[0, 1, 2, 0] := 1
 ///   X[1, 1, 2, 3] := 2
 ///   X[0, 2, 1, 0] := 3
 ///   X[0, 1, 3, 0] := 4
 ///   X[0, 1, 2, 1] := 5
 ///   X[1, 2, 0, 4] := 6
-/// ```
+///
 /// In COO format, the index matrix of X is the following 4x6 matrix:
-/// ```text
+///
 ///   [[0, 0, 0, 0, 1, 1],
 ///    [1, 1, 1, 2, 1, 2],
 ///    [2, 2, 3, 1, 2, 0],
 ///    [0, 1, 0, 0, 3, 4]]
-/// ```
-/// When isCanonical is true, the indices is sorted in lexicographical order
-/// (row-major order), and it does not have duplicated entries.  Otherwise,
-/// the indices may not be sorted, or may have duplicated entries.
+///
+/// Note that the indices are sorted in lexicographical order.
 struct SparseTensorIndexCOO FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   typedef SparseTensorIndexCOOBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
@@ -164,11 +172,7 @@ struct SparseTensorIndexCOO FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table
   const org::apache::arrow::flatbuf::Buffer *indicesBuffer() const {
     return GetStruct<const org::apache::arrow::flatbuf::Buffer *>(VT_INDICESBUFFER);
   }
-  /// This flag is true if and only if the indices matrix is sorted in
-  /// row-major order, and does not have duplicated entries.
-  /// This sort order is the same as of Tensorflow's SparseTensor,
-  /// but it is inverse order of SciPy's canonical coo_matrix
-  /// (SciPy employs column-major order for its coo_matrix).
+  /// The canonicality flag
   bool isCanonical() const {
     return GetField<uint8_t>(VT_ISCANONICAL, 0) != 0;
   }
@@ -263,27 +267,26 @@ struct SparseMatrixIndexCSX FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table
   }
   /// indptrBuffer stores the location and size of indptr array that
   /// represents the range of the rows.
-  /// The i-th row spans from `indptr[i]` to `indptr[i+1]` in the data.
+  /// The i-th row spans from indptr[i] to indptr[i+1] in the data.
   /// The length of this array is 1 + (the number of rows), and the type
   /// of index value is long.
   ///
   /// For example, let X be the following 6x4 matrix:
-  /// ```text
+  ///
   ///   X := [[0, 1, 2, 0],
   ///         [0, 0, 3, 0],
   ///         [0, 4, 0, 5],
   ///         [0, 0, 0, 0],
   ///         [6, 0, 7, 8],
   ///         [0, 9, 0, 0]].
-  /// ```
+  ///
   /// The array of non-zero values in X is:
-  /// ```text
+  ///
   ///   values(X) = [1, 2, 3, 4, 5, 6, 7, 8, 9].
-  /// ```
+  ///
   /// And the indptr of X is:
-  /// ```text
+  ///
   ///   indptr(X) = [0, 2, 3, 5, 5, 8, 10].
-  /// ```
   const org::apache::arrow::flatbuf::Buffer *indptrBuffer() const {
     return GetStruct<const org::apache::arrow::flatbuf::Buffer *>(VT_INDPTRBUFFER);
   }
@@ -296,9 +299,9 @@ struct SparseMatrixIndexCSX FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table
   /// The type of index value is long.
   ///
   /// For example, the indices of the above X is:
-  /// ```text
+  ///
   ///   indices(X) = [1, 2, 2, 1, 3, 0, 2, 3, 1].
-  /// ```
+  ///
   /// Note that the indices are sorted in lexicographical order for each row.
   const org::apache::arrow::flatbuf::Buffer *indicesBuffer() const {
     return GetStruct<const org::apache::arrow::flatbuf::Buffer *>(VT_INDICESBUFFER);
@@ -378,7 +381,7 @@ struct SparseTensorIndexCSF FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table
     VT_AXISORDER = 12
   };
   /// CSF is a generalization of compressed sparse row (CSR) index.
-  /// See [smith2017knl](http://shaden.io/pub-files/smith2017knl.pdf)
+  /// See [smith2017knl]: http://shaden.io/pub-files/smith2017knl.pdf
   ///
   /// CSF index recursively compresses each dimension of a tensor into a set
   /// of prefix trees. Each path from a root to leaf forms one tensor
@@ -387,7 +390,7 @@ struct SparseTensorIndexCSF FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table
   ///
   /// For example, let X be a 2x3x4x5 tensor and let it have the following
   /// 8 non-zero values:
-  /// ```text
+  ///
   ///   X[0, 0, 0, 1] := 1
   ///   X[0, 0, 0, 2] := 2
   ///   X[0, 1, 0, 0] := 3
@@ -396,9 +399,9 @@ struct SparseTensorIndexCSF FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table
   ///   X[1, 1, 1, 0] := 6
   ///   X[1, 1, 1, 1] := 7
   ///   X[1, 1, 1, 2] := 8
-  /// ```
+  ///
   /// As a prefix tree this would be represented as:
-  /// ```text
+  ///
   ///         0          1
   ///        / \         |
   ///       0   1        1
@@ -406,25 +409,24 @@ struct SparseTensorIndexCSF FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table
   ///     0   0   1      1
   ///    /|  /|   |    /| |
   ///   1 2 0 2   0   0 1 2
-  /// ```
   /// The type of values in indptrBuffers
   const org::apache::arrow::flatbuf::Int *indptrType() const {
     return GetPointer<const org::apache::arrow::flatbuf::Int *>(VT_INDPTRTYPE);
   }
   /// indptrBuffers stores the sparsity structure.
   /// Each two consecutive dimensions in a tensor correspond to a buffer in
-  /// indptrBuffers. A pair of consecutive values at `indptrBuffers[dim][i]`
-  /// and `indptrBuffers[dim][i + 1]` signify a range of nodes in
-  /// `indicesBuffers[dim + 1]` who are children of `indicesBuffers[dim][i]` node.
+  /// indptrBuffers. A pair of consecutive values at indptrBuffers[dim][i]
+  /// and indptrBuffers[dim][i + 1] signify a range of nodes in
+  /// indicesBuffers[dim + 1] who are children of indicesBuffers[dim][i] node.
   ///
   /// For example, the indptrBuffers for the above X is:
-  /// ```text
+  ///
   ///   indptrBuffer(X) = [
   ///                       [0, 2, 3],
   ///                       [0, 1, 3, 4],
   ///                       [0, 2, 4, 5, 8]
   ///                     ].
-  /// ```
+  ///
   const flatbuffers::Vector<const org::apache::arrow::flatbuf::Buffer *> *indptrBuffers() const {
     return GetPointer<const flatbuffers::Vector<const org::apache::arrow::flatbuf::Buffer *> *>(VT_INDPTRBUFFERS);
   }
@@ -435,23 +437,23 @@ struct SparseTensorIndexCSF FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table
   /// indicesBuffers stores values of nodes.
   /// Each tensor dimension corresponds to a buffer in indicesBuffers.
   /// For example, the indicesBuffers for the above X is:
-  /// ```text
+  ///
   ///   indicesBuffer(X) = [
   ///                        [0, 1],
   ///                        [0, 1, 1],
   ///                        [0, 0, 1, 1],
   ///                        [1, 2, 0, 2, 0, 0, 1, 2]
   ///                      ].
-  /// ```
+  ///
   const flatbuffers::Vector<const org::apache::arrow::flatbuf::Buffer *> *indicesBuffers() const {
     return GetPointer<const flatbuffers::Vector<const org::apache::arrow::flatbuf::Buffer *> *>(VT_INDICESBUFFERS);
   }
   /// axisOrder stores the sequence in which dimensions were traversed to
   /// produce the prefix tree.
   /// For example, the axisOrder for the above X is:
-  /// ```text
+  ///
   ///   axisOrder(X) = [0, 1, 2, 3].
-  /// ```
+  ///
   const flatbuffers::Vector<int32_t> *axisOrder() const {
     return GetPointer<const flatbuffers::Vector<int32_t> *>(VT_AXISORDER);
   }
@@ -540,6 +542,77 @@ inline flatbuffers::Offset<SparseTensorIndexCSF> CreateSparseTensorIndexCSFDirec
       indicesType,
       indicesBuffers__,
       axisOrder__);
+}
+
+struct SparseTensorIndexSplitCOO FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
+  typedef SparseTensorIndexSplitCOOBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_INDICESTYPES = 4,
+    VT_INDICESBUFFERS = 6
+  };
+  /// The type of values in indicesBuffers
+  const flatbuffers::Vector<flatbuffers::Offset<org::apache::arrow::flatbuf::Int>> *indicesTypes() const {
+    return GetPointer<const flatbuffers::Vector<flatbuffers::Offset<org::apache::arrow::flatbuf::Int>> *>(VT_INDICESTYPES);
+  }
+  /// The pairs of location and size of the index arrays' data
+  const flatbuffers::Vector<const org::apache::arrow::flatbuf::Buffer *> *indicesBuffers() const {
+    return GetPointer<const flatbuffers::Vector<const org::apache::arrow::flatbuf::Buffer *> *>(VT_INDICESBUFFERS);
+  }
+  bool Verify(flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffsetRequired(verifier, VT_INDICESTYPES) &&
+           verifier.VerifyVector(indicesTypes()) &&
+           verifier.VerifyVectorOfTables(indicesTypes()) &&
+           VerifyOffsetRequired(verifier, VT_INDICESBUFFERS) &&
+           verifier.VerifyVector(indicesBuffers()) &&
+           verifier.EndTable();
+  }
+};
+
+struct SparseTensorIndexSplitCOOBuilder {
+  typedef SparseTensorIndexSplitCOO Table;
+  flatbuffers::FlatBufferBuilder &fbb_;
+  flatbuffers::uoffset_t start_;
+  void add_indicesTypes(flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<org::apache::arrow::flatbuf::Int>>> indicesTypes) {
+    fbb_.AddOffset(SparseTensorIndexSplitCOO::VT_INDICESTYPES, indicesTypes);
+  }
+  void add_indicesBuffers(flatbuffers::Offset<flatbuffers::Vector<const org::apache::arrow::flatbuf::Buffer *>> indicesBuffers) {
+    fbb_.AddOffset(SparseTensorIndexSplitCOO::VT_INDICESBUFFERS, indicesBuffers);
+  }
+  explicit SparseTensorIndexSplitCOOBuilder(flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  SparseTensorIndexSplitCOOBuilder &operator=(const SparseTensorIndexSplitCOOBuilder &);
+  flatbuffers::Offset<SparseTensorIndexSplitCOO> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = flatbuffers::Offset<SparseTensorIndexSplitCOO>(end);
+    fbb_.Required(o, SparseTensorIndexSplitCOO::VT_INDICESTYPES);
+    fbb_.Required(o, SparseTensorIndexSplitCOO::VT_INDICESBUFFERS);
+    return o;
+  }
+};
+
+inline flatbuffers::Offset<SparseTensorIndexSplitCOO> CreateSparseTensorIndexSplitCOO(
+    flatbuffers::FlatBufferBuilder &_fbb,
+    flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<org::apache::arrow::flatbuf::Int>>> indicesTypes = 0,
+    flatbuffers::Offset<flatbuffers::Vector<const org::apache::arrow::flatbuf::Buffer *>> indicesBuffers = 0) {
+  SparseTensorIndexSplitCOOBuilder builder_(_fbb);
+  builder_.add_indicesBuffers(indicesBuffers);
+  builder_.add_indicesTypes(indicesTypes);
+  return builder_.Finish();
+}
+
+inline flatbuffers::Offset<SparseTensorIndexSplitCOO> CreateSparseTensorIndexSplitCOODirect(
+    flatbuffers::FlatBufferBuilder &_fbb,
+    const std::vector<flatbuffers::Offset<org::apache::arrow::flatbuf::Int>> *indicesTypes = nullptr,
+    const std::vector<org::apache::arrow::flatbuf::Buffer> *indicesBuffers = nullptr) {
+  auto indicesTypes__ = indicesTypes ? _fbb.CreateVector<flatbuffers::Offset<org::apache::arrow::flatbuf::Int>>(*indicesTypes) : 0;
+  auto indicesBuffers__ = indicesBuffers ? _fbb.CreateVectorOfStructs<org::apache::arrow::flatbuf::Buffer>(*indicesBuffers) : 0;
+  return org::apache::arrow::flatbuf::CreateSparseTensorIndexSplitCOO(
+      _fbb,
+      indicesTypes__,
+      indicesBuffers__);
 }
 
 struct SparseTensor FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
@@ -650,6 +723,9 @@ struct SparseTensor FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   }
   const org::apache::arrow::flatbuf::SparseTensorIndexCSF *sparseIndex_as_SparseTensorIndexCSF() const {
     return sparseIndex_type() == org::apache::arrow::flatbuf::SparseTensorIndex::SparseTensorIndexCSF ? static_cast<const org::apache::arrow::flatbuf::SparseTensorIndexCSF *>(sparseIndex()) : nullptr;
+  }
+  const org::apache::arrow::flatbuf::SparseTensorIndexSplitCOO *sparseIndex_as_SparseTensorIndexSplitCOO() const {
+    return sparseIndex_type() == org::apache::arrow::flatbuf::SparseTensorIndex::SparseTensorIndexSplitCOO ? static_cast<const org::apache::arrow::flatbuf::SparseTensorIndexSplitCOO *>(sparseIndex()) : nullptr;
   }
   /// The location and size of the tensor's data
   const org::apache::arrow::flatbuf::Buffer *data() const {
@@ -768,6 +844,10 @@ template<> inline const org::apache::arrow::flatbuf::SparseTensorIndexCSF *Spars
   return sparseIndex_as_SparseTensorIndexCSF();
 }
 
+template<> inline const org::apache::arrow::flatbuf::SparseTensorIndexSplitCOO *SparseTensor::sparseIndex_as<org::apache::arrow::flatbuf::SparseTensorIndexSplitCOO>() const {
+  return sparseIndex_as_SparseTensorIndexSplitCOO();
+}
+
 struct SparseTensorBuilder {
   typedef SparseTensor Table;
   flatbuffers::FlatBufferBuilder &fbb_;
@@ -865,6 +945,10 @@ inline bool VerifySparseTensorIndex(flatbuffers::Verifier &verifier, const void 
     }
     case SparseTensorIndex::SparseTensorIndexCSF: {
       auto ptr = reinterpret_cast<const org::apache::arrow::flatbuf::SparseTensorIndexCSF *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case SparseTensorIndex::SparseTensorIndexSplitCOO: {
+      auto ptr = reinterpret_cast<const org::apache::arrow::flatbuf::SparseTensorIndexSplitCOO *>(obj);
       return verifier.VerifyTable(ptr);
     }
     default: return true;

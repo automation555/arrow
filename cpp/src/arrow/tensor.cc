@@ -31,9 +31,8 @@
 #include "arrow/type.h"
 #include "arrow/type_traits.h"
 #include "arrow/util/checked_cast.h"
-#include "arrow/util/int_util_overflow.h"
 #include "arrow/util/logging.h"
-#include "arrow/visit_type_inline.h"
+#include "arrow/visitor_inline.h"
 
 namespace arrow {
 
@@ -41,71 +40,43 @@ using internal::checked_cast;
 
 namespace internal {
 
-Status ComputeRowMajorStrides(const FixedWidthType& type,
-                              const std::vector<int64_t>& shape,
-                              std::vector<int64_t>* strides) {
+void ComputeRowMajorStrides(const FixedWidthType& type, const std::vector<int64_t>& shape,
+                            std::vector<int64_t>* strides) {
   const int byte_width = GetByteWidth(type);
-  const size_t ndim = shape.size();
-
-  int64_t remaining = 0;
-  if (!shape.empty() && shape.front() > 0) {
-    remaining = byte_width;
-    for (size_t i = 1; i < ndim; ++i) {
-      if (internal::MultiplyWithOverflow(remaining, shape[i], &remaining)) {
-        return Status::Invalid(
-            "Row-major strides computed from shape would not fit in 64-bit integer");
-      }
-    }
+  int64_t remaining = byte_width;
+  for (int64_t dimsize : shape) {
+    remaining *= dimsize;
   }
 
   if (remaining == 0) {
     strides->assign(shape.size(), byte_width);
-    return Status::OK();
+    return;
   }
 
-  strides->push_back(remaining);
-  for (size_t i = 1; i < ndim; ++i) {
-    remaining /= shape[i];
+  for (int64_t dimsize : shape) {
+    remaining /= dimsize;
     strides->push_back(remaining);
   }
-
-  return Status::OK();
-}
-
-Status ComputeColumnMajorStrides(const FixedWidthType& type,
-                                 const std::vector<int64_t>& shape,
-                                 std::vector<int64_t>* strides) {
-  const int byte_width = internal::GetByteWidth(type);
-  const size_t ndim = shape.size();
-
-  int64_t total = 0;
-  if (!shape.empty() && shape.back() > 0) {
-    total = byte_width;
-    for (size_t i = 0; i < ndim - 1; ++i) {
-      if (internal::MultiplyWithOverflow(total, shape[i], &total)) {
-        return Status::Invalid(
-            "Column-major strides computed from shape would not fit in 64-bit "
-            "integer");
-      }
-    }
-  }
-
-  if (total == 0) {
-    strides->assign(shape.size(), byte_width);
-    return Status::OK();
-  }
-
-  total = byte_width;
-  for (size_t i = 0; i < ndim - 1; ++i) {
-    strides->push_back(total);
-    total *= shape[i];
-  }
-  strides->push_back(total);
-
-  return Status::OK();
 }
 
 }  // namespace internal
+
+static void ComputeColumnMajorStrides(const FixedWidthType& type,
+                                      const std::vector<int64_t>& shape,
+                                      std::vector<int64_t>* strides) {
+  const int byte_width = internal::GetByteWidth(type);
+  int64_t total = byte_width;
+  for (int64_t dimsize : shape) {
+    if (dimsize == 0) {
+      strides->assign(shape.size(), byte_width);
+      return;
+    }
+  }
+  for (int64_t dimsize : shape) {
+    strides->push_back(total);
+    total *= dimsize;
+  }
+}
 
 namespace {
 
@@ -114,11 +85,8 @@ inline bool IsTensorStridesRowMajor(const std::shared_ptr<DataType>& type,
                                     const std::vector<int64_t>& strides) {
   std::vector<int64_t> c_strides;
   const auto& fw_type = checked_cast<const FixedWidthType&>(*type);
-  if (internal::ComputeRowMajorStrides(fw_type, shape, &c_strides).ok()) {
-    return strides == c_strides;
-  } else {
-    return false;
-  }
+  internal::ComputeRowMajorStrides(fw_type, shape, &c_strides);
+  return strides == c_strides;
 }
 
 inline bool IsTensorStridesColumnMajor(const std::shared_ptr<DataType>& type,
@@ -126,11 +94,8 @@ inline bool IsTensorStridesColumnMajor(const std::shared_ptr<DataType>& type,
                                        const std::vector<int64_t>& strides) {
   std::vector<int64_t> f_strides;
   const auto& fw_type = checked_cast<const FixedWidthType&>(*type);
-  if (internal::ComputeColumnMajorStrides(fw_type, shape, &f_strides).ok()) {
-    return strides == f_strides;
-  } else {
-    return false;
-  }
+  ComputeColumnMajorStrides(fw_type, shape, &f_strides);
+  return strides == f_strides;
 }
 
 inline Status CheckTensorValidity(const std::shared_ptr<DataType>& type,
@@ -162,29 +127,14 @@ Status CheckTensorStridesValidity(const std::shared_ptr<Buffer>& data,
     return Status::OK();
   }
 
-  // Check the largest offset can be computed without overflow
-  const size_t ndim = shape.size();
-  int64_t largest_offset = 0;
-  for (size_t i = 0; i < ndim; ++i) {
-    if (shape[i] == 0) continue;
-    if (strides[i] < 0) {
-      // TODO(mrkn): Support negative strides for sharing views
-      return Status::Invalid("negative strides not supported");
-    }
-
-    int64_t dim_offset;
-    if (!internal::MultiplyWithOverflow(shape[i] - 1, strides[i], &dim_offset)) {
-      if (!internal::AddWithOverflow(largest_offset, dim_offset, &largest_offset)) {
-        continue;
-      }
-    }
-
-    return Status::Invalid(
-        "offsets computed from shape and strides would not fit in 64-bit integer");
+  std::vector<int64_t> last_index(shape);
+  const int64_t n = static_cast<int64_t>(shape.size());
+  for (int64_t i = 0; i < n; ++i) {
+    --last_index[i];
   }
-
+  int64_t last_offset = Tensor::CalculateValueOffset(strides, last_index);
   const int byte_width = internal::GetByteWidth(*type);
-  if (largest_offset > data->size() - byte_width) {
+  if (last_offset + byte_width > data->size()) {
     return Status::Invalid("strides must not involve buffer over run");
   }
   return Status::OK();
@@ -209,10 +159,6 @@ Status ValidateTensorParameters(const std::shared_ptr<DataType>& type,
   RETURN_NOT_OK(CheckTensorValidity(type, data, shape));
   if (!strides.empty()) {
     RETURN_NOT_OK(CheckTensorStridesValidity(data, shape, strides, type));
-  } else {
-    std::vector<int64_t> tmp_strides;
-    RETURN_NOT_OK(ComputeRowMajorStrides(checked_cast<const FixedWidthType&>(*type),
-                                         shape, &tmp_strides));
   }
   if (dim_names.size() > shape.size()) {
     return Status::Invalid("too many dim_names are supplied");
@@ -222,18 +168,32 @@ Status ValidateTensorParameters(const std::shared_ptr<DataType>& type,
 
 }  // namespace internal
 
-/// Constructor with strides and dimension names
+void Tensor::IncrementIndex(std::vector<int64_t>& index,
+                            const std::vector<int64_t>& shape) {
+  const int64_t ndim = shape.size();
+  ++index[ndim - 1];
+  if (index[ndim - 1] == shape[ndim - 1]) {
+    int64_t d = ndim - 1;
+    while (d > 0 && index[d] == shape[d]) {
+      index[d] = 0;
+      ++index[d - 1];
+      --d;
+    }
+  }
+}
+
 Tensor::Tensor(const std::shared_ptr<DataType>& type, const std::shared_ptr<Buffer>& data,
                const std::vector<int64_t>& shape, const std::vector<int64_t>& strides,
                const std::vector<std::string>& dim_names)
     : type_(type), data_(data), shape_(shape), strides_(strides), dim_names_(dim_names) {
   ARROW_CHECK(is_tensor_supported(type->id()));
   if (shape.size() > 0 && strides.size() == 0) {
-    ARROW_CHECK_OK(internal::ComputeRowMajorStrides(
-        checked_cast<const FixedWidthType&>(*type_), shape, &strides_));
+    internal::ComputeRowMajorStrides(checked_cast<const FixedWidthType&>(*type_), shape,
+                                     &strides_);
   }
 }
 
+/// Constructor with strides and dimension names
 Tensor::Tensor(const std::shared_ptr<DataType>& type, const std::shared_ptr<Buffer>& data,
                const std::vector<int64_t>& shape, const std::vector<int64_t>& strides)
     : Tensor(type, data, shape, strides, {}) {}
@@ -328,7 +288,47 @@ struct NonZeroCounter {
   }
 
   const Tensor& tensor_;
-  int64_t result = 0;
+  int64_t result;
+};
+
+template <typename TYPE>
+inline void TensorCollectNonZeroIndices(const Tensor& tensor,
+                                        std::vector<std::vector<int64_t>>* out_indices) {
+  using c_type = typename TYPE::c_type;
+  constexpr c_type zero = c_type(0);
+  std::vector<std::vector<int64_t>> non_zero_indices;
+  std::vector<int64_t> index(tensor.ndim(), 0);
+
+  const auto size = tensor.size();
+  const auto& shape = tensor.shape();
+
+  for (int64_t i = 0; i < size; ++i) {
+    if (tensor.Value<TYPE>(index) != zero) {
+      non_zero_indices.push_back(index);
+    }
+    Tensor::IncrementIndex(index, shape);
+  }
+  *out_indices = std::move(non_zero_indices);
+}
+
+struct NonZeroIndicesCollector {
+  NonZeroIndicesCollector(const Tensor& tensor,
+                          std::vector<std::vector<int64_t>>* non_zero_indices)
+      : tensor_(tensor), non_zero_indices_(non_zero_indices) {}
+
+  template <typename TYPE>
+  enable_if_number<TYPE, Status> Visit(const TYPE& type) {
+    TensorCollectNonZeroIndices<TYPE>(tensor_, non_zero_indices_);
+    return Status::OK();
+  }
+
+  Status Visit(const DataType& type) {
+    ARROW_CHECK(!is_tensor_supported(type.id()));
+    return Status::NotImplemented("Tensor of ", type.ToString(), " is not implemented");
+  }
+
+  const Tensor& tensor_;
+  std::vector<std::vector<int64_t>>* non_zero_indices_;
 };
 
 }  // namespace
@@ -337,6 +337,13 @@ Result<int64_t> Tensor::CountNonZero() const {
   NonZeroCounter counter(*this);
   RETURN_NOT_OK(VisitTypeInline(*type(), &counter));
   return counter.result;
+}
+
+Result<std::vector<std::vector<int64_t>>> Tensor::NonZeroIndices() const {
+  std::vector<std::vector<int64_t>> non_zero_indices;
+  NonZeroIndicesCollector collector(*this, &non_zero_indices);
+  RETURN_NOT_OK(VisitTypeInline(*type(), &collector));
+  return std::move(non_zero_indices);
 }
 
 }  // namespace arrow

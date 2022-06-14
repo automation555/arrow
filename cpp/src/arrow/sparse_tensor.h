@@ -59,7 +59,9 @@ struct SparseTensorFormat {
     /// Compressed sparse column (CSC) format.
     CSC,
     /// Compressed sparse fiber (CSF) format.
-    CSF
+    CSF,
+    /// Coordinate list (COO) format with split indices.
+    SplitCOO
   };
 };
 
@@ -191,6 +193,65 @@ class ARROW_EXPORT SparseCOOIndex : public internal::SparseIndexBase<SparseCOOIn
  protected:
   std::shared_ptr<Tensor> coords_;
   bool is_canonical_;
+};
+
+// ----------------------------------------------------------------------
+// SparseSplitCOOIndex class
+
+/// \brief EXPERIMENTAL: The index data for a COO sparse tensor with split
+/// indices
+///
+/// A SplitCOO sparse index manages the location of its non-zero values by
+/// their coordinates.  This format is compatibe with scipy.coo_matrix.
+class ARROW_EXPORT SparseSplitCOOIndex
+    : public internal::SparseIndexBase<SparseSplitCOOIndex> {
+ public:
+  static constexpr SparseTensorFormat::type format_id = SparseTensorFormat::SplitCOO;
+
+  /// \brief Make SparseSplitCOOIndex from raw properties
+  static Result<std::shared_ptr<SparseSplitCOOIndex>> Make(
+      const std::vector<std::shared_ptr<DataType>>& indices_types,
+      int64_t non_zero_length,
+      const std::vector<std::shared_ptr<Buffer>>& indices_data_buffers);
+
+  /// \brief Make SparseSplitCOOIndex from indices
+  static Result<std::shared_ptr<SparseSplitCOOIndex>> Make(
+      const std::vector<std::shared_ptr<Tensor>>& indices);
+
+  /// \brief Construct SparseSplitCOOIndex from two index vectors
+  explicit SparseSplitCOOIndex(const std::vector<std::shared_ptr<Tensor>>& indices);
+
+  /// \brief Check the validity of the instance
+  ///
+  /// You do not use this function if you make an instance by Make function.
+  Status CheckValidity() const;
+
+  /// \brief Return a vector of 1D tensors of the index vectors
+  const std::vector<std::shared_ptr<Tensor>>& indices() const { return indices_; }
+
+  /// \brief Return the number of non zero values in the sparse tensor related
+  /// to this sparse index
+  int64_t non_zero_length() const override { return indices_[0]->shape()[0]; }
+
+  /// \brief Return a string representation of the sparse index
+  std::string ToString() const override;
+
+  /// \brief Return whether the SplitCOO indices are equal
+  bool Equals(const SparseSplitCOOIndex& other) const;
+
+  inline Status ValidateShape(const std::vector<int64_t>& shape) const override {
+    ARROW_RETURN_NOT_OK(SparseIndex::ValidateShape(shape));
+
+    if (shape.size() != indices_.size()) {
+      return Status::Invalid(
+          "shape length is inconsistent with the indices in SplitCOO index");
+    }
+
+    return Status::OK();
+  }
+
+ private:
+  std::vector<std::shared_ptr<Tensor>> indices_;
 };
 
 namespace internal {
@@ -454,6 +515,13 @@ class ARROW_EXPORT SparseCSFIndex : public internal::SparseIndexBase<SparseCSFIn
 /// \brief EXPERIMENTAL: The base class of sparse tensor container
 class ARROW_EXPORT SparseTensor {
  public:
+  /// \brief Automatic detection of index data types for the given shape
+  ///
+  /// This utility function can be used to detect a data type that is used for making
+  /// scipy-compatible sparse matrices.
+  static Result<std::vector<std::shared_ptr<DataType>>> DetectMinimumIndexDataTypes(
+      const std::vector<int64_t>& shape);
+
   virtual ~SparseTensor() = default;
 
   SparseTensorFormat::type format_id() const { return sparse_index_->format_id(); }
@@ -508,6 +576,13 @@ class ARROW_EXPORT SparseTensor {
     return ToTensor(default_memory_pool());
   }
 
+  /// \brief Status-return version of ToTensor().
+  ARROW_DEPRECATED("Use Result-returning version")
+  Status ToTensor(std::shared_ptr<Tensor>* out) const { return ToTensor().Value(out); }
+  Status ToTensor(MemoryPool* pool, std::shared_ptr<Tensor>* out) const {
+    return ToTensor(pool).Value(out);
+  }
+
  protected:
   // Constructor with all attributes
   SparseTensor(const std::shared_ptr<DataType>& type, const std::shared_ptr<Buffer>& data,
@@ -536,6 +611,12 @@ Status MakeSparseTensorFromTensor(const Tensor& tensor,
                                   MemoryPool* pool,
                                   std::shared_ptr<SparseIndex>* out_sparse_index,
                                   std::shared_ptr<Buffer>* out_data);
+
+ARROW_EXPORT
+Status MakeSparseTensorFromTensor(
+    const Tensor& tensor, SparseTensorFormat::type sparse_format_id,
+    const std::vector<std::shared_ptr<DataType>>& index_value_types, MemoryPool* pool,
+    std::shared_ptr<SparseIndex>* out_sparse_index, std::shared_ptr<Buffer>* out_data);
 
 }  // namespace internal
 
@@ -593,9 +674,30 @@ class SparseTensorImpl : public SparseTensor {
         data, tensor.shape(), tensor.dim_names_);
   }
 
+  // \brief Create a sparse tensor from a dense tensor with the auto-detection of
+  // the minimal size of the index value type
   static inline Result<std::shared_ptr<SparseTensorImpl<SparseIndexType>>> Make(
       const Tensor& tensor, MemoryPool* pool = default_memory_pool()) {
     return Make(tensor, int64(), pool);
+  }
+
+  /// \brief Create a sparse tensor from a dense tensor with
+  /// different index data types for each dimension
+  ///
+  /// The dense tensor is re-encoded as a sparse index and a physical
+  /// data buffer for the non-zero value.
+  static inline Result<std::shared_ptr<SparseTensorImpl<SparseIndexType>>> Make(
+      const Tensor& tensor,
+      const std::vector<std::shared_ptr<DataType>>& index_value_types,
+      MemoryPool* pool = default_memory_pool()) {
+    std::shared_ptr<SparseIndex> sparse_index;
+    std::shared_ptr<Buffer> data;
+    ARROW_RETURN_NOT_OK(internal::MakeSparseTensorFromTensor(
+        tensor, SparseIndexType::format_id, index_value_types, pool, &sparse_index,
+        &data));
+    return std::make_shared<SparseTensorImpl<SparseIndexType>>(
+        internal::checked_pointer_cast<SparseIndexType>(sparse_index), tensor.type(),
+        data, tensor.shape(), tensor.dim_names_);
   }
 
  private:
@@ -604,6 +706,9 @@ class SparseTensorImpl : public SparseTensor {
 
 /// \brief EXPERIMENTAL: Type alias for COO sparse tensor
 using SparseCOOTensor = SparseTensorImpl<SparseCOOIndex>;
+
+/// \brief EXPERIMENTAL: Type alias for SplitCOO sparse tensor
+using SparseSplitCOOTensor = SparseTensorImpl<SparseSplitCOOIndex>;
 
 /// \brief EXPERIMENTAL: Type alias for CSR sparse matrix
 using SparseCSRMatrix = SparseTensorImpl<SparseCSRIndex>;

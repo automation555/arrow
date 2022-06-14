@@ -94,19 +94,17 @@ cdef api object pyarrow_wrap_data_type(
     elif type.get().id() == _Type_STRUCT:
         out = StructType.__new__(StructType)
     elif type.get().id() == _Type_SPARSE_UNION:
-        out = SparseUnionType.__new__(SparseUnionType)
+        out = UnionType.__new__(UnionType)
     elif type.get().id() == _Type_DENSE_UNION:
-        out = DenseUnionType.__new__(DenseUnionType)
+        out = UnionType.__new__(UnionType)
     elif type.get().id() == _Type_TIMESTAMP:
         out = TimestampType.__new__(TimestampType)
     elif type.get().id() == _Type_DURATION:
         out = DurationType.__new__(DurationType)
     elif type.get().id() == _Type_FIXED_SIZE_BINARY:
         out = FixedSizeBinaryType.__new__(FixedSizeBinaryType)
-    elif type.get().id() == _Type_DECIMAL128:
+    elif type.get().id() == _Type_DECIMAL:
         out = Decimal128Type.__new__(Decimal128Type)
-    elif type.get().id() == _Type_DECIMAL256:
-        out = Decimal256Type.__new__(Decimal256Type)
     elif type.get().id() == _Type_EXTENSION:
         ext_type = <const CExtensionType*> type.get()
         cpy_ext_type = dynamic_cast[_CPyExtensionTypePtr](ext_type)
@@ -251,9 +249,6 @@ cdef api object pyarrow_wrap_scalar(const shared_ptr[CScalar]& sp_scalar):
     if data_type == NULL:
         raise ValueError('Scalar data type was NULL')
 
-    if data_type.id() == _Type_NA:
-        return _NULL
-
     if data_type.id() not in _scalar_classes:
         raise ValueError('Scalar type not supported')
 
@@ -306,6 +301,29 @@ cdef api object pyarrow_wrap_sparse_coo_tensor(
 
     cdef SparseCOOTensor sparse_tensor = SparseCOOTensor.__new__(
         SparseCOOTensor)
+    sparse_tensor.init(sp_sparse_tensor)
+    return sparse_tensor
+
+
+cdef api bint pyarrow_is_sparse_split_coo_tensor(object sparse_tensor):
+    return isinstance(sparse_tensor, SparseSplitCOOTensor)
+
+cdef api shared_ptr[CSparseSplitCOOTensor] pyarrow_unwrap_sparse_split_coo_tensor(  # noqa: E501
+        object sparse_tensor):
+    cdef SparseSplitCOOTensor sten
+    if pyarrow_is_sparse_split_coo_tensor(sparse_tensor):
+        sten = <SparseSplitCOOTensor>(sparse_tensor)
+        return sten.sp_sparse_tensor
+
+    return shared_ptr[CSparseSplitCOOTensor]()
+
+cdef api object pyarrow_wrap_sparse_split_coo_tensor(
+        const shared_ptr[CSparseSplitCOOTensor]& sp_sparse_tensor):
+    if sp_sparse_tensor.get() == NULL:
+        raise ValueError('SparseSplitCOOTensor was NULL')
+
+    cdef SparseSplitCOOTensor sparse_tensor = SparseSplitCOOTensor.__new__(
+        SparseSplitCOOTensor)
     sparse_tensor.init(sp_sparse_tensor)
     return sparse_tensor
 
