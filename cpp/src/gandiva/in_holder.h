@@ -22,7 +22,6 @@
 
 #include "arrow/util/hashing.h"
 #include "gandiva/arrow.h"
-#include "gandiva/decimal_scalar.h"
 #include "gandiva/gandiva_aliases.h"
 
 namespace gandiva {
@@ -42,24 +41,6 @@ class InHolder {
 
  private:
   std::unordered_set<Type> values_;
-};
-
-template <>
-class InHolder<gandiva::DecimalScalar128> {
- public:
-  explicit InHolder(const std::unordered_set<gandiva::DecimalScalar128>& values) {
-    values_.max_load_factor(0.25f);
-    for (auto& value : values) {
-      values_.insert(value);
-    }
-  }
-
-  bool HasValue(gandiva::DecimalScalar128 value) const {
-    return values_.count(value) == 1;
-  }
-
- private:
-  std::unordered_set<gandiva::DecimalScalar128> values_;
 };
 
 template <>
@@ -87,5 +68,7 @@ class InHolder<std::string> {
   std::unordered_set<arrow::util::string_view, string_view_hash> values_lookup_;
   const std::unordered_set<std::string> values_;
 };
+
+template<>
 
 }  // namespace gandiva

@@ -15,38 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "gandiva/expr_validator.h"
 
 namespace gandiva {
-
-namespace {
-
-inline Status ValidateInExpression(size_t number_of_values,
-                                   const DataTypePtr& in_expr_return_type,
-                                   const DataTypePtr& types_of_values) {
-  ARROW_RETURN_IF(number_of_values == 0,
-                  Status::ExpressionValidationError(
-                      "IN Expression needs a non-empty constant list to match."));
-  ARROW_RETURN_IF(
-      !in_expr_return_type->Equals(types_of_values),
-      Status::ExpressionValidationError(
-          "Evaluation expression for IN clause returns ", in_expr_return_type->ToString(),
-          " values are of type", types_of_values->ToString()));
-
-  return Status::OK();
-}
-
-template <typename InExpressionNode>
-inline Status ValidateInExpression(const InExpressionNode& node,
-                                   const DataTypePtr& types_of_values_default) {
-  return ValidateInExpression(node.values().size(), node.eval_expr()->return_type(),
-                              node.type() ? node.type() : types_of_values_default);
-}
-
-}  // namespace
 
 Status ExprValidator::Validate(const ExpressionPtr& expr) {
   ARROW_RETURN_IF(expr == nullptr,
@@ -90,7 +65,7 @@ Status ExprValidator::Visit(const FieldNode& node) {
 }
 
 Status ExprValidator::Visit(const FunctionNode& node) {
-  const auto& desc = node.descriptor();
+  auto desc = node.descriptor();
   FunctionSignature signature(desc->name(), desc->params(), desc->return_type());
 
   const NativeFunction* native_function = registry_.LookupSignature(signature);
@@ -110,7 +85,7 @@ Status ExprValidator::Visit(const IfNode& node) {
   ARROW_RETURN_NOT_OK(node.then_node()->Accept(*this));
   ARROW_RETURN_NOT_OK(node.else_node()->Accept(*this));
 
-  const auto& if_node_ret_type = node.return_type();
+  auto if_node_ret_type = node.return_type();
   auto then_node_ret_type = node.then_node()->return_type();
   auto else_node_ret_type = node.else_node()->return_type();
 
@@ -173,26 +148,37 @@ Status ExprValidator::Visit(const BooleanNode& node) {
  * 2. Expression returns of the same type as the constants.
  */
 Status ExprValidator::Visit(const InExpressionNode<int32_t>& node) {
-  return ValidateInExpression(node, arrow::int32());
+  return ValidateInExpression(node.values().size(), node.eval_expr()->return_type(),
+                              arrow::int32());
 }
 
 Status ExprValidator::Visit(const InExpressionNode<int64_t>& node) {
-  return ValidateInExpression(node, arrow::int64());
-}
-Status ExprValidator::Visit(const InExpressionNode<float>& node) {
-  return ValidateInExpression(node, arrow::float32());
-}
-Status ExprValidator::Visit(const InExpressionNode<double>& node) {
-  return ValidateInExpression(node, arrow::float64());
-}
-
-Status ExprValidator::Visit(const InExpressionNode<gandiva::DecimalScalar128>& node) {
   return ValidateInExpression(node.values().size(), node.eval_expr()->return_type(),
-                              arrow::decimal(node.get_precision(), node.get_scale()));
+                              arrow::int64());
 }
 
 Status ExprValidator::Visit(const InExpressionNode<std::string>& node) {
-  return ValidateInExpression(node, arrow::utf8());
+  return ValidateInExpression(node.values().size(), node.eval_expr()->return_type(),
+                              arrow::utf8());
+}
+
+Status ExprValidator::Visit(const InExpressionNode<arrow::Date64Type>& node) {
+  return ValidateInExpression(node.values().size(), node.eval_expr()->return_type(),
+                              arrow::date64());
+}
+
+Status ExprValidator::ValidateInExpression(size_t number_of_values,
+                                           DataTypePtr in_expr_return_type,
+                                           DataTypePtr type_of_values) {
+  ARROW_RETURN_IF(number_of_values == 0,
+                  Status::ExpressionValidationError(
+                      "IN Expression needs a non-empty constant list to match."));
+  ARROW_RETURN_IF(!in_expr_return_type->Equals(type_of_values),
+                  Status::ExpressionValidationError(
+                      "Evaluation expression for IN clause returns ", in_expr_return_type,
+                      " values are of type", type_of_values));
+
+  return Status::OK();
 }
 
 }  // namespace gandiva

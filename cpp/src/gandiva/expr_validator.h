@@ -60,10 +60,10 @@ class ExprValidator : public NodeVisitor {
   Status Visit(const BooleanNode& node) override;
   Status Visit(const InExpressionNode<int32_t>& node) override;
   Status Visit(const InExpressionNode<int64_t>& node) override;
-  Status Visit(const InExpressionNode<float>& node) override;
-  Status Visit(const InExpressionNode<double>& node) override;
-  Status Visit(const InExpressionNode<gandiva::DecimalScalar128>& node) override;
   Status Visit(const InExpressionNode<std::string>& node) override;
+  Status Visit(const InExpressionNode<arrow::Date64Type>& node) override;
+  Status ValidateInExpression(size_t number_of_values, DataTypePtr in_expr_return_type,
+                              DataTypePtr type_of_values);
 
   FunctionRegistry registry_;
 
