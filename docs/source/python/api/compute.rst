@@ -45,21 +45,6 @@ Aggregations
    tdigest
    variance
 
-Cumulative Functions
---------------------
-
-Cumulative functions are vector functions that perform a running total on their
-input and output an array containing the corresponding intermediate running values.
-By default these functions do not detect overflow. They are also
-available in an overflow-checking variant, suffixed ``_checked``, which
-throws an ``ArrowInvalid`` exception when overflow is detected.
-
-.. autosummary::
-   :toctree: ../generated/
-
-   cumulative_sum
-   cumulative_sum_checked
-
 Arithmetic Functions
 --------------------
 
@@ -83,10 +68,18 @@ throws an ``ArrowInvalid`` exception when overflow is detected.
    power
    power_checked
    sign
-   sqrt
-   sqrt_checked
    subtract
    subtract_checked
+
+Associative Transforms
+----------------------
+
+.. autosummary::
+   :toctree: ../generated/
+
+   dictionary_encode
+   unique
+   value_counts
 
 Bit-wise Functions
 ------------------
@@ -103,62 +96,17 @@ Bit-wise Functions
    shift_right
    shift_right_checked
 
-Rounding Functions
-------------------
-
-Rounding functions displace numeric inputs to an approximate value with a simpler
-representation based on the rounding criterion.
+Categorizations
+---------------
 
 .. autosummary::
    :toctree: ../generated/
 
-   ceil
-   floor
-   round
-   round_to_multiple
-   trunc
-
-Logarithmic Functions
----------------------
-
-Logarithmic functions are also supported, and also offer ``_checked``
-variants which detect domain errors.
-
-.. autosummary::
-   :toctree: ../generated/
-
-   ln
-   ln_checked
-   log10
-   log10_checked
-   log1p
-   log1p_checked
-   log2
-   log2_checked
-   logb
-   logb_checked
-
-Trigonometric Functions
------------------------
-
-Trigonometric functions are also supported, and also offer ``_checked``
-variants which detect domain errors where appropriate.
-
-.. autosummary::
-   :toctree: ../generated/
-
-   acos
-   acos_checked
-   asin
-   asin_checked
-   atan
-   atan2
-   cos
-   cos_checked
-   sin
-   sin_checked
-   tan
-   tan_checked
+   is_finite
+   is_inf
+   is_nan
+   is_null
+   is_valid
 
 Comparisons
 -----------
@@ -184,6 +132,102 @@ These functions take any number of arguments of a numeric or temporal type.
    max_element_wise
    min_element_wise
 
+Compute Options
+---------------
+
+.. autosummary::
+   :toctree: ../generated/
+
+   ArraySortOptions
+   AssumeTimezoneOptions
+   CastOptions
+   CountOptions
+   CountOptions
+   DayOfWeekOptions
+   DictionaryEncodeOptions
+   ElementWiseAggregateOptions
+   ExtractRegexOptions
+   FilterOptions
+   IndexOptions
+   JoinOptions
+   MakeStructOptions
+   MatchSubstringOptions
+   ModeOptions
+   NullOptions
+   PadOptions
+   PartitionNthOptions
+   QuantileOptions
+   ReplaceSliceOptions
+   ReplaceSubstringOptions
+   RoundOptions
+   RoundToMultipleOptions
+   ScalarAggregateOptions
+   ScalarAggregateOptions
+   SelectKOptions
+   SetLookupOptions
+   SliceOptions
+   SortOptions
+   SplitOptions
+   SplitPatternOptions
+   StrftimeOptions
+   StrptimeOptions
+   StructFieldOptions
+   TakeOptions
+   TDigestOptions
+   TDigestOptions
+   TrimOptions
+   VarianceOptions
+   WeekOptions
+
+Containment Tests
+-----------------
+
+.. autosummary::
+   :toctree: ../generated/
+
+   count_substring
+   count_substring_regex
+   ends_with
+   find_substring
+   find_substring_regex
+   index_in
+   is_in
+   match_like
+   match_substring
+   match_substring_regex
+   starts_with
+
+Conversions
+-----------
+
+.. autosummary::
+   :toctree: ../generated/
+
+   cast
+   strftime
+   strptime
+
+
+Logarithmic Functions
+---------------------
+
+Logarithmic functions are also supported, and also offer ``_checked``
+variants which detect domain errors.
+
+.. autosummary::
+   :toctree: ../generated/
+
+   ln
+   ln_checked
+   log10
+   log10_checked
+   log1p
+   log1p_checked
+   log2
+   log2_checked
+   logb
+   logb_checked
+
 Logical Functions
 -----------------
 
@@ -201,6 +245,85 @@ logic variants are provided (suffixed ``_kleene``). See User Guide for details.
    or_
    or_kleene
    xor
+
+Rounding Functions
+------------------
+
+Rounding functions displace numeric inputs to an approximate value with a simpler
+representation based on the rounding criterion.
+
+.. autosummary::
+   :toctree: ../generated/
+
+   ceil
+   floor
+   round
+   round_to_multiple
+   trunc
+
+Selecting / Multiplexing
+------------------------
+
+.. autosummary::
+   :toctree: ../generated/
+
+   case_when
+   choose
+   coalesce
+   if_else
+
+Selections
+----------
+
+.. autosummary::
+   :toctree: ../generated/
+
+   array_filter
+   array_take
+   drop_null
+   filter
+   take
+
+Sorts and Partitions
+--------------------
+
+.. autosummary::
+   :toctree: ../generated/
+
+   array_sort_indices
+   partition_nth_indices
+   select_k_unstable
+   sort_indices
+
+String Component Extraction
+---------------------------
+
+.. autosummary::
+   :toctree: ../generated/
+
+   extract_regex
+
+String Joining
+--------------
+
+.. autosummary::
+   :toctree: ../generated/
+
+   binary_join
+   binary_join_element_wise
+
+String Padding
+--------------
+
+.. autosummary::
+   :toctree: ../generated/
+
+   ascii_center
+   ascii_lpad
+   ascii_rpad
+   utf8_center
+   utf8_lpad
+   utf8_rpad
 
 String Predicates
 -----------------
@@ -249,6 +372,26 @@ a byte-by-byte basis.
 
    string_is_ascii
 
+String Slicing
+--------------
+
+.. autosummary::
+   :toctree: ../generated/
+
+   utf8_slice_codeunits
+
+
+String Splitting
+----------------
+
+.. autosummary::
+   :toctree: ../generated/
+
+   ascii_split_whitespace
+   split_pattern
+   split_pattern_regex
+   utf8_split_whitespace
+
 String Transforms
 -----------------
 
@@ -276,19 +419,6 @@ String Transforms
    utf8_title
    utf8_upper
 
-String Padding
---------------
-
-.. autosummary::
-   :toctree: ../generated/
-
-   ascii_center
-   ascii_lpad
-   ascii_rpad
-   utf8_center
-   utf8_lpad
-   utf8_rpad
-
 String Trimming
 ---------------
 
@@ -308,97 +438,19 @@ String Trimming
    utf8_trim
    utf8_trim_whitespace
 
-String Splitting
-----------------
+Structural Transforms
+---------------------
 
 .. autosummary::
    :toctree: ../generated/
 
-   ascii_split_whitespace
-   split_pattern
-   split_pattern_regex
-   utf8_split_whitespace
-
-String Component Extraction
----------------------------
-
-.. autosummary::
-   :toctree: ../generated/
-
-   extract_regex
-
-String Joining
---------------
-
-.. autosummary::
-   :toctree: ../generated/
-
-   binary_join
-   binary_join_element_wise
-
-String Slicing
---------------
-
-.. autosummary::
-   :toctree: ../generated/
-
-   utf8_slice_codeunits
-
-Containment Tests
------------------
-
-.. autosummary::
-   :toctree: ../generated/
-
-   count_substring
-   count_substring_regex
-   ends_with
-   find_substring
-   find_substring_regex
-   index_in
-   is_in
-   match_like
-   match_substring
-   match_substring_regex
-   starts_with
-   indices_nonzero
-
-Categorizations
----------------
-
-.. autosummary::
-   :toctree: ../generated/
-
-   is_finite
-   is_inf
-   is_nan
-   is_null
-   is_valid
-   true_unless_null
-
-Selecting / Multiplexing
-------------------------
-
-.. autosummary::
-   :toctree: ../generated/
-
-   case_when
-   choose
-   coalesce
-   if_else
-
-Conversions
------------
-
-.. autosummary::
-   :toctree: ../generated/
-
-   cast
-   ceil_temporal
-   floor_temporal
-   round_temporal
-   strftime
-   strptime
+   list_element
+   list_flatten
+   list_parent_indices
+   list_value_length
+   make_struct
+   replace_with_mask
+   struct_field
 
 Temporal Component Extraction
 -----------------------------
@@ -413,7 +465,6 @@ Temporal Component Extraction
    iso_week
    iso_year
    iso_calendar
-   is_leap_year
    microsecond
    millisecond
    minute
@@ -423,10 +474,8 @@ Temporal Component Extraction
    second
    subsecond
    us_week
-   us_year
    week
    year
-   year_month_day
 
 Temporal Difference
 -------------------
@@ -456,102 +505,24 @@ Timezone Handling
 
    assume_timezone
 
-Associative Transforms
-----------------------
+Trigonometric Functions
+-----------------------
+
+Trigonometric functions are also supported, and also offer ``_checked``
+variants which detect domain errors where appropriate.
 
 .. autosummary::
    :toctree: ../generated/
 
-   dictionary_encode
-   unique
-   value_counts
-
-Selections
-----------
-
-.. autosummary::
-   :toctree: ../generated/
-
-   array_filter
-   array_take
-   drop_null
-   filter
-   take
-
-Sorts and Partitions
---------------------
-
-.. autosummary::
-   :toctree: ../generated/
-
-   array_sort_indices
-   partition_nth_indices
-   select_k_unstable
-   sort_indices
-
-Structural Transforms
----------------------
-
-.. autosummary::
-   :toctree: ../generated/
-
-   fill_null_backward
-   fill_null_forward
-   list_element
-   list_flatten
-   list_parent_indices
-   list_value_length
-   make_struct
-   map_lookup
-   replace_with_mask
-   struct_field
-
-Compute Options
----------------
-
-.. autosummary::
-   :toctree: ../generated/
-
-   ArraySortOptions
-   AssumeTimezoneOptions
-   CastOptions
-   CountOptions
-   CountOptions
-   CumulativeSumOptions
-   DayOfWeekOptions
-   DictionaryEncodeOptions
-   ElementWiseAggregateOptions
-   ExtractRegexOptions
-   FilterOptions
-   IndexOptions
-   JoinOptions
-   MakeStructOptions
-   MapLookupOptions
-   MatchSubstringOptions
-   ModeOptions
-   NullOptions
-   PadOptions
-   PartitionNthOptions
-   QuantileOptions
-   ReplaceSliceOptions
-   ReplaceSubstringOptions
-   RoundOptions
-   RoundTemporalOptions
-   RoundToMultipleOptions
-   ScalarAggregateOptions
-   ScalarAggregateOptions
-   SelectKOptions
-   SetLookupOptions
-   SliceOptions
-   SortOptions
-   SplitOptions
-   SplitPatternOptions
-   StrftimeOptions
-   StrptimeOptions
-   StructFieldOptions
-   TakeOptions
-   TDigestOptions
-   TDigestOptions
-   TrimOptions
-   VarianceOptions
-   WeekOptions
+   acos
+   acos_checked
+   asin
+   asin_checked
+   atan
+   atan2
+   cos
+   cos_checked
+   sin
+   sin_checked
+   tan
+   tan_checked
