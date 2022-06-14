@@ -27,9 +27,7 @@
 
 #include "arrow/array/concatenate.h"
 #include "arrow/array/data.h"
-#include "arrow/chunk_resolver.h"
 #include "arrow/compute/api_vector.h"
-#include "arrow/compute/kernels/chunked_internal.h"
 #include "arrow/compute/kernels/common.h"
 #include "arrow/compute/kernels/util_internal.h"
 #include "arrow/compute/kernels/vector_sort_internal.h"
@@ -52,6 +50,13 @@ namespace {
 struct SortField {
   int field_index;
   SortOrder order;
+};
+
+struct LocationContainer {
+ public:
+  LocationContainer() {}
+  uint64_t index_;
+  ChunkLocation chunk_location_;
 };
 
 Status CheckNonNested(const FieldRef& ref) {
@@ -148,7 +153,10 @@ ArrayVector GetPhysicalChunks(const ChunkedArray& chunked_array,
 }
 
 Result<RecordBatchVector> BatchesFromTable(const Table& table) {
-  return TableBatchReader(table).ToRecordBatches();
+  RecordBatchVector batches;
+  TableBatchReader reader(table);
+  RETURN_NOT_OK(reader.ReadAll(&batches));
+  return batches;
 }
 
 // ----------------------------------------------------------------------
@@ -851,10 +859,10 @@ class TableSorter {
           order(order),
           null_count(null_count) {}
 
-    using LocationType = ::arrow::internal::ChunkLocation;
+    using LocationType = ChunkLocation;
 
     template <typename ArrayType>
-    ResolvedChunk<ArrayType> GetChunk(::arrow::internal::ChunkLocation loc) const {
+    ResolvedChunk<ArrayType> GetChunk(ChunkLocation loc) const {
       return {checked_cast<const ArrayType*>(chunks[loc.chunk_index]),
               loc.index_in_chunk};
     }
@@ -897,8 +905,8 @@ class TableSorter {
         batches_(MakeBatches(table, &status_)),
         options_(options),
         null_placement_(options.null_placement),
-        left_resolver_(batches_),
-        right_resolver_(batches_),
+        left_resolver_(ChunkResolver::FromBatches(batches_)),
+        right_resolver_(ChunkResolver::FromBatches(batches_)),
         sort_keys_(ResolveSortKeys(table, batches_, options.sort_keys, &status_)),
         indices_begin_(indices_begin),
         indices_end_(indices_end),
@@ -936,7 +944,11 @@ class TableSorter {
 
   Status SortInternal() {
     // Sort each batch independently and merge to sorted indices.
-    ARROW_ASSIGN_OR_RAISE(RecordBatchVector batches, BatchesFromTable(table_));
+    RecordBatchVector batches;
+    {
+      TableBatchReader reader(table_);
+      RETURN_NOT_OK(reader.ReadAll(&batches));
+    }
     const int64_t num_batches = static_cast<int64_t>(batches.size());
     if (num_batches == 0) {
       return Status::OK();
@@ -1133,17 +1145,17 @@ class TableSorter {
     MergeNullsOnly(range_begin, range_middle, range_end, temp_indices, null_count);
   }
 
-  Status status_;
   ExecContext* ctx_;
   const Table& table_;
   const RecordBatchVector batches_;
   const SortOptions& options_;
   const NullPlacement null_placement_;
-  const ::arrow::internal::ChunkResolver left_resolver_, right_resolver_;
+  const ChunkResolver left_resolver_, right_resolver_;
   const std::vector<ResolvedSortKey> sort_keys_;
   uint64_t* indices_begin_;
   uint64_t* indices_end_;
   Comparator comparator_;
+  Status status_;
 };
 
 // ----------------------------------------------------------------------
@@ -1168,7 +1180,7 @@ const FunctionDoc sort_indices_doc(
 class SortIndicesMetaFunction : public MetaFunction {
  public:
   SortIndicesMetaFunction()
-      : MetaFunction("sort_indices", Arity::Unary(), sort_indices_doc,
+      : MetaFunction("sort_indices", Arity::Unary(), &sort_indices_doc,
                      GetDefaultSortOptions()) {}
 
   Result<Datum> ExecuteImpl(const std::vector<Datum>& args,
@@ -1673,10 +1685,11 @@ class TableSelecter : public TypeVisitor {
         : order(order),
           type(GetPhysicalType(chunked_array->type())),
           chunks(GetPhysicalChunks(*chunked_array, type)),
+          chunk_pointers(GetArrayPointers(chunks)),
           null_count(chunked_array->null_count()),
-          resolver(GetArrayPointers(chunks)) {}
+          resolver(chunk_pointers) {}
 
-    using LocationType = int64_t;
+    using LocationType = ChunkLocation;
 
     // Find the target chunk and index in the target chunk from an
     // index in chunked array.
@@ -1685,9 +1698,25 @@ class TableSelecter : public TypeVisitor {
       return resolver.Resolve<ArrayType>(index);
     }
 
+    template <typename ArrayType>
+    ResolvedChunk<ArrayType> GetChunk(LocationContainer& location_container) const {
+      if (location_container.chunk_location_.chunk_index == -1) {
+        location_container.chunk_location_ =
+            resolver.ResolveChunkLocation<ArrayType>(location_container.index_);
+      }
+      auto loc = location_container.chunk_location_;
+      return resolver.Resolve<ArrayType>(loc);
+    }
+
+    template <typename ArrayType>
+    ResolvedChunk<ArrayType> GetChunk(ChunkLocation loc) const {
+      return resolver.Resolve<ArrayType>(loc);
+    }
+
     const SortOrder order;
     const std::shared_ptr<DataType> type;
     const ArrayVector chunks;
+    const std::vector<const Array*> chunk_pointers;
     const int64_t null_count;
     const ChunkedArrayResolver resolver;
   };
@@ -1702,7 +1731,11 @@ class TableSelecter : public TypeVisitor {
         k_(options.k),
         output_(output),
         sort_keys_(ResolveSortKeys(table, options.sort_keys)),
-        comparator_(sort_keys_, NullPlacement::AtEnd) {}
+        batches_(TableSelecter::MakeBatches(table, &status_)),
+        left_resolver_(ChunkResolver::FromBatches(batches_)),
+        right_resolver_(ChunkResolver::FromBatches(batches_)),
+        comparator_(sort_keys_, NullPlacement::AtEnd),
+        options_(options) {}
 
   Status Run() { return sort_keys_[0].type->Accept(this); }
 
@@ -1716,6 +1749,14 @@ class TableSelecter : public TypeVisitor {
   VISIT_SORTABLE_PHYSICAL_TYPES(VISIT)
 
 #undef VISIT
+  static RecordBatchVector MakeBatches(const Table& table, Status* status) {
+    const auto maybe_batches = BatchesFromTable(table);
+    if (!maybe_batches.ok()) {
+      *status = maybe_batches.status();
+      return {};
+    }
+    return *std::move(maybe_batches);
+  }
 
   static std::vector<ResolvedSortKey> ResolveSortKeys(
       const Table& table, const std::vector<SortKey>& sort_keys) {
@@ -1727,45 +1768,8 @@ class TableSelecter : public TypeVisitor {
     return resolved;
   }
 
-  // Behaves like PartitionNulls() but this supports multiple sort keys.
-  template <typename Type>
-  NullPartitionResult PartitionNullsInternal(uint64_t* indices_begin,
-                                             uint64_t* indices_end,
-                                             const ResolvedSortKey& first_sort_key) {
-    using ArrayType = typename TypeTraits<Type>::ArrayType;
-
-    const auto p = PartitionNullsOnly<StablePartitioner>(
-        indices_begin, indices_end, first_sort_key.resolver, first_sort_key.null_count,
-        NullPlacement::AtEnd);
-    DCHECK_EQ(p.nulls_end - p.nulls_begin, first_sort_key.null_count);
-
-    const auto q = PartitionNullLikes<ArrayType, StablePartitioner>(
-        p.non_nulls_begin, p.non_nulls_end, first_sort_key.resolver,
-        NullPlacement::AtEnd);
-
-    auto& comparator = comparator_;
-    // Sort all NaNs by the second and following sort keys.
-    std::stable_sort(q.nulls_begin, q.nulls_end, [&](uint64_t left, uint64_t right) {
-      return comparator.Compare(left, right, 1);
-    });
-    // Sort all nulls by the second and following sort keys.
-    std::stable_sort(p.nulls_begin, p.nulls_end, [&](uint64_t left, uint64_t right) {
-      return comparator.Compare(left, right, 1);
-    });
-
-    return q;
-  }
-
-  // XXX this implementation is rather inefficient as it computes chunk indices
-  // at every comparison.  Instead we should iterate over individual batches
-  // and remember ChunkLocation entries in the max-heap.
-
   template <typename InType, SortOrder sort_order>
   Status SelectKthInternal() {
-    using ArrayType = typename TypeTraits<InType>::ArrayType;
-    auto& comparator = comparator_;
-    const auto& first_sort_key = sort_keys_[0];
-
     const auto num_rows = table_.num_rows();
     if (num_rows == 0) {
       return Status::OK();
@@ -1773,51 +1777,134 @@ class TableSelecter : public TypeVisitor {
     if (k_ > table_.num_rows()) {
       k_ = table_.num_rows();
     }
-    std::function<bool(const uint64_t&, const uint64_t&)> cmp;
-    SelectKComparator<sort_order> select_k_comparator;
-    cmp = [&](const uint64_t& left, const uint64_t& right) -> bool {
-      auto chunk_left = first_sort_key.template GetChunk<ArrayType>(left);
-      auto chunk_right = first_sort_key.template GetChunk<ArrayType>(right);
-      auto value_left = chunk_left.Value();
-      auto value_right = chunk_right.Value();
-      if (value_left == value_right) {
-        return comparator.Compare(left, right, 1);
-      }
-      return select_k_comparator(value_left, value_right);
-    };
-    using HeapContainer =
-        std::priority_queue<uint64_t, std::vector<uint64_t>, decltype(cmp)>;
 
-    std::vector<uint64_t> indices(num_rows);
-    uint64_t* indices_begin = indices.data();
-    uint64_t* indices_end = indices_begin + indices.size();
+    SortOptions sort_options(options_.sort_keys, NullPlacement::AtEnd);
+    ARROW_ASSIGN_OR_RAISE(
+        auto row_indices,
+        MakeMutableUInt64Array(uint64(), table_.num_rows(), ctx_->memory_pool()));
+    auto indices_begin = row_indices->GetMutableValues<uint64_t>(1);
+    auto indices_end = indices_begin + table_.num_rows();
     std::iota(indices_begin, indices_end, 0);
 
-    const auto p =
-        this->PartitionNullsInternal<InType>(indices_begin, indices_end, first_sort_key);
-    const auto end_iter = p.non_nulls_end;
-    auto kth_begin = std::min(indices_begin + k_, end_iter);
+    RecordBatchVector batches;
+    {
+      TableBatchReader reader(table_);
+      RETURN_NOT_OK(reader.ReadAll(&batches));
+    }
+    const int64_t num_batches = static_cast<int64_t>(batches.size());
+    if (num_batches == 0) {
+      return Status::OK();
+    }
+    std::vector<NullPartitionResult> sorted(num_batches);
 
-    HeapContainer heap(indices_begin, kth_begin, cmp);
-    for (auto iter = kth_begin; iter != end_iter && !heap.empty(); ++iter) {
-      uint64_t x_index = *iter;
-      uint64_t top_item = heap.top();
-      if (cmp(x_index, top_item)) {
-        heap.pop();
-        heap.push(x_index);
-      }
+    // First sort all individual batches
+    int64_t begin_offset = 0;
+    int64_t end_offset = 0;
+    int64_t null_count = 0;
+    for (int64_t i = 0; i < num_batches; ++i) {
+      const auto& batch = *batches[i];
+      end_offset += batch.num_rows();
+      RadixRecordBatchSorter sorter(indices_begin + begin_offset,
+                                    indices_begin + end_offset, batch, sort_options);
+      ARROW_ASSIGN_OR_RAISE(sorted[i], sorter.Sort(begin_offset));
+      DCHECK_EQ(sorted[i].overall_begin(), indices_begin + begin_offset);
+      DCHECK_EQ(sorted[i].overall_end(), indices_begin + end_offset);
+      DCHECK_EQ(sorted[i].non_null_count() + sorted[i].null_count(), batch.num_rows());
+      begin_offset = end_offset;
+      // XXX this is an upper bound on the true null count
+      null_count += sorted[i].null_count();
     }
-    int64_t out_size = static_cast<int64_t>(heap.size());
-    ARROW_ASSIGN_OR_RAISE(auto take_indices, MakeMutableUInt64Array(uint64(), out_size,
-                                                                    ctx_->memory_pool()));
-    auto* out_cbegin = take_indices->GetMutableValues<uint64_t>(1) + out_size - 1;
-    while (heap.size() > 0) {
-      *out_cbegin = heap.top();
-      heap.pop();
-      --out_cbegin;
+    DCHECK_EQ(end_offset, indices_end - indices_begin);
+
+    if (sorted.size() > 1) {
+      struct Visitor {
+        TableSelecter* sorter;
+        std::vector<NullPartitionResult>* sorted;
+        int64_t null_count;
+
+        Status Visit(const InType& type) {
+          return sorter->MergeInternal<InType>(std::move(*sorted), null_count);
+        }
+
+        Status Visit(const DataType& type) {
+          return Status::NotImplemented("Unsupported type for sorting: ",
+                                        type.ToString());
+        }
+      };
+      Visitor visitor{this, &sorted, null_count};
+      RETURN_NOT_OK(VisitTypeInline(*sort_keys_[0].type, &visitor));
     }
+
+    ARROW_ASSIGN_OR_RAISE(auto take_indices,
+                          MakeMutableUInt64Array(uint64(), k_, ctx_->memory_pool()));
+    auto* out_cbegin = take_indices->GetMutableValues<uint64_t>(1);
+    std::copy(indices_begin, indices_begin + k_, out_cbegin);
     *output_ = Datum(take_indices);
     return Status::OK();
+  }
+
+  // Recursive merge routine, typed on the first sort key
+  template <typename Type>
+  Status MergeInternal(std::vector<NullPartitionResult> sorted, int64_t null_count) {
+    auto merge_general = [&](uint64_t* range_begin, uint64_t* range_middle,
+                             uint64_t* range_end, uint64_t* temp_indices, uint64_t k) {
+      MergeNonNulls<Type>(range_begin, range_middle, range_end, temp_indices, k);
+    };
+
+    MergeImpl merge_impl(options_.null_placement, std::move(merge_general));
+    RETURN_NOT_OK(merge_impl.Init(ctx_, table_.num_rows()));
+
+    while (sorted.size() > 1) {
+      auto out_it = sorted.begin();
+      auto it = sorted.begin();
+      while (it < sorted.end() - 1) {
+        const auto& left = *it++;
+        const auto& right = *it++;
+        DCHECK_EQ(left.overall_end(), right.overall_begin());
+        *out_it++ = merge_impl.MergeKElements(left, right, null_count, k_);
+      }
+      if (it < sorted.end()) {
+        *out_it++ = *it++;
+      }
+      sorted.erase(out_it, sorted.end());
+    }
+    DCHECK_EQ(sorted.size(), 1);
+    return comparator_.status();
+  }
+
+  template <typename Type>
+  void MergeNonNulls(uint64_t* range_begin, uint64_t* range_middle, uint64_t* range_end,
+                     uint64_t* temp_indices, uint64_t k) {
+    using ArrayType = typename TypeTraits<Type>::ArrayType;
+    auto left_end = std::max(range_begin + k, range_middle);
+    auto right_end = std::max(range_middle + k, range_end);
+    auto& comparator = comparator_;
+    const auto& first_sort_key = sort_keys_[0];
+    std::merge(range_begin, left_end, range_middle, right_end, temp_indices,
+               [&](uint64_t left, uint64_t right) {
+                 // Both values are never null nor NaN.
+                 const auto left_loc = left_resolver_.Resolve(left);
+                 const auto right_loc = right_resolver_.Resolve(right);
+                 auto chunk_left = first_sort_key.GetChunk<ArrayType>(left_loc);
+                 auto chunk_right = first_sort_key.GetChunk<ArrayType>(right_loc);
+                 auto value_left = chunk_left.Value();
+                 auto value_right = chunk_right.Value();
+                 if (value_left == value_right) {
+                   // If the left value equals to the right value,
+                   // we need to compare the second and following
+                   // sort keys.
+                   return comparator.Compare(left_loc, right_loc, 1);
+                 } else {
+                   auto compared = value_left < value_right;
+                   if (first_sort_key.order == SortOrder::Ascending) {
+                     return compared;
+                   } else {
+                     return !compared;
+                   }
+                 }
+               });
+    // Copy back temp area into main buffer
+    std::copy(temp_indices, temp_indices + k, range_begin);
   }
 
   ExecContext* ctx_;
@@ -1825,7 +1912,11 @@ class TableSelecter : public TypeVisitor {
   int64_t k_;
   Datum* output_;
   std::vector<ResolvedSortKey> sort_keys_;
+  const RecordBatchVector batches_;
+  const ChunkResolver left_resolver_, right_resolver_;
+  Status status_;
   Comparator comparator_;
+  const SelectKOptions& options_;
 };
 
 static Status CheckConsistency(const Schema& schema,
@@ -1840,7 +1931,7 @@ static Status CheckConsistency(const Schema& schema,
 class SelectKUnstableMetaFunction : public MetaFunction {
  public:
   SelectKUnstableMetaFunction()
-      : MetaFunction("select_k_unstable", Arity::Unary(), select_k_unstable_doc,
+      : MetaFunction("select_k_unstable", Arity::Unary(), &select_k_unstable_doc,
                      GetDefaultSelectKOptions()) {}
 
   Result<Datum> ExecuteImpl(const std::vector<Datum>& args,
@@ -1854,14 +1945,18 @@ class SelectKUnstableMetaFunction : public MetaFunction {
       return Status::Invalid("select_k_unstable requires a non-empty `sort_keys`");
     }
     switch (args[0].kind()) {
-      case Datum::ARRAY:
+      case Datum::ARRAY: {
         return SelectKth(*args[0].make_array(), select_k_options, ctx);
-      case Datum::CHUNKED_ARRAY:
+      } break;
+      case Datum::CHUNKED_ARRAY: {
         return SelectKth(*args[0].chunked_array(), select_k_options, ctx);
+      } break;
       case Datum::RECORD_BATCH:
         return SelectKth(*args[0].record_batch(), select_k_options, ctx);
+        break;
       case Datum::TABLE:
         return SelectKth(*args[0].table(), select_k_options, ctx);
+        break;
       default:
         break;
     }
@@ -1905,222 +2000,6 @@ class SelectKUnstableMetaFunction : public MetaFunction {
   }
 };
 
-// ----------------------------------------------------------------------
-// Rank implementation
-
-const RankOptions* GetDefaultRankOptions() {
-  static const auto kDefaultRankOptions = RankOptions::Defaults();
-  return &kDefaultRankOptions;
-}
-
-class ArrayRanker : public TypeVisitor {
- public:
-  ArrayRanker(ExecContext* ctx, const Array& array, const RankOptions& options,
-              Datum* output)
-      : TypeVisitor(),
-        ctx_(ctx),
-        array_(array),
-        options_(options),
-        null_placement_(options.null_placement),
-        tiebreaker_(options.tiebreaker),
-        physical_type_(GetPhysicalType(array.type())),
-        output_(output) {}
-
-  Status Run() { return physical_type_->Accept(this); }
-
-#define VISIT(TYPE) \
-  Status Visit(const TYPE& type) { return RankInternal<TYPE>(); }
-
-  VISIT_SORTABLE_PHYSICAL_TYPES(VISIT)
-
-#undef VISIT
-
-  template <typename InType>
-  Status RankInternal() {
-    using GetView = GetViewType<InType>;
-    using T = typename GetViewType<InType>::T;
-    using ArrayType = typename TypeTraits<InType>::ArrayType;
-
-    ArrayType arr(array_.data());
-
-    SortOrder order = SortOrder::Ascending;
-    if (!options_.sort_keys.empty()) {
-      order = options_.sort_keys[0].order;
-    }
-    ArraySortOptions array_options(order, null_placement_);
-
-    auto length = array_.length();
-    ARROW_ASSIGN_OR_RAISE(auto sort_indices,
-                          MakeMutableUInt64Array(uint64(), length, ctx_->memory_pool()));
-    auto sort_begin = sort_indices->GetMutableValues<uint64_t>(1);
-    auto sort_end = sort_begin + length;
-    std::iota(sort_begin, sort_end, 0);
-
-    ARROW_ASSIGN_OR_RAISE(auto array_sorter, GetArraySorter(*physical_type_));
-
-    NullPartitionResult sorted =
-        array_sorter(sort_begin, sort_end, arr, 0, array_options);
-    uint64_t rank;
-
-    ARROW_ASSIGN_OR_RAISE(auto rankings,
-                          MakeMutableUInt64Array(uint64(), length, ctx_->memory_pool()));
-    auto out_begin = rankings->GetMutableValues<uint64_t>(1);
-
-    switch (tiebreaker_) {
-      case RankOptions::Dense: {
-        T curr_value, prev_value{};
-        rank = 0;
-
-        if (null_placement_ == NullPlacement::AtStart && sorted.null_count() > 0) {
-          rank++;
-          for (auto it = sorted.nulls_begin; it < sorted.nulls_end; it++) {
-            out_begin[*it] = rank;
-          }
-        }
-
-        for (auto it = sorted.non_nulls_begin; it < sorted.non_nulls_end; it++) {
-          curr_value = GetView::LogicalValue(arr.GetView(*it));
-          if (it == sorted.non_nulls_begin || curr_value != prev_value) {
-            rank++;
-          }
-
-          out_begin[*it] = rank;
-          prev_value = curr_value;
-        }
-
-        if (null_placement_ == NullPlacement::AtEnd) {
-          rank++;
-          for (auto it = sorted.nulls_begin; it < sorted.nulls_end; it++) {
-            out_begin[*it] = rank;
-          }
-        }
-        break;
-      }
-
-      case RankOptions::First: {
-        rank = 0;
-        for (auto it = sorted.overall_begin(); it < sorted.overall_end(); it++) {
-          out_begin[*it] = ++rank;
-        }
-        break;
-      }
-
-      case RankOptions::Min: {
-        T curr_value, prev_value{};
-        rank = 0;
-
-        if (null_placement_ == NullPlacement::AtStart) {
-          rank++;
-          for (auto it = sorted.nulls_begin; it < sorted.nulls_end; it++) {
-            out_begin[*it] = rank;
-          }
-        }
-
-        for (auto it = sorted.non_nulls_begin; it < sorted.non_nulls_end; it++) {
-          curr_value = GetView::LogicalValue(arr.GetView(*it));
-          if (it == sorted.non_nulls_begin || curr_value != prev_value) {
-            rank = (it - sorted.overall_begin()) + 1;
-          }
-          out_begin[*it] = rank;
-          prev_value = curr_value;
-        }
-
-        if (null_placement_ == NullPlacement::AtEnd) {
-          rank = sorted.non_null_count() + 1;
-          for (auto it = sorted.nulls_begin; it < sorted.nulls_end; it++) {
-            out_begin[*it] = rank;
-          }
-        }
-        break;
-      }
-
-      case RankOptions::Max: {
-        // The algorithm for Max is just like Min, but in reverse order.
-        T curr_value, prev_value{};
-        rank = length;
-
-        if (null_placement_ == NullPlacement::AtEnd) {
-          for (auto it = sorted.nulls_begin; it < sorted.nulls_end; it++) {
-            out_begin[*it] = rank;
-          }
-        }
-
-        for (auto it = sorted.non_nulls_end - 1; it >= sorted.non_nulls_begin; it--) {
-          curr_value = GetView::LogicalValue(arr.GetView(*it));
-          if (it == sorted.non_nulls_end - 1 || curr_value != prev_value) {
-            rank = (it - sorted.overall_begin()) + 1;
-          }
-          out_begin[*it] = rank;
-          prev_value = curr_value;
-        }
-
-        if (null_placement_ == NullPlacement::AtStart) {
-          rank = sorted.null_count();
-          for (auto it = sorted.nulls_begin; it < sorted.nulls_end; it++) {
-            out_begin[*it] = rank;
-          }
-        }
-
-        break;
-      }
-    }
-
-    *output_ = Datum(rankings);
-    return Status::OK();
-  }
-
-  ExecContext* ctx_;
-  const Array& array_;
-  const RankOptions& options_;
-  const NullPlacement null_placement_;
-  const RankOptions::Tiebreaker tiebreaker_;
-  const std::shared_ptr<DataType> physical_type_;
-  Datum* output_;
-};
-
-const FunctionDoc rank_doc(
-    "Compute numerical ranks of an array (1-based)",
-    ("This function computes a rank of the input array.\n"
-     "By default, null values are considered greater than any other value and\n"
-     "are therefore sorted at the end of the input. For floating-point types,\n"
-     "NaNs are considered greater than any other non-null value, but smaller\n"
-     "than null values. The default tiebreaker is to assign ranks in order of\n"
-     "when ties appear in the input.\n"
-     "\n"
-     "The handling of nulls, NaNs and tiebreakers can be changed in RankOptions."),
-    {"input"}, "RankOptions");
-
-class RankMetaFunction : public MetaFunction {
- public:
-  RankMetaFunction()
-      : MetaFunction("rank", Arity::Unary(), rank_doc, GetDefaultRankOptions()) {}
-
-  Result<Datum> ExecuteImpl(const std::vector<Datum>& args,
-                            const FunctionOptions* options, ExecContext* ctx) const {
-    const RankOptions& rank_options = checked_cast<const RankOptions&>(*options);
-    switch (args[0].kind()) {
-      case Datum::ARRAY: {
-        return Rank(*args[0].make_array(), rank_options, ctx);
-      } break;
-      default:
-        break;
-    }
-    return Status::NotImplemented(
-        "Unsupported types for rank operation: "
-        "values=",
-        args[0].ToString());
-  }
-
- private:
-  Result<Datum> Rank(const Array& array, const RankOptions& options,
-                     ExecContext* ctx) const {
-    Datum output;
-    ArrayRanker ranker(ctx, array, options, &output);
-    ARROW_RETURN_NOT_OK(ranker.Run());
-    return output;
-  }
-};
-
 }  // namespace
 
 Status SortChunkedArray(ExecContext* ctx, uint64_t* indices_begin, uint64_t* indices_end,
@@ -2134,7 +2013,6 @@ Status SortChunkedArray(ExecContext* ctx, uint64_t* indices_begin, uint64_t* ind
 void RegisterVectorSort(FunctionRegistry* registry) {
   DCHECK_OK(registry->AddFunction(std::make_shared<SortIndicesMetaFunction>()));
   DCHECK_OK(registry->AddFunction(std::make_shared<SelectKUnstableMetaFunction>()));
-  DCHECK_OK(registry->AddFunction(std::make_shared<RankMetaFunction>()));
 }
 
 #undef VISIT_SORTABLE_PHYSICAL_TYPES
@@ -2142,3 +2020,4 @@ void RegisterVectorSort(FunctionRegistry* registry) {
 }  // namespace internal
 }  // namespace compute
 }  // namespace arrow
+
