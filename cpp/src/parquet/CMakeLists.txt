@@ -105,14 +105,13 @@ endfunction()
 # TODO(wesm): Handling of ABI/SO version
 
 if(ARROW_BUILD_STATIC)
-  set(PARQUET_STATIC_LINK_LIBS arrow_static ${ARROW_STATIC_LINK_LIBS})
-  set(ARROW_LIBRARIES_FOR_STATIC_TESTS arrow_testing_static arrow_static
-                                       ${ARROW_STATIC_LINK_LIBS})
+  set(PARQUET_STATIC_LINK_LIBS arrow_static)
+  set(ARROW_LIBRARIES_FOR_STATIC_TESTS arrow_testing_static arrow_static)
 else()
   set(ARROW_LIBRARIES_FOR_STATIC_TESTS arrow_testing_shared arrow_shared)
 endif()
 
-set(PARQUET_MIN_TEST_LIBS GTest::gtest_main GTest::gtest Boost::headers)
+set(PARQUET_MIN_TEST_LIBS GTest::gtest_main GTest::gtest)
 
 if(APPLE)
   set(PARQUET_MIN_TEST_LIBS ${PARQUET_MIN_TEST_LIBS} ${CMAKE_DL_LIBS})
@@ -199,6 +198,7 @@ if(PARQUET_REQUIRE_ENCRYPTION)
       encryption/crypto_factory.cc
       encryption/file_key_unwrapper.cc
       encryption/file_key_wrapper.cc
+      encryption/file_system_key_material_store.cc
       encryption/kms_client.cc
       encryption/key_material.cc
       encryption/key_metadata.cc
@@ -219,6 +219,18 @@ if(NOT PARQUET_MINIMAL_DEPENDENCY)
   # Link publicly with parquet_static (because internal users need to
   # transitively link all dependencies)
   set(PARQUET_STATIC_LINK_LIBS ${PARQUET_STATIC_LINK_LIBS} thrift::thrift)
+
+  # Although we don't link parquet_objlib against anything, we need it to depend
+  # on these libs as we may generate their headers via ExternalProject_Add
+  if(ARROW_BUILD_SHARED)
+    set(PARQUET_DEPENDENCIES ${PARQUET_DEPENDENCIES} ${PARQUET_SHARED_LINK_LIBS}
+                             ${PARQUET_SHARED_PRIVATE_LINK_LIBS})
+  endif()
+
+  if(ARROW_BUILD_STATIC)
+    set(PARQUET_DEPENDENCIES ${PARQUET_DEPENDENCIES} ${PARQUET_STATIC_LINK_LIBS})
+  endif()
+
 endif(NOT PARQUET_MINIMAL_DEPENDENCY)
 
 if(CXX_LINKER_SUPPORTS_VERSION_SCRIPT)
@@ -237,6 +249,8 @@ add_arrow_lib(parquet
               "$<$<COMPILE_LANGUAGE:CXX>:parquet/pch.h>"
               OUTPUTS
               PARQUET_LIBRARIES
+              DEPENDENCIES
+              ${PARQUET_DEPENDENCIES}
               SHARED_LINK_FLAGS
               ${PARQUET_SHARED_LINK_FLAGS}
               SHARED_LINK_LIBS
@@ -250,7 +264,7 @@ if(WIN32 AND NOT (ARROW_TEST_LINKAGE STREQUAL "static"))
   add_library(parquet_test_support STATIC
               "${ARROW_SOURCE_DIR}/src/generated/parquet_constants.cpp"
               "${ARROW_SOURCE_DIR}/src/generated/parquet_types.cpp")
-  target_link_libraries(parquet_test_support thrift::thrift)
+  add_dependencies(parquet_test_support thrift::thrift)
   set(PARQUET_SHARED_TEST_LINK_LIBS ${PARQUET_SHARED_TEST_LINK_LIBS} parquet_test_support)
   set(PARQUET_LIBRARIES ${PARQUET_LIBRARIES} parquet_test_support)
 endif()
@@ -269,8 +283,8 @@ endif()
 
 add_dependencies(parquet ${PARQUET_LIBRARIES} thrift::thrift)
 
-add_definitions(-DPARQUET_THRIFT_VERSION_MAJOR=${Thrift_VERSION_MAJOR})
-add_definitions(-DPARQUET_THRIFT_VERSION_MINOR=${Thrift_VERSION_MINOR})
+add_definitions(-DPARQUET_THRIFT_VERSION_MAJOR=${THRIFT_VERSION_MAJOR})
+add_definitions(-DPARQUET_THRIFT_VERSION_MINOR=${THRIFT_VERSION_MINOR})
 
 # Thrift requires these definitions for some types that we use
 foreach(LIB_TARGET ${PARQUET_LIBRARIES})
