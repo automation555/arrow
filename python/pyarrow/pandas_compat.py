@@ -63,6 +63,8 @@ def get_logical_type_map():
             pa.lib.Type_BINARY: 'bytes',
             pa.lib.Type_FIXED_SIZE_BINARY: 'bytes',
             pa.lib.Type_STRING: 'unicode',
+            'arrow.complex64': 'complex64',
+            'arrow.complex128': 'complex128',
         })
     return _logical_type_map
 
@@ -81,6 +83,12 @@ def get_logical_type(arrow_type):
             return 'datetimetz' if arrow_type.tz is not None else 'datetime'
         elif isinstance(arrow_type, pa.lib.Decimal128Type):
             return 'decimal'
+        elif isinstance(arrow_type, pa.lib.BaseExtensionType):
+            try:
+                return logical_type_map[arrow_type.extension_name]
+            except KeyError:
+                pass
+        
         return 'object'
 
 
@@ -96,6 +104,8 @@ _numpy_logical_type_map = {
     np.uint64: 'uint64',
     np.float32: 'float32',
     np.float64: 'float64',
+    np.complex64: 'complex64',
+    np.complex128: 'complex128',
     'datetime64[D]': 'date',
     np.unicode_: 'string',
     np.bytes_: 'bytes',
@@ -291,11 +301,11 @@ def _column_name_to_strings(name):
     'foo'
     >>> name = ('foo', 'bar')
     >>> _column_name_to_strings(name)
-    "('foo', 'bar')"
+    ('foo', 'bar')
     >>> import pandas as pd
     >>> name = (1, pd.Timestamp('2017-02-01 00:00:00'))
     >>> _column_name_to_strings(name)
-    "('1', '2017-02-01 00:00:00')"
+    ('1', '2017-02-01 00:00:00')
     """
     if isinstance(name, str):
         return name
@@ -623,21 +633,7 @@ def dataframe_to_arrays(df, schema, preserve_index, nthreads=1, columns=None,
     metadata.update(pandas_metadata)
     schema = schema.with_metadata(metadata)
 
-    # If dataframe is empty but with RangeIndex ->
-    # remember the length of the indexes
-    n_rows = None
-    if len(arrays) == 0:
-        try:
-            kind = index_descriptors[0]["kind"]
-            if kind == "range":
-                start = index_descriptors[0]["start"]
-                stop = index_descriptors[0]["stop"]
-                step = index_descriptors[0]["step"]
-                n_rows = len(range(start, stop, step))
-        except IndexError:
-            pass
-
-    return arrays, schema, n_rows
+    return arrays, schema
 
 
 def get_datetimetz_type(values, dtype, type_):
@@ -757,11 +753,15 @@ def _reconstruct_block(item, columns=None, extension_columns=None):
         assert len(placement) == 1
         name = columns[placement[0]]
         pandas_dtype = extension_columns[name]
-        if not hasattr(pandas_dtype, '__from_arrow__'):
+
+        if pandas_dtype in {np.complex64, np.complex128}:
+            block = _int.make_block(arr, placement=placement)
+        elif not hasattr(pandas_dtype, '__from_arrow__'):
             raise ValueError("This column does not support to be converted "
                              "to a pandas ExtensionArray")
-        pd_ext_arr = pandas_dtype.__from_arrow__(arr)
-        block = _int.make_block(pd_ext_arr, placement=placement)
+        else:
+            pd_ext_arr = pandas_dtype.__from_arrow__(arr)
+            block = _int.make_block(pd_ext_arr, placement=placement)
     else:
         block = _int.make_block(block_arr, placement=placement)
 
@@ -807,11 +807,11 @@ def table_to_blockmanager(options, table, categories=None,
 
 
 # Set of the string repr of all numpy dtypes that can be stored in a pandas
-# dataframe (complex not included since not supported by Arrow)
+# dataframe
 _pandas_supported_numpy_types = {
     str(np.dtype(typ))
     for typ in (np.sctypes['int'] + np.sctypes['uint'] + np.sctypes['float'] +
-                ['object', 'bool'])
+                ['object', 'bool'] + ['complex64', 'complex128'])
 }
 
 
@@ -836,12 +836,8 @@ def _get_extension_dtypes(table, columns_metadata, types_mapper=None):
 
     # infer the extension columns from the pandas metadata
     for col_meta in columns_metadata:
-        try:
-            name = col_meta['field_name']
-        except KeyError:
-            name = col_meta['name']
+        name = col_meta['name']
         dtype = col_meta['numpy_type']
-
         if dtype not in _pandas_supported_numpy_types:
             # pandas_dtype is expensive, so avoid doing this for types
             # that are certainly numpy dtypes

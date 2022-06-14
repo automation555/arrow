@@ -21,6 +21,7 @@
 #include <datetime.h>
 
 #include <algorithm>
+#include <complex>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -35,13 +36,14 @@
 #include "arrow/array/builder_primitive.h"
 #include "arrow/array/builder_time.h"
 #include "arrow/chunked_array.h"
+#include "arrow/extensions/complex_type.h"
 #include "arrow/status.h"
 #include "arrow/type.h"
 #include "arrow/type_traits.h"
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/converter.h"
 #include "arrow/util/decimal.h"
-#include "arrow/util/int_util_overflow.h"
+#include "arrow/util/int_util_internal.h"
 #include "arrow/util/logging.h"
 
 #include "arrow/python/datetime.h"
@@ -256,6 +258,34 @@ class PyValue {
     return value;
   }
 
+  static Result<std::complex<double>> Convert(const ComplexFloatType*, const O&, I obj) {
+    std::complex<double> value;
+
+    if (PyComplex_Check(obj)) {
+      value =
+          std::complex<double>(PyComplex_RealAsDouble(obj), PyComplex_ImagAsDouble(obj));
+      RETURN_IF_PYERROR();
+    } else {
+      return internal::InvalidValue(obj, "tried to convert to std::complex<double>");
+    }
+
+    return value;
+  }
+
+static Result<std::complex<double>> Convert(const ComplexDoubleType*, const O&, I obj) {
+    std::complex<double> value;
+
+    if (PyComplex_Check(obj)) {
+      value =
+          std::complex<double>(PyComplex_RealAsDouble(obj), PyComplex_ImagAsDouble(obj));
+      RETURN_IF_PYERROR();
+    } else {
+      return internal::InvalidValue(obj, "tried to convert to std::complex<double>");
+    }
+
+    return value;
+  }
+
   static Result<Decimal128> Convert(const Decimal128Type* type, const O&, I obj) {
     Decimal128 value;
     RETURN_NOT_OK(internal::DecimalFromPyObject(obj, *type, &value));
@@ -417,21 +447,11 @@ class PyValue {
     RETURN_NOT_OK(PopulateMonthDayNano<MonthDayNanoField::kNanoseconds>::Field(
         obj, &output.nanoseconds, &found_attrs));
 
-    // date_offset can have zero fields.
-    if (found_attrs || is_date_offset) {
-      return output;
+    if (ARROW_PREDICT_FALSE(!found_attrs) && !is_date_offset) {
+      // date_offset can have zero fields.
+      return Status::TypeError("No temporal attributes found on object.");
     }
-    if (PyTuple_Check(obj) && PyTuple_Size(obj) == 3) {
-      RETURN_NOT_OK(internal::CIntFromPython(PyTuple_GET_ITEM(obj, 0), &output.months,
-                                             "Months (tuple item #0) too large"));
-      RETURN_NOT_OK(internal::CIntFromPython(PyTuple_GET_ITEM(obj, 1), &output.days,
-                                             "Days (tuple item #1) too large"));
-      RETURN_NOT_OK(internal::CIntFromPython(PyTuple_GET_ITEM(obj, 2),
-                                             &output.nanoseconds,
-                                             "Nanoseconds (tuple item #2) too large"));
-      return output;
-    }
-    return Status::TypeError("No temporal attributes found on object.");
+    return output;
   }
 
   static Result<int64_t> Convert(const DurationType* type, const O&, I obj) {
@@ -1135,7 +1155,7 @@ Result<std::shared_ptr<ChunkedArray>> ConvertPySequence(PyObject* obj, PyObject*
                                                         MemoryPool* pool) {
   PyAcquireGIL lock;
 
-  PyObject* seq = nullptr;
+  PyObject* seq;
   OwnedRef tmp_seq_nanny;
 
   ARROW_ASSIGN_OR_RAISE(auto is_pandas_imported, internal::IsModuleImported("pandas"));

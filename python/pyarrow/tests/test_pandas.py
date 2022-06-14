@@ -25,10 +25,12 @@ from collections import OrderedDict
 from datetime import date, datetime, time, timedelta, timezone
 
 import hypothesis as h
+import hypothesis.extra.pytz as tzst
 import hypothesis.strategies as st
 import numpy as np
 import numpy.testing as npt
 import pytest
+import pytz
 
 from pyarrow.pandas_compat import get_logical_type, _pandas_api
 from pyarrow.tests.util import invoke_script, random_ascii, rands
@@ -65,6 +67,8 @@ def _alltypes_example(size=100):
         'int64': np.arange(size, dtype=np.int64),
         'float32': np.arange(size, dtype=np.float32),
         'float64': np.arange(size, dtype=np.float64),
+        'complex64': np.arange(size, dtype=np.complex64),
+        'complex128': np.arange(size, dtype=np.complex128),
         'bool': np.random.randn(size) > 0,
         # TODO(wesm): Pandas only support ns resolution, Arrow supports s, ms,
         # us, ns
@@ -226,7 +230,7 @@ class TestConvertMetadata:
         with pytest.warns(None) as record:
             _check_pandas_roundtrip(df, preserve_index=True)
 
-        assert len(record) == 0, [r.message for r in record]
+        assert len(record) == 0
 
     def test_multiindex_columns(self):
         columns = pd.MultiIndex.from_arrays([
@@ -277,7 +281,7 @@ class TestConvertMetadata:
         with pytest.warns(None) as record:
             _check_pandas_roundtrip(df, preserve_index=True)
 
-        assert len(record) == 0, [r.message for r in record]
+        assert len(record) == 0
 
     def test_integer_index_column(self):
         df = pd.DataFrame([(1, 'a'), (2, 'b'), (3, 'c')])
@@ -1037,22 +1041,18 @@ class TestConvertDateTimeLikeTypes:
         tm.assert_frame_equal(expected_df, result)
 
     def test_python_datetime_with_pytz_tzinfo(self):
-        pytz = pytest.importorskip("pytz")
-
         for tz in [pytz.utc, pytz.timezone('US/Eastern'), pytz.FixedOffset(1)]:
             values = [datetime(2018, 1, 1, 12, 23, 45, tzinfo=tz)]
             df = pd.DataFrame({'datetime': values})
             _check_pandas_roundtrip(df)
 
-    @h.given(st.none() | past.timezones)
-    @h.settings(deadline=None)
+    @h.given(st.none() | tzst.timezones())
     def test_python_datetime_with_pytz_timezone(self, tz):
         values = [datetime(2018, 1, 1, 12, 23, 45, tzinfo=tz)]
         df = pd.DataFrame({'datetime': values})
-        _check_pandas_roundtrip(df, check_dtype=False)
+        _check_pandas_roundtrip(df)
 
     def test_python_datetime_with_timezone_tzinfo(self):
-        pytz = pytest.importorskip("pytz")
         from datetime import timezone
 
         if Version(pd.__version__) > Version("0.25.0"):
@@ -3392,7 +3392,7 @@ def test_array_uses_memory_pool():
     arr = pa.array(np.arange(N, dtype=np.int64),
                    mask=np.random.randint(0, 2, size=N).astype(np.bool_))
 
-    # In the case the gc is caught loading
+    # In the case the gc is caught loafing
     gc.collect()
 
     prior_allocation = pa.total_allocated_bytes()
@@ -4082,66 +4082,6 @@ def test_array_to_pandas():
         # result = pa.table({"col": arr})["col"].to_pandas()
         # expected = pd.Series(arr, name="col")
         # tm.assert_series_equal(result, expected)
-
-
-def test_roundtrip_empty_table_with_extension_dtype_index():
-    if Version(pd.__version__) < Version("1.0.0"):
-        pytest.skip("ExtensionDtype to_pandas method missing")
-
-    df = pd.DataFrame(index=pd.interval_range(start=0, end=3))
-    table = pa.table(df)
-    table.to_pandas().index == pd.Index([{'left': 0, 'right': 1},
-                                         {'left': 1, 'right': 2},
-                                         {'left': 2, 'right': 3}],
-                                        dtype='object')
-
-
-def test_array_to_pandas_types_mapper():
-    # https://issues.apache.org/jira/browse/ARROW-9664
-    if Version(pd.__version__) < Version("1.2.0"):
-        pytest.skip("ExtensionDtype to_pandas method missing")
-
-    data = pa.array([1, 2, 3], pa.int64())
-
-    # Test with mapper function
-    types_mapper = {pa.int64(): pd.Int64Dtype()}.get
-    result = data.to_pandas(types_mapper=types_mapper)
-    assert result.dtype == pd.Int64Dtype()
-
-    # Test mapper function returning None
-    types_mapper = {pa.int64(): None}.get
-    result = data.to_pandas(types_mapper=types_mapper)
-    assert result.dtype == np.dtype("int64")
-
-    # Test mapper function not containing the dtype
-    types_mapper = {pa.float64(): pd.Float64Dtype()}.get
-    result = data.to_pandas(types_mapper=types_mapper)
-    assert result.dtype == np.dtype("int64")
-
-
-@pytest.mark.pandas
-def test_chunked_array_to_pandas_types_mapper():
-    # https://issues.apache.org/jira/browse/ARROW-9664
-    if Version(pd.__version__) < Version("1.2.0"):
-        pytest.skip("ExtensionDtype to_pandas method missing")
-
-    data = pa.chunked_array([pa.array([1, 2, 3], pa.int64())])
-    assert isinstance(data, pa.ChunkedArray)
-
-    # Test with mapper function
-    types_mapper = {pa.int64(): pd.Int64Dtype()}.get
-    result = data.to_pandas(types_mapper=types_mapper)
-    assert result.dtype == pd.Int64Dtype()
-
-    # Test mapper function returning None
-    types_mapper = {pa.int64(): None}.get
-    result = data.to_pandas(types_mapper=types_mapper)
-    assert result.dtype == np.dtype("int64")
-
-    # Test mapper function not containing the dtype
-    types_mapper = {pa.float64(): pd.Float64Dtype()}.get
-    result = data.to_pandas(types_mapper=types_mapper)
-    assert result.dtype == np.dtype("int64")
 
 
 # ----------------------------------------------------------------------

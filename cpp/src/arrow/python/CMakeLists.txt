@@ -19,7 +19,7 @@
 # arrow_python
 #
 
-find_package(Python3Alt 3.7 REQUIRED)
+find_package(Python3Alt REQUIRED)
 
 add_custom_target(arrow_python-all)
 add_custom_target(arrow_python)
@@ -45,7 +45,7 @@ set(ARROW_PYTHON_SRCS
     python_to_arrow.cc
     pyarrow.cc
     serialize.cc
-    udf.cc)
+    type_traits.cc)
 
 set_source_files_properties(init.cc PROPERTIES SKIP_PRECOMPILE_HEADERS ON
                                                SKIP_UNITY_BUILD_INCLUSION ON)
@@ -58,10 +58,6 @@ if(ARROW_FILESYSTEM)
   list(APPEND ARROW_PYTHON_SRCS filesystem.cc)
 endif()
 
-if(PARQUET_REQUIRE_ENCRYPTION)
-  list(APPEND ARROW_PYTHON_SRCS parquet_encryption.cc)
-endif()
-
 set(ARROW_PYTHON_DEPENDENCIES arrow_dependencies)
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
@@ -71,18 +67,8 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" OR CMAKE_CXX_COMPILER_ID STREQUAL
 endif()
 
 set(ARROW_PYTHON_SHARED_LINK_LIBS arrow_shared)
-set(ARROW_PYTHON_SHARED_PRIVATE_LINK_LIBS)
-set(ARROW_PYTHON_STATIC_LINK_LIBS ${PYTHON_OTHER_LIBS})
-
 if(WIN32)
   list(APPEND ARROW_PYTHON_SHARED_LINK_LIBS ${PYTHON_LIBRARIES} ${PYTHON_OTHER_LIBS})
-endif()
-if(PARQUET_REQUIRE_ENCRYPTION)
-  list(APPEND ARROW_PYTHON_SHARED_LINK_LIBS parquet_shared)
-endif()
-if(ARROW_USE_XSIMD)
-  list(APPEND ARROW_PYTHON_SHARED_PRIVATE_LINK_LIBS xsimd)
-  list(APPEND ARROW_PYTHON_STATIC_LINK_LIBS xsimd)
 endif()
 
 set(ARROW_PYTHON_INCLUDES ${NUMPY_INCLUDE_DIRS} ${PYTHON_INCLUDE_DIRS})
@@ -104,10 +90,8 @@ add_arrow_lib(arrow_python
               ${ARROW_VERSION_SCRIPT_FLAGS} # Defined in cpp/arrow/CMakeLists.txt
               SHARED_LINK_LIBS
               ${ARROW_PYTHON_SHARED_LINK_LIBS}
-              SHARED_PRIVATE_LINK_LIBS
-              ${ARROW_PYTHON_SHARED_PRIVATE_LINK_LIBS}
               STATIC_LINK_LIBS
-              ${ARROW_PYTHON_STATIC_LINK_LIBS}
+              ${PYTHON_OTHER_LIBS}
               EXTRA_INCLUDES
               "${ARROW_PYTHON_INCLUDES}")
 
@@ -146,9 +130,7 @@ if(ARROW_FLIGHT AND ARROW_BUILD_SHARED)
                 STATIC_LINK_LIBS
                 ${PYTHON_OTHER_LIBS}
                 EXTRA_INCLUDES
-                "${ARROW_PYTHON_INCLUDES}"
-                PRIVATE_INCLUDES
-                "${Protobuf_INCLUDE_DIRS}")
+                "${ARROW_PYTHON_INCLUDES}")
 
   add_dependencies(arrow_python ${ARROW_PYFLIGHT_LIBRARIES})
 
