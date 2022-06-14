@@ -17,6 +17,7 @@
 
 // Functions for pandas conversion via NumPy
 
+#include "arrow/extensions/complex_type.h"
 #include "arrow/python/arrow_to_pandas.h"
 #include "arrow/python/numpy_interop.h"  // IWYU pragma: expand
 
@@ -40,6 +41,7 @@
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/hashing.h"
 #include "arrow/util/int_util.h"
+#include "arrow/util/key_value_metadata.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/macros.h"
 #include "arrow/util/parallel.h"
@@ -182,7 +184,6 @@ static inline bool ListTypeSupported(const DataType& type) {
     case Type::TIMESTAMP:
     case Type::DURATION:
     case Type::DICTIONARY:
-    case Type::INTERVAL_MONTH_DAY_NANO:
     case Type::NA:  // empty list
       // The above types are all supported.
       return true;
@@ -332,6 +333,8 @@ class PandasWriter {
     HALF_FLOAT,
     FLOAT,
     DOUBLE,
+    COMPLEX_FLOAT,
+    COMPLEX_DOUBLE,
     BOOL,
     DATETIME_DAY,
     DATETIME_SECOND,
@@ -348,10 +351,7 @@ class PandasWriter {
   };
 
   PandasWriter(const PandasOptions& options, int64_t num_rows, int num_columns)
-      : options_(options), num_rows_(num_rows), num_columns_(num_columns) {
-    PyAcquireGIL lock;
-    internal::InitPandasStaticData();
-  }
+      : options_(options), num_rows_(num_rows), num_columns_(num_columns) {}
   virtual ~PandasWriter() {}
 
   void SetBlockData(PyObject* arr) {
@@ -374,6 +374,7 @@ class PandasWriter {
       return Status::OK();
     }
     PyAcquireGIL lock;
+
     npy_intp placement_dims[1] = {num_columns_};
     PyObject* placement_arr = PyArray_SimpleNew(1, placement_dims, NPY_INT64);
     RETURN_IF_PYERROR();
@@ -657,12 +658,7 @@ Status ConvertStruct(PandasOptions options, const ChunkedArray& data,
     auto arr = checked_cast<const StructArray*>(data.chunk(c).get());
     // Convert the struct arrays first
     for (int32_t i = 0; i < num_fields; i++) {
-      auto field = arr->field(static_cast<int>(i));
-      // In case the field is an extension array, use .storage() to convert to Pandas
-      if (field->type()->id() == Type::EXTENSION) {
-        const ExtensionArray& arr_ext = checked_cast<const ExtensionArray&>(*field);
-        field = arr_ext.storage();
-      }
+      const auto field = arr->field(static_cast<int>(i));
       RETURN_NOT_OK(ConvertArrayToPandas(options, field, nullptr,
                                          fields_data[i + fields_data_offset].ref()));
       DCHECK(PyArray_Check(fields_data[i + fields_data_offset].obj()));
@@ -920,6 +916,15 @@ inline void ConvertNumericNullableCast(const ChunkedArray& data, InType na_value
       *out_values++ = arr.IsNull(i) ? static_cast<OutType>(na_value)
                                     : static_cast<OutType>(in_values[i]);
     }
+  }
+}
+
+template <typename OutType>
+inline void ConvertNumericNullableComplex(const ChunkedArray& data,
+                                          OutType* out_values) {
+  for (int c = 0; c < data.num_chunks(); c++) {
+    const auto& arr = *data.chunk(c);
+    arr.num_fields();
   }
 }
 
@@ -1242,6 +1247,7 @@ class IntWriter : public TypedPandasWriter<NPY_TYPE> {
   }
 };
 
+
 template <int NPY_TYPE>
 class FloatWriter : public TypedPandasWriter<NPY_TYPE> {
  public:
@@ -1250,7 +1256,7 @@ class FloatWriter : public TypedPandasWriter<NPY_TYPE> {
   using T = typename ArrowType::c_type;
 
   bool CanZeroCopy(const ChunkedArray& data) const override {
-    return IsNonNullContiguous(data) && data.type()->id() == ArrowType::type_id;
+    return data.type()->id() == ArrowType::type_id && IsNonNullContiguous(data);
   }
 
   Status CopyInto(std::shared_ptr<ChunkedArray> data, int64_t rel_placement) override {
@@ -1286,12 +1292,108 @@ class FloatWriter : public TypedPandasWriter<NPY_TYPE> {
       case Type::DOUBLE:
         ConvertNumericNullableCast(*data, npy_traits<NPY_TYPE>::na_sentinel, out_values);
         break;
+      case Type::EXTENSION:
+        {
+          auto ext_type = std::static_pointer_cast<const ExtensionType>(data->type());
+
+          if(ext_type == nullptr) {
+            return Status::TypeError(
+              "Unable to cast ", data->type()->ToString(), "to ExtensionType");
+          }
+
+          if(ext_type->extension_name() == "arrow.complex64") {
+            ConvertNumericNullableComplex(*data, out_values);
+          } else if (ext_type->extension_name() == "arrow.complex128") {
+            ConvertNumericNullableComplex(*data, out_values);
+          } else {
+            return Status::NotImplemented("Cannot write Arrow data of type ",
+                                          data->type()->ToString(),
+                                          " to a Pandas floating point block");
+          }
+        }
+        break;
       default:
         return Status::NotImplemented("Cannot write Arrow data of type ",
                                       data->type()->ToString(),
                                       " to a Pandas floating point block");
     }
 
+#undef INTEGER_CASE
+
+    return Status::OK();
+  }
+};
+
+
+template <int NPY_TYPE>
+class ComplexWriter : public TypedPandasWriter<NPY_TYPE> {
+ public:
+  using ArrowType = typename npy_traits<NPY_TYPE>::TypeClass;
+  using TypedPandasWriter<NPY_TYPE>::TypedPandasWriter;
+  using T = typename ArrowType::c_type;
+
+  bool CanZeroCopy(const ChunkedArray& data) const override {
+    return data.type()->id() == ArrowType::type_id && IsNonNullContiguous(data);
+  }
+
+  Status CopyInto(std::shared_ptr<ChunkedArray> data, int64_t rel_placement) override {
+    Type::type in_type = data->type()->id();
+    auto out_values = this->GetBlockColumnStart(rel_placement);
+
+#define INTEGER_CASE(IN_TYPE)                                             \
+  ConvertIntegerWithNulls<IN_TYPE, T>(this->options_, *data, out_values); \
+  break;
+
+    switch (in_type) {
+      case Type::UINT8:
+        INTEGER_CASE(uint8_t);
+      case Type::INT8:
+        INTEGER_CASE(int8_t);
+      case Type::UINT16:
+        INTEGER_CASE(uint16_t);
+      case Type::INT16:
+        INTEGER_CASE(int16_t);
+      case Type::UINT32:
+        INTEGER_CASE(uint32_t);
+      case Type::INT32:
+        INTEGER_CASE(int32_t);
+      case Type::UINT64:
+        INTEGER_CASE(uint64_t);
+      case Type::INT64:
+        INTEGER_CASE(int64_t);
+      case Type::HALF_FLOAT:
+        ConvertNumericNullableCast(*data, npy_traits<NPY_TYPE>::na_sentinel, out_values);
+      case Type::FLOAT:
+        ConvertNumericNullableCast(*data, npy_traits<NPY_TYPE>::na_sentinel, out_values);
+        break;
+      case Type::DOUBLE:
+        ConvertNumericNullableCast(*data, npy_traits<NPY_TYPE>::na_sentinel, out_values);
+        break;
+      case Type::EXTENSION:
+        {
+          auto ext_type = std::static_pointer_cast<const ExtensionType>(data->type());
+
+          if(ext_type == nullptr) {
+            return Status::TypeError(
+              "Unable to cast ", data->type()->ToString(), "to ExtensionType");
+          }
+
+          if(ext_type->extension_name() == "arrow.complex64") {
+            ConvertNumericNullableComplex(*data, out_values);
+          } else if (ext_type->extension_name() == "arrow.complex128") {
+            ConvertNumericNullableComplex(*data, out_values);
+          } else {
+            return Status::NotImplemented("Cannot write Arrow data of type ",
+                                          data->type()->ToString(),
+                                          " to a Pandas complex number block");
+          }
+        }
+        break;
+      default:
+        return Status::NotImplemented("Cannot write Arrow data of type ",
+                                      data->type()->ToString(),
+                                      " to a Pandas complex number block");
+    }
 #undef INTEGER_CASE
 
     return Status::OK();
@@ -1309,6 +1411,8 @@ using Int64Writer = IntWriter<NPY_INT64>;
 using Float16Writer = FloatWriter<NPY_FLOAT16>;
 using Float32Writer = FloatWriter<NPY_FLOAT32>;
 using Float64Writer = FloatWriter<NPY_FLOAT64>;
+using Complex64Writer = ComplexWriter<NPY_COMPLEX64>;
+using Complex128Writer = ComplexWriter<NPY_COMPLEX128>;
 
 class BoolWriter : public TypedPandasWriter<NPY_BOOL> {
  public:
@@ -1509,7 +1613,7 @@ class TimedeltaWriter : public TypedPandasWriter<NPY_TIMEDELTA> {
 
   bool CanZeroCopy(const ChunkedArray& data) const override {
     const auto& type = checked_cast<const DurationType&>(*data.type());
-    return IsNonNullContiguous(data) && type.unit() == UNIT;
+    return type.unit() == UNIT && IsNonNullContiguous(data);
   }
 
   Status CopyInto(std::shared_ptr<ChunkedArray> data, int64_t rel_placement) override {
@@ -1832,6 +1936,8 @@ Status MakeWriter(const PandasOptions& options, PandasWriter::type writer_type,
       BLOCK_CASE(HALF_FLOAT, Float16Writer);
       BLOCK_CASE(FLOAT, Float32Writer);
       BLOCK_CASE(DOUBLE, Float64Writer);
+      BLOCK_CASE(COMPLEX_FLOAT, Complex64Writer);
+      BLOCK_CASE(COMPLEX_DOUBLE, Complex128Writer);
       BLOCK_CASE(BOOL, BoolWriter);
       BLOCK_CASE(DATETIME_DAY, DatetimeDayWriter);
       BLOCK_CASE(DATETIME_SECOND, DatetimeSecondWriter);
@@ -1856,7 +1962,8 @@ Status MakeWriter(const PandasOptions& options, PandasWriter::type writer_type,
   return Status::OK();
 }
 
-static Status GetPandasWriterType(const ChunkedArray& data, const PandasOptions& options,
+static Status GetPandasWriterType(const ChunkedArray& data,
+                                  const PandasOptions& options,
                                   PandasWriter::type* output_type) {
 #define INTEGER_CASE(NAME)                                                             \
   *output_type =                                                                       \
@@ -1980,6 +2087,16 @@ static Status GetPandasWriterType(const ChunkedArray& data, const PandasOptions&
       *output_type = PandasWriter::CATEGORICAL;
       break;
     case Type::EXTENSION:
+      {
+        auto ext_type = std::static_pointer_cast<ExtensionType>(data.type());
+
+        if(ext_type->extension_name() == "arrow.complex64") {
+          *output_type = PandasWriter::COMPLEX_FLOAT;
+        } else if (ext_type->extension_name() == "arrow.complex128") {
+          *output_type = PandasWriter::COMPLEX_DOUBLE;
+        }
+      }
+
       *output_type = PandasWriter::EXTENSION;
       break;
     default:
@@ -2065,7 +2182,8 @@ class ConsolidatedBlockCreator : public PandasBlockCreator {
       *out = PandasWriter::EXTENSION;
       return Status::OK();
     } else {
-      return GetPandasWriterType(*arrays_[column_index], options_, out);
+      return GetPandasWriterType(*arrays_[column_index],
+                                 options_, out);
     }
   }
 
@@ -2171,7 +2289,8 @@ class SplitBlockCreator : public PandasBlockCreator {
       output_type = PandasWriter::EXTENSION;
     } else {
       // Null count needed to determine output type
-      RETURN_NOT_OK(GetPandasWriterType(*arrays_[i], options_, &output_type));
+      RETURN_NOT_OK(GetPandasWriterType(*arrays_[i],
+                                        options_, &output_type));
     }
     return MakeWriter(this->options_, output_type, type, num_rows_, 1, writer);
   }
@@ -2204,6 +2323,44 @@ class SplitBlockCreator : public PandasBlockCreator {
  private:
   std::vector<std::shared_ptr<PandasWriter>> writers_;
 };
+
+
+Status ConvertComplexArrays(const PandasOptions& options,
+                            ChunkedArrayVector* arrays,
+                            FieldVector* fields,
+                            PandasOptions* modified_options) {
+
+  for (int i = 0; i < static_cast<int>(arrays->size()); i++) {
+    auto array = (*arrays)[i];
+    auto field = (*fields)[i];
+
+    if (array->type()->id() == Type::EXTENSION) {
+      auto ext = std::static_pointer_cast<const ExtensionType>(array->type());
+      bool is_f32 = ext->extension_name() == "arrow.complex64";
+      bool is_f64 = !is_f32 && ext->extension_name() == "arrow.complex128";
+
+      if(is_f32 || is_f64) {
+        ArrayVector chunks;
+
+        for(int c=0; c < array->num_chunks(); ++c) {
+          auto ext = std::static_pointer_cast<ExtensionArray>(array->chunk(c));
+          auto storage = std::static_pointer_cast<FixedSizeListArray>(ext->storage());
+          chunks.push_back(storage->Flatten().ValueOrDie());
+        }
+
+        auto dtype = is_f32 ? float32() : float64();
+        auto meta = key_value_metadata({"__complex_field_marker__"}, {"true"});
+
+        (*arrays)[i] = std::make_shared<ChunkedArray>(chunks, dtype);
+        (*fields)[i] = field->WithType(dtype)->WithMergedMetadata(meta);
+        modified_options->extension_columns.erase(field->name());
+      }
+    }         
+  }           
+
+  return Status::OK();
+}
+
 
 Status ConvertCategoricals(const PandasOptions& options, ChunkedArrayVector* arrays,
                            FieldVector* fields) {
@@ -2308,10 +2465,11 @@ Status ConvertTableToPandas(const PandasOptions& options, std::shared_ptr<Table>
   // ARROW-3789: allow "self-destructing" by releasing references to columns as
   // we convert them to pandas
   table = nullptr;
+  PandasOptions modified_options = options;
 
   RETURN_NOT_OK(ConvertCategoricals(options, &arrays, &fields));
+  RETURN_NOT_OK(ConvertComplexArrays(options, &arrays, &fields, &modified_options));
 
-  PandasOptions modified_options = options;
   modified_options.strings_to_categorical = false;
   modified_options.categorical_columns.clear();
 

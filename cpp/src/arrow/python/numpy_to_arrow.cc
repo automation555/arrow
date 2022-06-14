@@ -232,6 +232,8 @@ class NumPyConverter {
 
   Status Visit(const FixedSizeBinaryType& type);
 
+  Status Visit(const ExtensionType& type);
+
   // Default case
   Status Visit(const DataType& type) { return TypeNotImplemented(type.ToString()); }
 
@@ -404,13 +406,8 @@ class NumPyStridedConverter {
     ARROW_ASSIGN_OR_RAISE(buffer_, AllocateBuffer(sizeof(T) * length_, pool_));
 
     const int64_t stride = PyArray_STRIDES(arr)[0];
-    // ARROW-16013: convert sizeof(T) to signed int64 first, otherwise dividing by it
-    // would do an unsigned division. This cannot be caught by tests without ubsan, since
-    // common signed overflow behavior and the fact that the sizeof(T) is currently always
-    // a power of two here cause CopyStridedNatural to still produce correct results
-    const int64_t element_size = sizeof(T);
-    if (stride % element_size == 0) {
-      const int64_t stride_elements = stride / element_size;
+    if (stride % sizeof(T) == 0) {
+      const int64_t stride_elements = stride / sizeof(T);
       CopyStridedNatural(reinterpret_cast<T*>(PyArray_DATA(arr)), length_,
                          stride_elements, reinterpret_cast<T*>(buffer_->mutable_data()));
     } else {
@@ -472,6 +469,7 @@ inline Status NumPyConverter::ConvertData(std::shared_ptr<Buffer>* data) {
 
   return Status::OK();
 }
+
 
 template <>
 inline Status NumPyConverter::ConvertData<Date32Type>(std::shared_ptr<Buffer>* data) {
@@ -588,6 +586,43 @@ Status NumPyConverter::Visit(const BinaryType& type) {
     RETURN_NOT_OK(PushArray(arr->data()));
   }
   return Status::OK();
+}
+
+
+Status NumPyConverter::Visit(const ExtensionType& type) {
+  if(type.extension_name() == "arrow.complex64") {
+    if (mask_ != nullptr) {
+      RETURN_NOT_OK(InitNullBitmap());
+      null_count_ = MaskToBitmap(mask_, length_, null_bitmap_data_);
+    } else {
+      RETURN_NOT_OK(NumPyNullsConverter::Convert(pool_, arr_, from_pandas_, &null_bitmap_,
+                                                 &null_count_));
+    }
+
+    std::shared_ptr<Buffer> data;
+    RETURN_NOT_OK(ConvertData<ComplexFloatType>(&data));
+
+    auto float_arr_data = ArrayData::Make(float32(), length_*2, {nullptr, data}, 0, 0);
+    auto arr_data = ArrayData::Make(type_, length_, {null_bitmap_}, {float_arr_data}, null_count_, 0);
+    return PushArray(arr_data);
+  } else if(type.extension_name() == "arrow.complex128") {
+    if (mask_ != nullptr) {
+      RETURN_NOT_OK(InitNullBitmap());
+      null_count_ = MaskToBitmap(mask_, length_, null_bitmap_data_);
+    } else {
+      RETURN_NOT_OK(NumPyNullsConverter::Convert(pool_, arr_, from_pandas_, &null_bitmap_,
+                                                 &null_count_));
+    }
+
+    std::shared_ptr<Buffer> data;
+    RETURN_NOT_OK(ConvertData<ComplexDoubleType>(&data));
+
+    auto float_arr_data = ArrayData::Make(float64(), length_*2, {nullptr, data}, 0, 0);
+    auto arr_data = ArrayData::Make(type_, length_, {null_bitmap_}, {float_arr_data}, null_count_, 0);
+    return PushArray(arr_data);
+  } else {
+    return TypeNotImplemented(type.ToString());
+  }
 }
 
 Status NumPyConverter::Visit(const FixedSizeBinaryType& type) {
@@ -792,9 +827,20 @@ Status NumPyConverter::Visit(const StructType& type) {
   for (auto& converter : sub_converters) {
     RETURN_NOT_OK(converter.Convert());
     groups.push_back(converter.result());
+    const auto& group = groups.back();
+    int64_t n = 0;
+    for (const auto& array : group) {
+      n += array->length();
+    }
   }
   // Ensure the different array groups are chunked consistently
   groups = ::arrow::internal::RechunkArraysConsistently(groups);
+  for (const auto& group : groups) {
+    int64_t n = 0;
+    for (const auto& array : group) {
+      n += array->length();
+    }
+  }
 
   // Make struct array chunks by combining groups
   size_t ngroups = groups.size();

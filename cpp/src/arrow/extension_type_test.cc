@@ -27,6 +27,7 @@
 #include "arrow/array/array_nested.h"
 #include "arrow/array/util.h"
 #include "arrow/extension_type.h"
+#include "arrow/extensions/complex_type.h"
 #include "arrow/io/memory.h"
 #include "arrow/ipc/options.h"
 #include "arrow/ipc/reader.h"
@@ -178,7 +179,9 @@ class ExtStructType : public ExtensionType {
 
 class TestExtensionType : public ::testing::Test {
  public:
-  void SetUp() { ASSERT_OK(RegisterExtensionType(std::make_shared<UuidType>())); }
+  void SetUp() {
+    ASSERT_OK(RegisterExtensionType(std::make_shared<UuidType>()));
+  }
 
   void TearDown() {
     if (GetExtensionType("uuid")) {
@@ -186,6 +189,23 @@ class TestExtensionType : public ::testing::Test {
     }
   }
 };
+
+TEST_F(TestExtensionType, ComplexTypeTest) {
+  auto registered_type = GetExtensionType("arrow.complex64");
+  ASSERT_NE(registered_type, nullptr);
+
+  auto type = complex64();
+  ASSERT_EQ(type->id(), Type::EXTENSION);
+
+  const auto& ext_type = static_cast<const ExtensionType&>(*type);
+  std::string serialized = ext_type.Serialize();
+
+  ASSERT_OK_AND_ASSIGN(auto deserialized,
+                       ext_type.Deserialize(fixed_size_list(float32(), 2), serialized));
+
+  ASSERT_TRUE(deserialized->Equals(*type));
+  ASSERT_FALSE(deserialized->Equals(*fixed_size_list(float32(), 2)));
+}
 
 TEST_F(TestExtensionType, ExtensionTypeTest) {
   auto type_not_exist = GetExtensionType("uuid-unknown");

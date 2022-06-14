@@ -43,11 +43,12 @@ class Ndarray1DIndexer {
   explicit Ndarray1DIndexer(PyArrayObject* arr) : Ndarray1DIndexer() {
     arr_ = arr;
     DCHECK_EQ(1, PyArray_NDIM(arr)) << "Only works with 1-dimensional arrays";
+    Py_INCREF(arr);
     data_ = reinterpret_cast<uint8_t*>(PyArray_DATA(arr));
     stride_ = PyArray_STRIDES(arr)[0];
   }
 
-  ~Ndarray1DIndexer() = default;
+  ~Ndarray1DIndexer() { Py_XDECREF(arr_); }
 
   int64_t size() const { return PyArray_SIZE(arr_); }
 
@@ -101,6 +102,8 @@ static inline std::string GetNumPyTypeName(int npy_type) {
     TYPE_CASE(FLOAT16, "float16")
     TYPE_CASE(FLOAT32, "float32")
     TYPE_CASE(FLOAT64, "float64")
+    TYPE_CASE(COMPLEX64, "complex64")
+    TYPE_CASE(COMPLEX128, "complex128")
     TYPE_CASE(DATETIME, "datetime64")
     TYPE_CASE(TIMEDELTA, "timedelta64")
     TYPE_CASE(OBJECT, "object")
@@ -142,6 +145,8 @@ inline Status VisitNumpyArrayInline(PyArrayObject* arr, VISITOR* visitor) {
     TYPE_VISIT_INLINE(FLOAT16);
     TYPE_VISIT_INLINE(FLOAT32);
     TYPE_VISIT_INLINE(FLOAT64);
+    TYPE_VISIT_INLINE(COMPLEX64);
+    TYPE_VISIT_INLINE(COMPLEX128);
     TYPE_VISIT_INLINE(DATETIME);
     TYPE_VISIT_INLINE(TIMEDELTA);
     TYPE_VISIT_INLINE(OBJECT);
