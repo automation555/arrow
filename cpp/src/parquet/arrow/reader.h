@@ -18,8 +18,6 @@
 #pragma once
 
 #include <cstdint>
-// N.B. we don't include async_generator.h as it's relatively heavy
-#include <functional>
 #include <memory>
 #include <vector>
 
@@ -67,9 +65,6 @@ class RowGroupReader;
 /// `FileReader::RowGroup(i)->Column(j)->Read` and receive an `arrow::Column`
 /// instance.
 ///
-/// The parquet format supports an optional integer field_id which can be assigned
-/// to a field.  Arrow will convert these field IDs to a metadata key named
-/// PARQUET:field_id on the appropriate field.
 // TODO(wesm): nested data does not always make sense with this user
 // interface unless you are only reading a single leaf node from a branch of
 // a table. For example:
@@ -152,7 +147,6 @@ class PARQUET_EXPORT FileReader {
   // 2 foo3
   //
   // i=0 will read the entire foo struct, i=1 the foo2 primitive column etc
-  ARROW_DEPRECATED("Deprecated in 9.0.0. Use ReadColumn instead.")
   virtual ::arrow::Status ReadSchemaField(
       int i, std::shared_ptr<::arrow::ChunkedArray>* out) = 0;
 
@@ -180,21 +174,6 @@ class PARQUET_EXPORT FileReader {
   virtual ::arrow::Status GetRecordBatchReader(
       const std::vector<int>& row_group_indices, const std::vector<int>& column_indices,
       std::unique_ptr<::arrow::RecordBatchReader>* out) = 0;
-
-  /// \brief Return a generator of record batches.
-  ///
-  /// The FileReader must outlive the generator, so this requires that you pass in a
-  /// shared_ptr.
-  ///
-  /// \returns error Result if either row_group_indices or column_indices contains an
-  ///     invalid index
-  virtual ::arrow::Result<
-      std::function<::arrow::Future<std::shared_ptr<::arrow::RecordBatch>>()>>
-  GetRecordBatchGenerator(std::shared_ptr<FileReader> reader,
-                          const std::vector<int> row_group_indices,
-                          const std::vector<int> column_indices,
-                          ::arrow::internal::Executor* cpu_executor = NULLPTR,
-                          int64_t rows_to_readahead = 0) = 0;
 
   ::arrow::Status GetRecordBatchReader(const std::vector<int>& row_group_indices,
                                        const std::vector<int>& column_indices,
@@ -301,6 +280,12 @@ class PARQUET_EXPORT FileReaderBuilder {
                        const ReaderProperties& properties = default_reader_properties(),
                        std::shared_ptr<FileMetaData> metadata = NULLPTR);
 
+  ::arrow::Status Open(
+      std::shared_ptr<::arrow::io::MultiFileProvider<::arrow::io::RandomAccessFile>>
+          multi_file,
+      const ReaderProperties& properties = default_reader_properties(),
+      std::shared_ptr<FileMetaData> metadata = NULLPTR);
+
   ParquetFileReader* raw_reader() { return raw_reader_.get(); }
 
   /// Set Arrow MemoryPool for memory allocation
@@ -318,6 +303,18 @@ class PARQUET_EXPORT FileReaderBuilder {
 
 /// \defgroup parquet-arrow-reader-factories Factory functions for Parquet Arrow readers
 ///
+/// @{
+
+/// \brief Build FileReader from an Arrow mulifile file and MemoryPool
+///
+/// Advanced settings are supported through the FileReaderBuilder class.
+PARQUET_EXPORT
+::arrow::Status OpenMultiFile(
+    std::shared_ptr<::arrow::io::MultiFileProvider<::arrow::io::RandomAccessFile>>,
+    ::arrow::MemoryPool* allocator, std::unique_ptr<FileReader>* reader);
+
+/// @}
+
 /// @{
 
 /// \brief Build FileReader from Arrow file and MemoryPool

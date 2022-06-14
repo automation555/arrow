@@ -24,9 +24,10 @@
 #include <vector>
 
 #include "parquet/column_writer.h"
-#include "parquet/encryption/encryption_internal.h"
-#include "parquet/encryption/internal_file_encryptor.h"
+#include "parquet/deprecated_io.h"
+#include "parquet/encryption_internal.h"
 #include "parquet/exception.h"
+#include "parquet/internal_file_encryptor.h"
 #include "parquet/platform.h"
 #include "parquet/schema.h"
 #include "parquet/types.h"
@@ -272,11 +273,20 @@ class FileSerializer : public ParquetFileWriter::Contents {
     return result;
   }
 
-  void Close() override {
+  void Snapshot(const std::string& data_path,
+                std::shared_ptr<::arrow::io::OutputStream>& sink) override {
+    FlushFileMeta(sink, data_path, false);
+  }
+
+  void Close() override { FlushFileMeta(sink_); }
+  void FlushFileMeta(std::shared_ptr<::arrow::io::OutputStream>& sink,
+                     const std::string& data_path = "", bool finish = true) {
     if (is_open_) {
       // If any functions here raise an exception, we set is_open_ to be false
       // so that this does not get called again (possibly causing segfault)
-      is_open_ = false;
+      if (finish) {
+        is_open_ = false;
+      }
       if (row_group_writer_) {
         num_rows_ += row_group_writer_->num_rows();
         row_group_writer_->Close();
@@ -287,9 +297,12 @@ class FileSerializer : public ParquetFileWriter::Contents {
       auto file_encryption_properties = properties_->file_encryption_properties();
 
       if (file_encryption_properties == nullptr) {  // Non encrypted file.
-        file_metadata_ = metadata_->Finish();
-        WriteFileMetaData(*file_metadata_, sink_.get());
+        file_metadata_ = metadata_->ToFileMetadata(finish, data_path);
+        WriteFileMetaData(*file_metadata_, sink.get());
       } else {  // Encrypted file
+        if (!finish) {
+          throw ParquetException("Snapshot not supported for an encrypted file");
+        }
         CloseEncryptedFile(file_encryption_properties);
       }
     }
@@ -452,6 +465,14 @@ std::unique_ptr<ParquetFileWriter> ParquetFileWriter::Open(
   return result;
 }
 
+std::unique_ptr<ParquetFileWriter> ParquetFileWriter::Open(
+    std::shared_ptr<OutputStream> sink, std::shared_ptr<schema::GroupNode> schema,
+    std::shared_ptr<WriterProperties> properties,
+    std::shared_ptr<const KeyValueMetadata> key_value_metadata) {
+  return Open(std::make_shared<ParquetOutputWrapper>(std::move(sink)), std::move(schema),
+              std::move(properties), std::move(key_value_metadata));
+}
+
 void WriteFileMetaData(const FileMetaData& file_metadata, ArrowOutputStream* sink) {
   // Write MetaData
   PARQUET_ASSIGN_OR_THROW(int64_t position, sink->Tell());
@@ -490,9 +511,28 @@ void WriteEncryptedFileMetadata(const FileMetaData& file_metadata,
   }
 }
 
+void WriteFileMetaData(const FileMetaData& file_metadata, OutputStream* sink,
+                       const std::shared_ptr<Encryptor>& encryptor, bool encrypt_footer) {
+  ParquetOutputWrapper wrapper(sink);
+  return WriteFileMetaData(file_metadata, &wrapper);
+}
+
+void WriteEncryptedFileMetadata(const FileMetaData& file_metadata, OutputStream* sink,
+                                const std::shared_ptr<Encryptor>& encryptor,
+                                bool encrypt_footer) {
+  ParquetOutputWrapper wrapper(sink);
+  return WriteEncryptedFileMetadata(file_metadata, &wrapper, encryptor, encrypt_footer);
+}
+
 void WriteFileCryptoMetaData(const FileCryptoMetaData& crypto_metadata,
                              ArrowOutputStream* sink) {
   crypto_metadata.WriteTo(sink);
+}
+
+void WriteFileCryptoMetaData(const FileCryptoMetaData& crypto_metadata,
+                             OutputStream* sink) {
+  ParquetOutputWrapper wrapper(sink);
+  crypto_metadata.WriteTo(&wrapper);
 }
 
 const SchemaDescriptor* ParquetFileWriter::schema() const { return contents_->schema(); }
@@ -518,6 +558,13 @@ const std::shared_ptr<FileMetaData> ParquetFileWriter::metadata() const {
 
 void ParquetFileWriter::Open(std::unique_ptr<ParquetFileWriter::Contents> contents) {
   contents_ = std::move(contents);
+}
+
+void ParquetFileWriter::Snapshot(const std::string& data_path,
+                                 std::shared_ptr<::arrow::io::OutputStream>& sink) {
+  if (contents_) {
+    contents_->Snapshot(data_path, sink);
+  }
 }
 
 void ParquetFileWriter::Close() {

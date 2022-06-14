@@ -25,15 +25,16 @@
 #include <vector>
 
 #include "arrow/array.h"
+#include "arrow/buffer_builder.h"
 #include "arrow/extension_type.h"
 #include "arrow/ipc/writer.h"
 #include "arrow/table.h"
 #include "arrow/type.h"
 #include "arrow/util/base64.h"
 #include "arrow/util/checked_cast.h"
-#include "arrow/util/key_value_metadata.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/make_unique.h"
+#include "arrow/visitor_inline.h"
 
 #include "parquet/arrow/path_internal.h"
 #include "parquet/arrow/reader_internal.h"
@@ -54,6 +55,7 @@ using arrow::ExtensionArray;
 using arrow::ExtensionType;
 using arrow::Field;
 using arrow::FixedSizeBinaryArray;
+using Int16BufferBuilder = arrow::TypedBufferBuilder<int16_t>;
 using arrow::ListArray;
 using arrow::MemoryPool;
 using arrow::NumericArray;
@@ -280,6 +282,19 @@ class FileWriterImpl : public FileWriter {
     return Status::OK();
   }
 
+  Status Snapshot(const std::string& data_path,
+                  std::shared_ptr<::arrow::io::OutputStream> sink) override {
+    if (closed_) {
+      return Status::Invalid("Cannot snapshot a file once it's already closed");
+    }
+    if (row_group_writer_ != nullptr) {
+      PARQUET_CATCH_NOT_OK(row_group_writer_->Close());
+      row_group_writer_ = nullptr;
+    }
+    PARQUET_CATCH_NOT_OK(writer_->Snapshot(data_path, sink));
+    return sink->Close();
+  }
+
   Status Close() override {
     if (!closed_) {
       // Make idempotent
@@ -421,7 +436,9 @@ Status GetSchemaMetadata(const ::arrow::Schema& schema, ::arrow::MemoryPool* poo
 
   // The serialized schema is not UTF-8, which is required for Thrift
   std::string schema_as_string = serialized->ToString();
-  std::string schema_base64 = ::arrow::util::base64_encode(schema_as_string);
+  std::string schema_base64 = ::arrow::util::base64_encode(
+      reinterpret_cast<const unsigned char*>(schema_as_string.data()),
+      static_cast<unsigned int>(schema_as_string.size()));
   result->Append(kArrowSchemaKey, schema_base64);
   *out = result;
   return Status::OK();

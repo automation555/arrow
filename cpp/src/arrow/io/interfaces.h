@@ -17,14 +17,17 @@
 
 #pragma once
 
+#include <arrow/util/mutex.h>
+
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "arrow/io/type_fwd.h"
+#include "arrow/result.h"
 #include "arrow/type_fwd.h"
-#include "arrow/util/cancel.h"
 #include "arrow/util/macros.h"
 #include "arrow/util/string_view.h"
 #include "arrow/util/type_fwd.h"
@@ -49,55 +52,15 @@ struct ReadRange {
   }
 };
 
-/// EXPERIMENTAL: options provider for IO tasks
-///
-/// Includes an Executor (which will be used to execute asynchronous reads),
-/// a MemoryPool (which will be used to allocate buffers when zero copy reads
-/// are not possible), and an external id (in case the executor receives tasks from
-/// multiple sources and must distinguish tasks associated with this IOContext).
-struct ARROW_EXPORT IOContext {
-  // No specified executor: will use a global IO thread pool
-  IOContext() : IOContext(default_memory_pool(), StopToken::Unstoppable()) {}
-
-  explicit IOContext(StopToken stop_token)
-      : IOContext(default_memory_pool(), std::move(stop_token)) {}
-
-  explicit IOContext(MemoryPool* pool, StopToken stop_token = StopToken::Unstoppable());
-
-  explicit IOContext(MemoryPool* pool, ::arrow::internal::Executor* executor,
-                     StopToken stop_token = StopToken::Unstoppable(),
-                     int64_t external_id = -1)
-      : pool_(pool),
-        executor_(executor),
-        external_id_(external_id),
-        stop_token_(std::move(stop_token)) {}
-
-  explicit IOContext(::arrow::internal::Executor* executor,
-                     StopToken stop_token = StopToken::Unstoppable(),
-                     int64_t external_id = -1)
-      : pool_(default_memory_pool()),
-        executor_(executor),
-        external_id_(external_id),
-        stop_token_(std::move(stop_token)) {}
-
-  MemoryPool* pool() const { return pool_; }
-
-  ::arrow::internal::Executor* executor() const { return executor_; }
-
+// EXPERIMENTAL
+struct ARROW_EXPORT AsyncContext {
+  ::arrow::internal::Executor* executor;
   // An application-specific ID, forwarded to executor task submissions
-  int64_t external_id() const { return external_id_; }
+  int64_t external_id = -1;
 
-  StopToken stop_token() const { return stop_token_; }
-
- private:
-  MemoryPool* pool_;
-  ::arrow::internal::Executor* executor_;
-  int64_t external_id_;
-  StopToken stop_token_;
-};
-
-struct ARROW_DEPRECATED("renamed to IOContext in 4.0.0") AsyncContext : public IOContext {
-  using IOContext::IOContext;
+  // Set `executor` to a global IO-specific thread pool.
+  AsyncContext();
+  explicit AsyncContext(::arrow::internal::Executor* executor);
 };
 
 class ARROW_EXPORT FileInterface {
@@ -112,13 +75,6 @@ class ARROW_EXPORT FileInterface {
   /// After Close() is called, closed() returns true and the stream is not
   /// available for further operations.
   virtual Status Close() = 0;
-
-  /// \brief Close the stream asynchronously
-  ///
-  /// By default, this will just submit the synchronous Close() to the
-  /// default I/O thread pool. Subclasses may implement this in a more
-  /// efficient manner.
-  virtual Future<> CloseAsync();
 
   /// \brief Close the stream abruptly
   ///
@@ -175,7 +131,7 @@ class ARROW_EXPORT Writable {
   /// \brief Flush buffered bytes, if any
   virtual Status Flush();
 
-  Status Write(util::string_view data);
+  Status Write(const std::string& data);
 };
 
 class ARROW_EXPORT Readable {
@@ -196,12 +152,6 @@ class ARROW_EXPORT Readable {
   /// In some cases (e.g. a memory-mapped file), this method may avoid a
   /// memory copy.
   virtual Result<std::shared_ptr<Buffer>> Read(int64_t nbytes) = 0;
-
-  /// EXPERIMENTAL: The IOContext associated with this file.
-  ///
-  /// By default, this is the same as default_io_context(), but it may be
-  /// overriden by subclasses.
-  virtual const IOContext& io_context() const;
 };
 
 class ARROW_EXPORT OutputStream : virtual public FileInterface, public Writable {
@@ -209,9 +159,7 @@ class ARROW_EXPORT OutputStream : virtual public FileInterface, public Writable 
   OutputStream() = default;
 };
 
-class ARROW_EXPORT InputStream : virtual public FileInterface,
-                                 virtual public Readable,
-                                 public std::enable_shared_from_this<InputStream> {
+class ARROW_EXPORT InputStream : virtual public FileInterface, virtual public Readable {
  public:
   /// \brief Advance or skip stream indicated number of bytes
   /// \param[in] nbytes the number to move forward
@@ -234,23 +182,14 @@ class ARROW_EXPORT InputStream : virtual public FileInterface,
   /// Zero copy reads imply the use of Buffer-returning Read() overloads.
   virtual bool supports_zero_copy() const;
 
-  /// \brief Read and return stream metadata
-  ///
-  /// If the stream implementation doesn't support metadata, empty metadata
-  /// is returned.  Note that it is allowed to return a null pointer rather
-  /// than an allocated empty metadata.
-  virtual Result<std::shared_ptr<const KeyValueMetadata>> ReadMetadata();
-
-  /// \brief Read stream metadata asynchronously
-  virtual Future<std::shared_ptr<const KeyValueMetadata>> ReadMetadataAsync(
-      const IOContext& io_context);
-  Future<std::shared_ptr<const KeyValueMetadata>> ReadMetadataAsync();
-
  protected:
   InputStream() = default;
 };
 
-class ARROW_EXPORT RandomAccessFile : public InputStream, public Seekable {
+class ARROW_EXPORT RandomAccessFile
+    : public std::enable_shared_from_this<RandomAccessFile>,
+      public InputStream,
+      public Seekable {
  public:
   /// Necessary because we hold a std::unique_ptr
   ~RandomAccessFile() override;
@@ -299,11 +238,8 @@ class ARROW_EXPORT RandomAccessFile : public InputStream, public Seekable {
   virtual Result<std::shared_ptr<Buffer>> ReadAt(int64_t position, int64_t nbytes);
 
   /// EXPERIMENTAL: Read data asynchronously.
-  virtual Future<std::shared_ptr<Buffer>> ReadAsync(const IOContext&, int64_t position,
+  virtual Future<std::shared_ptr<Buffer>> ReadAsync(const AsyncContext&, int64_t position,
                                                     int64_t nbytes);
-
-  /// EXPERIMENTAL: Read data asynchronously, using the file's IOContext.
-  Future<std::shared_ptr<Buffer>> ReadAsync(int64_t position, int64_t nbytes);
 
   /// EXPERIMENTAL: Inform that the given ranges may be read soon.
   ///
@@ -316,8 +252,8 @@ class ARROW_EXPORT RandomAccessFile : public InputStream, public Seekable {
   RandomAccessFile();
 
  private:
-  struct ARROW_NO_EXPORT Impl;
-  std::unique_ptr<Impl> interface_impl_;
+  struct ARROW_NO_EXPORT RandomAccessFileImpl;
+  std::unique_ptr<RandomAccessFileImpl> interface_impl_;
 };
 
 class ARROW_EXPORT WritableFile : public OutputStream, public Seekable {
@@ -332,6 +268,100 @@ class ARROW_EXPORT ReadWriteFileInterface : public RandomAccessFile, public Writ
  protected:
   ReadWriteFileInterface() { RandomAccessFile::set_mode(FileMode::READWRITE); }
 };
+
+template <class FILE>
+class MultiFileProvider {
+  static_assert(std::is_convertible<FILE*, FileInterface*>::value,
+                "MultiFile provider is only intended to work with file interfaces");
+
+  std::shared_ptr<FILE> default_file_;
+  const std::string default_file_path_;
+  std::unordered_map<std::string, std::shared_ptr<FILE>> path_to_file_;
+  util::Mutex file_creation_lock_;
+  FileMode::type mode_;
+  bool closed_ = false;
+
+ public:
+  arrow::Result<std::shared_ptr<FILE>> DefaultFile();
+
+  arrow::Result<std::shared_ptr<FILE>> ForPath(const std::string& path);
+
+  Status Close();
+
+  bool closed() const { return closed_; }
+
+  virtual ~MultiFileProvider() {}
+
+ protected:
+  const std::string base_path_;
+  arrow::MemoryPool* pool_;
+
+  MultiFileProvider(std::shared_ptr<FILE> default_file, const std::string& base_path = "",
+                    arrow::MemoryPool* pool = arrow::default_memory_pool())
+      : default_file_(std::move(default_file)),
+        default_file_path_(""),
+        mode_(default_file_->mode()),
+        base_path_(base_path),
+        pool_(pool) {}
+
+  MultiFileProvider(const std::string& default_file_path, FileMode::type mode,
+                    const std::string& base_path = "",
+                    arrow::MemoryPool* pool = arrow::default_memory_pool())
+      : default_file_path_(default_file_path),
+        mode_(mode),
+        base_path_(base_path),
+        pool_(pool) {}
+
+  virtual arrow::Result<std::shared_ptr<FILE>> OpenFile(const std::string&) = 0;
+
+  FileMode::type mode() const { return mode_; }
+
+ private:
+  ARROW_DISALLOW_COPY_AND_ASSIGN(MultiFileProvider);
+};
+
+template <class FILE>
+arrow::Result<std::shared_ptr<FILE>> MultiFileProvider<FILE>::ForPath(
+    const std::string& path) {
+  auto lock = file_creation_lock_.Lock();
+  auto file_for_path_it = path_to_file_.find(path);
+  if (file_for_path_it != path_to_file_.end()) {
+    return arrow::ToResult(file_for_path_it->second);
+  } else {
+    ARROW_ASSIGN_OR_RAISE(auto new_file, OpenFile(path));
+    path_to_file_.emplace(path, new_file);
+    return arrow::ToResult(new_file);
+  }
+}
+
+template <class FILE>
+arrow::Result<std::shared_ptr<FILE>> MultiFileProvider<FILE>::DefaultFile() {
+  auto lock = file_creation_lock_.Lock();
+  if (!default_file_) {
+    auto result = OpenFile(default_file_path_);
+    if (result.ok()) {
+      default_file_ = result.MoveValueUnsafe();
+    } else {
+      return result;
+    }
+  }
+  return arrow::ToResult(default_file_);
+}
+
+template <class FILE>
+Status MultiFileProvider<FILE>::Close() {
+  auto lock = file_creation_lock_.Lock();
+  if (!closed_) {
+    closed_ = true;
+    if (default_file_) {
+      ARROW_RETURN_NOT_OK(default_file_->Close());
+    }
+    for (const auto& sub_file : path_to_file_) {
+      ARROW_RETURN_NOT_OK(sub_file.second->Close());
+    }
+  }
+  return Status::OK();
+}
 
 /// \brief Return an iterator on an input stream
 ///

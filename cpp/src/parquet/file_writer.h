@@ -29,6 +29,7 @@
 namespace parquet {
 
 class ColumnWriter;
+class OutputStream;
 
 // FIXME: copied from reader-internal.cc
 static constexpr uint8_t kParquetMagic[4] = {'P', 'A', 'R', '1'};
@@ -96,6 +97,10 @@ class PARQUET_EXPORT RowGroupWriter {
   std::unique_ptr<Contents> contents_;
 };
 
+ARROW_DEPRECATED("Use version with arrow::io::OutputStream*")
+PARQUET_EXPORT
+void WriteFileMetaData(const FileMetaData& file_metadata, OutputStream* sink);
+
 PARQUET_EXPORT
 void WriteFileMetaData(const FileMetaData& file_metadata,
                        ::arrow::io::OutputStream* sink);
@@ -110,6 +115,8 @@ void WriteEncryptedFileMetadata(const FileMetaData& file_metadata,
                                 const std::shared_ptr<Encryptor>& encryptor,
                                 bool encrypt_footer);
 
+void WriteFileCryptoMetaData(const FileCryptoMetaData& crypto_metadata,
+                             OutputStream* sink);
 PARQUET_EXPORT
 void WriteEncryptedFileMetadata(const FileMetaData& file_metadata,
                                 ::arrow::io::OutputStream* sink,
@@ -131,6 +138,9 @@ class PARQUET_EXPORT ParquetFileWriter {
       schema_.Init(std::move(schema));
     }
     virtual ~Contents() {}
+
+    virtual void Snapshot(const std::string& data_path,
+                          std::shared_ptr<::arrow::io::OutputStream>& sink) = 0;
     // Perform any cleanup associated with the file contents
     virtual void Close() = 0;
 
@@ -171,7 +181,17 @@ class PARQUET_EXPORT ParquetFileWriter {
       std::shared_ptr<WriterProperties> properties = default_writer_properties(),
       std::shared_ptr<const KeyValueMetadata> key_value_metadata = NULLPTR);
 
+  ARROW_DEPRECATED("Use version with arrow::io::OutputStream")
+  static std::unique_ptr<ParquetFileWriter> Open(
+      std::shared_ptr<OutputStream> sink, std::shared_ptr<schema::GroupNode> schema,
+      std::shared_ptr<WriterProperties> properties = default_writer_properties(),
+      std::shared_ptr<const KeyValueMetadata> key_value_metadata = NULLPTR);
+
   void Open(std::unique_ptr<Contents> contents);
+
+  void Snapshot(const std::string& data_path,
+                std::shared_ptr<::arrow::io::OutputStream>& sink);
+
   void Close();
 
   // Construct a RowGroupWriter for the indicated number of rows.
