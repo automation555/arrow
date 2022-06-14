@@ -81,11 +81,31 @@ class ARROW_EXPORT MemoryPool {
 
   /// Free an allocated region.
   ///
-  /// @param buffer Pointer to the start of the allocated memory region
-  /// @param size Allocated size located at buffer. An allocator implementation
+  /// \param buffer Pointer to the start of the allocated memory region
+  /// \param size Allocated size located at buffer. An allocator implementation
   ///   may use this for tracking the amount of allocated bytes as well as for
   ///   faster deallocation if supported by its backend.
   virtual void Free(uint8_t* buffer, int64_t size) = 0;
+
+  /// Return a shared block of immutable zero bytes of at least the given size.
+  ///
+  /// These blocks are useful when some other readable block of data is needed
+  /// to comply with an interface, but the contents of the block don't matter
+  /// and/or should just be zero. Unlike other allocations, the same underlying
+  /// block of memory can be shared between all users (for a particular size
+  /// limit), thus reducing memory footprint. In fact, some implementations do
+  /// not require allocation of physical memory at all, and instead rely on
+  /// MMU tricks to create arbitrarily large blocks of zeroed virtual memory.
+  ///
+  /// The allocated region shall be 64-byte aligned. The region will be
+  /// deallocated automatically when all shared_ptrs to the region are
+  /// destroyed.
+  ///
+  /// While this returns a shared_ptr to a Buffer, you may want to use the
+  /// MakeBufferOfZeros() function, analogous to AllocateBuffer(). This
+  /// function returns a Buffer that advertises exactly the requested size,
+  /// and that also embeds/hides the shared ownership of the underlying buffer.
+  virtual Result<std::shared_ptr<Buffer>> GetImmutableZeros(int64_t size);
 
   /// Return unused memory to the OS
   ///
@@ -109,6 +129,16 @@ class ARROW_EXPORT MemoryPool {
 
  protected:
   MemoryPool() = default;
+
+  /// Free a memory region allocated by GetImmutableZeros().
+  ///
+  /// \param buffer Pointer to the start of the allocated memory region
+  /// \param size Allocated size located at buffer. An allocator implementation
+  ///   may use this for tracking the amount of allocated bytes as well as for
+  ///   faster deallocation if supported by its backend.
+  virtual void FreeImmutableZeros(uint8_t* buffer, int64_t size);
+
+  friend class ImmutableZeros;
 };
 
 class ARROW_EXPORT LoggingMemoryPool : public MemoryPool {
