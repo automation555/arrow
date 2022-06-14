@@ -597,6 +597,7 @@ public class FlightSqlExample implements FlightSqlProducer, AutoCloseable {
             final String catalogName = columnsData.getString("TABLE_CAT");
             final String schemaName = columnsData.getString("TABLE_SCHEM");
             final String tableName = columnsData.getString("TABLE_NAME");
+            final String typeName = columnsData.getString("TYPE_NAME");
             final String fieldName = columnsData.getString("COLUMN_NAME");
             final int dataType = columnsData.getInt("DATA_TYPE");
             final boolean isNullable = columnsData.getInt("NULLABLE") != DatabaseMetaData.columnNoNulls;
@@ -611,6 +612,7 @@ public class FlightSqlExample implements FlightSqlProducer, AutoCloseable {
                 .catalogName(catalogName)
                 .schemaName(schemaName)
                 .tableName(tableName)
+                .typeName(typeName)
                 .precision(precision)
                 .scale(scale)
                 .isAutoIncrement(isAutoIncrement)
@@ -1488,11 +1490,7 @@ public class FlightSqlExample implements FlightSqlProducer, AutoCloseable {
   @Override
   public FlightInfo getFlightInfoTables(final CommandGetTables request, final CallContext context,
                                         final FlightDescriptor descriptor) {
-    Schema schemaToUse = Schemas.GET_TABLES_SCHEMA;
-    if (!request.getIncludeSchema()) {
-      schemaToUse = Schemas.GET_TABLES_SCHEMA_NO_SCHEMA;
-    }
-    return getFlightInfoForSchema(request, descriptor, schemaToUse);
+    return getFlightInfoForSchema(request, descriptor, Schemas.GET_TABLES_SCHEMA);
   }
 
   @Override
