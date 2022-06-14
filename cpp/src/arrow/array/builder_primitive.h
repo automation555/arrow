@@ -53,7 +53,7 @@ class ARROW_EXPORT NullBuilder : public ArrayBuilder {
 
   Status Append(std::nullptr_t) { return AppendNull(); }
 
-  Status AppendArraySlice(const ArraySpan&, int64_t, int64_t length) override {
+  Status AppendArraySlice(const ArrayData&, int64_t, int64_t length) override {
     return AppendNulls(length);
   }
 
@@ -144,6 +144,11 @@ class NumericBuilder : public ArrayBuilder {
 
   value_type& operator[](int64_t index) {
     return reinterpret_cast<value_type*>(data_builder_.mutable_data())[index];
+  }
+
+  void UnsafeSetIsNull(int64_t index, bool is_null) {
+    this->operator[](index) = value_type{};
+    null_count_ += null_bitmap_builder_.UnsafeUpdate(index, !is_null);
   }
 
   /// \brief Append a sequence of elements in one shot
@@ -279,7 +284,7 @@ class NumericBuilder : public ArrayBuilder {
     return Status::OK();
   }
 
-  Status AppendArraySlice(const ArraySpan& array, int64_t offset,
+  Status AppendArraySlice(const ArrayData& array, int64_t offset,
                           int64_t length) override {
     return AppendValues(array.GetValues<value_type>(1) + offset, length,
                         array.GetValues<uint8_t>(0, 0), array.offset + offset);
@@ -513,7 +518,7 @@ class ARROW_EXPORT BooleanBuilder : public ArrayBuilder {
 
   Status AppendValues(int64_t length, bool value);
 
-  Status AppendArraySlice(const ArraySpan& array, int64_t offset,
+  Status AppendArraySlice(const ArrayData& array, int64_t offset,
                           int64_t length) override {
     return AppendValues(array.GetValues<uint8_t>(1, 0), length,
                         array.GetValues<uint8_t>(0, 0), array.offset + offset);

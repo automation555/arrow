@@ -696,7 +696,6 @@ TEST_F(TestArray, TestMakeEmptyArray) {
 
 TEST_F(TestArray, TestAppendArraySlice) {
   auto scalars = GetScalars();
-  ArraySpan span;
   for (const auto& scalar : scalars) {
     ARROW_SCOPED_TRACE(*scalar->type);
     ASSERT_OK_AND_ASSIGN(auto array, MakeArrayFromScalar(*scalar, 16));
@@ -705,33 +704,31 @@ TEST_F(TestArray, TestAppendArraySlice) {
     std::unique_ptr<arrow::ArrayBuilder> builder;
     ASSERT_OK(MakeBuilder(pool_, scalar->type, &builder));
 
-    span.SetMembers(*array->data());
-    ASSERT_OK(builder->AppendArraySlice(span, 0, 4));
+    ASSERT_OK(builder->AppendArraySlice(*array->data(), 0, 4));
     ASSERT_EQ(4, builder->length());
-    ASSERT_OK(builder->AppendArraySlice(span, 0, 0));
+    ASSERT_OK(builder->AppendArraySlice(*array->data(), 0, 0));
     ASSERT_EQ(4, builder->length());
-    ASSERT_OK(builder->AppendArraySlice(span, 1, 0));
+    ASSERT_OK(builder->AppendArraySlice(*array->data(), 1, 0));
     ASSERT_EQ(4, builder->length());
-    ASSERT_OK(builder->AppendArraySlice(span, 1, 4));
+    ASSERT_OK(builder->AppendArraySlice(*array->data(), 1, 4));
     ASSERT_EQ(8, builder->length());
 
-    span.SetMembers(*nulls->data());
-    ASSERT_OK(builder->AppendArraySlice(span, 0, 4));
+    ASSERT_OK(builder->AppendArraySlice(*nulls->data(), 0, 4));
     ASSERT_EQ(12, builder->length());
     if (!is_union(scalar->type->id())) {
       ASSERT_EQ(4, builder->null_count());
     }
-    ASSERT_OK(builder->AppendArraySlice(span, 0, 0));
+    ASSERT_OK(builder->AppendArraySlice(*nulls->data(), 0, 0));
     ASSERT_EQ(12, builder->length());
     if (!is_union(scalar->type->id())) {
       ASSERT_EQ(4, builder->null_count());
     }
-    ASSERT_OK(builder->AppendArraySlice(span, 1, 0));
+    ASSERT_OK(builder->AppendArraySlice(*nulls->data(), 1, 0));
     ASSERT_EQ(12, builder->length());
     if (!is_union(scalar->type->id())) {
       ASSERT_EQ(4, builder->null_count());
     }
-    ASSERT_OK(builder->AppendArraySlice(span, 1, 4));
+    ASSERT_OK(builder->AppendArraySlice(*nulls->data(), 1, 4));
     ASSERT_EQ(16, builder->length());
     if (!is_union(scalar->type->id())) {
       ASSERT_EQ(8, builder->null_count());
@@ -749,15 +746,13 @@ TEST_F(TestArray, TestAppendArraySlice) {
   {
     ASSERT_OK_AND_ASSIGN(auto array, MakeArrayOfNull(null(), 16));
     NullBuilder builder(pool_);
-
-    span.SetMembers(*array->data());
-    ASSERT_OK(builder.AppendArraySlice(span, 0, 4));
+    ASSERT_OK(builder.AppendArraySlice(*array->data(), 0, 4));
     ASSERT_EQ(4, builder.length());
-    ASSERT_OK(builder.AppendArraySlice(span, 0, 0));
+    ASSERT_OK(builder.AppendArraySlice(*array->data(), 0, 0));
     ASSERT_EQ(4, builder.length());
-    ASSERT_OK(builder.AppendArraySlice(span, 1, 0));
+    ASSERT_OK(builder.AppendArraySlice(*array->data(), 1, 0));
     ASSERT_EQ(4, builder.length());
-    ASSERT_OK(builder.AppendArraySlice(span, 1, 4));
+    ASSERT_OK(builder.AppendArraySlice(*array->data(), 1, 4));
     ASSERT_EQ(8, builder.length());
     std::shared_ptr<Array> result;
     ASSERT_OK(builder.Finish(&result));
@@ -1173,6 +1168,33 @@ TEST(NumericBuilderAccessors, TestSettersGetters) {
 
   ASSERT_EQ(builder.GetValue(0), new_datum);
   ASSERT_EQ(((const NumericBuilder<Int64Type>&)builder)[0], new_datum);
+}
+
+TEST(NumericBuilderAccessors, TestSettersGettersNull) {
+  int64_t datum = 42;
+  NumericBuilder<Int64Type> builder(int64(), default_memory_pool());
+
+  builder.Reset();
+  ASSERT_OK(builder.Append(datum));
+  ASSERT_OK(builder.Append(datum));
+  ASSERT_EQ(builder.GetValue(0), datum);
+  ASSERT_EQ(builder.GetValue(1), datum);
+  ASSERT_EQ(builder.null_count(), 0);
+
+  // Now update the value.
+  builder.UnsafeSetIsNull(0, true);
+  ASSERT_EQ(builder.GetValue(0), 0);
+  ASSERT_EQ(builder.GetValue(1), datum);
+  ASSERT_EQ(builder.null_count(), 1);
+
+  std::shared_ptr<Array> arr;
+  ASSERT_OK(builder.Finish(&arr));
+  ASSERT_EQ(arr->null_count(), 1);
+
+  const auto& iarr = static_cast<const Int64Array&>(*arr);
+  ASSERT_TRUE(iarr.IsNull(0));
+  ASSERT_TRUE(iarr.IsValid(1));
+  ASSERT_EQ(iarr.Value(1), datum);
 }
 
 typedef ::testing::Types<PBoolean, PUInt8, PUInt16, PUInt32, PUInt64, PInt8, PInt16,
@@ -2262,23 +2284,23 @@ struct FWBinaryAppender {
   std::vector<util::string_view> data;
 };
 
-TEST_F(TestFWBinaryArray, ArraySpanVisitor) {
+TEST_F(TestFWBinaryArray, ArrayDataVisitor) {
   auto type = fixed_size_binary(3);
 
   auto array = ArrayFromJSON(type, R"(["abc", null, "def"])");
   FWBinaryAppender appender;
-  ArraySpanVisitor<FixedSizeBinaryType> visitor;
+  ArrayDataVisitor<FixedSizeBinaryType> visitor;
   ASSERT_OK(visitor.Visit(*array->data(), &appender));
   ASSERT_THAT(appender.data, ::testing::ElementsAreArray({"abc", "(null)", "def"}));
   ARROW_UNUSED(visitor);  // Workaround weird MSVC warning
 }
 
-TEST_F(TestFWBinaryArray, ArraySpanVisitorSliced) {
+TEST_F(TestFWBinaryArray, ArrayDataVisitorSliced) {
   auto type = fixed_size_binary(3);
 
   auto array = ArrayFromJSON(type, R"(["abc", null, "def", "ghi"])")->Slice(1, 2);
   FWBinaryAppender appender;
-  ArraySpanVisitor<FixedSizeBinaryType> visitor;
+  ArrayDataVisitor<FixedSizeBinaryType> visitor;
   ASSERT_OK(visitor.Visit(*array->data(), &appender));
   ASSERT_THAT(appender.data, ::testing::ElementsAreArray({"(null)", "def"}));
   ARROW_UNUSED(visitor);  // Workaround weird MSVC warning
@@ -2530,9 +2552,7 @@ TEST_F(TestAdaptiveIntBuilder, TestAppendNull) {
 TEST_F(TestAdaptiveIntBuilder, TestAppendNulls) {
   constexpr int64_t size = 10;
   ASSERT_EQ(0, builder_->null_count());
-  ASSERT_OK(builder_->AppendNulls(0));
   ASSERT_OK(builder_->AppendNulls(size));
-  ASSERT_OK(builder_->AppendNulls(0));
   ASSERT_EQ(size, builder_->null_count());
 
   Done();
@@ -2543,7 +2563,6 @@ TEST_F(TestAdaptiveIntBuilder, TestAppendNulls) {
 }
 
 TEST_F(TestAdaptiveIntBuilder, TestAppendEmptyValue) {
-  ASSERT_OK(builder_->AppendEmptyValues(0));
   ASSERT_OK(builder_->AppendNulls(2));
   ASSERT_OK(builder_->AppendEmptyValue());
   ASSERT_OK(builder_->Append(42));
@@ -2763,9 +2782,7 @@ TEST_F(TestAdaptiveUIntBuilder, TestAppendNull) {
 
 TEST_F(TestAdaptiveUIntBuilder, TestAppendNulls) {
   constexpr int64_t size = 10;
-  ASSERT_OK(builder_->AppendNulls(0));
   ASSERT_OK(builder_->AppendNulls(size));
-  ASSERT_OK(builder_->AppendNulls(0));
   ASSERT_EQ(size, builder_->null_count());
 
   Done();
@@ -2776,7 +2793,6 @@ TEST_F(TestAdaptiveUIntBuilder, TestAppendNulls) {
 }
 
 TEST_F(TestAdaptiveUIntBuilder, TestAppendEmptyValue) {
-  ASSERT_OK(builder_->AppendEmptyValues(0));
   ASSERT_OK(builder_->AppendNulls(2));
   ASSERT_OK(builder_->AppendEmptyValue());
   ASSERT_OK(builder_->Append(42));
