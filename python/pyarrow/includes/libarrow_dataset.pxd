@@ -18,11 +18,11 @@
 # distutils: language = c++
 
 from libcpp.unordered_map cimport unordered_map
-from libcpp cimport bool as c_bool
 
 from pyarrow.includes.common cimport *
 from pyarrow.includes.libarrow cimport *
 from pyarrow.includes.libarrow_fs cimport *
+from pyarrow._parquet cimport *
 
 
 cdef extern from "arrow/api.h" namespace "arrow" nogil:
@@ -32,33 +32,32 @@ cdef extern from "arrow/api.h" namespace "arrow" nogil:
         pass
 
 
-cdef extern from "arrow/dataset/plan.h" namespace "arrow::dataset::internal" nogil:
-
-    cdef void Initialize()
-
-
-ctypedef CStatus cb_writer_finish_internal(CFileWriter*)
-ctypedef void cb_writer_finish(dict, CFileWriter*)
-
 cdef extern from "arrow/dataset/api.h" namespace "arrow::dataset" nogil:
 
-    cdef enum ExistingDataBehavior" arrow::dataset::ExistingDataBehavior":
-        ExistingDataBehavior_DELETE_MATCHING" \
-            arrow::dataset::ExistingDataBehavior::kDeleteMatchingPartitions"
-        ExistingDataBehavior_OVERWRITE_OR_IGNORE" \
-            arrow::dataset::ExistingDataBehavior::kOverwriteOrIgnore"
-        ExistingDataBehavior_ERROR" \
-            arrow::dataset::ExistingDataBehavior::kError"
+    cdef cppclass CExpression "arrow::dataset::Expression":
+        c_bool Equals(const CExpression& other) const
+        c_string ToString() const
+        CResult[CExpression] Bind(const CSchema&)
+
+    cdef CExpression CMakeScalarExpression \
+        "arrow::dataset::literal"(shared_ptr[CScalar] value)
+
+    cdef CExpression CMakeFieldExpression \
+        "arrow::dataset::field_ref"(c_string name)
+
+    cdef CExpression CMakeCallExpression \
+        "arrow::dataset::call"(c_string function,
+                               vector[CExpression] arguments,
+                               shared_ptr[CFunctionOptions] options)
+
+    cdef CResult[shared_ptr[CBuffer]] CSerializeExpression \
+        "arrow::dataset::Serialize"(const CExpression&)
+    cdef CResult[CExpression] CDeserializeExpression \
+        "arrow::dataset::Deserialize"(shared_ptr[CBuffer])
 
     cdef cppclass CScanOptions "arrow::dataset::ScanOptions":
-        shared_ptr[CSchema] dataset_schema
-        shared_ptr[CSchema] projected_schema
-        c_bool use_threads
-
-    cdef cppclass CScanNodeOptions "arrow::dataset::ScanNodeOptions"(CExecNodeOptions):
-        CScanNodeOptions(shared_ptr[CDataset] dataset, shared_ptr[CScanOptions] scan_options)
-
-        shared_ptr[CScanOptions] scan_options
+        @staticmethod
+        shared_ptr[CScanOptions] Make(shared_ptr[CSchema] schema)
 
     cdef cppclass CFragmentScanOptions "arrow::dataset::FragmentScanOptions":
         c_string type_name() const
@@ -101,10 +100,7 @@ cdef extern from "arrow/dataset/api.h" namespace "arrow::dataset" nogil:
         CResult[CTaggedRecordBatchIterator] ScanBatches()
         CResult[shared_ptr[CTable]] ToTable()
         CResult[shared_ptr[CTable]] TakeRows(const CArray& indices)
-        CResult[shared_ptr[CTable]] Head(int64_t num_rows)
-        CResult[int64_t] CountRows()
         CResult[CFragmentIterator] GetFragments()
-        CResult[shared_ptr[CRecordBatchReader]] ToRecordBatchReader()
         const shared_ptr[CScanOptions]& options()
 
     cdef cppclass CScannerBuilder "arrow::dataset::ScannerBuilder":
@@ -112,10 +108,6 @@ cdef extern from "arrow/dataset/api.h" namespace "arrow::dataset" nogil:
                         shared_ptr[CScanOptions] scan_options)
         CScannerBuilder(shared_ptr[CSchema], shared_ptr[CFragment],
                         shared_ptr[CScanOptions] scan_options)
-
-        @staticmethod
-        shared_ptr[CScannerBuilder] FromRecordBatchReader(
-            shared_ptr[CRecordBatchReader] reader)
         CStatus ProjectColumns "Project"(const vector[c_string]& columns)
         CStatus Project(vector[CExpression]& exprs, vector[c_string]& columns)
         CStatus Filter(CExpression filter)
@@ -167,6 +159,8 @@ cdef extern from "arrow/dataset/api.h" namespace "arrow::dataset" nogil:
         CResult[shared_ptr[CSchema]] Inspect(CInspectOptions)
         CResult[shared_ptr[CDataset]] FinishWithSchema "Finish"(
             const shared_ptr[CSchema]& schema)
+        CResult[shared_ptr[CDataset]] FinishWithOptions "Finish"(
+            CFinishOptions options)
         CResult[shared_ptr[CDataset]] Finish()
         const CExpression& root_partition()
         CStatus SetRootPartition(CExpression partition)
@@ -191,14 +185,6 @@ cdef extern from "arrow/dataset/api.h" namespace "arrow::dataset" nogil:
         const shared_ptr[CFileFormat]& format() const
         c_string type_name() const
 
-    cdef cppclass CFileWriter \
-            "arrow::dataset::FileWriter":
-        const shared_ptr[CFileFormat]& format() const
-        const shared_ptr[CSchema]& schema() const
-        const shared_ptr[CFileWriteOptions]& options() const
-        const CFileLocator& destination() const
-        CResult[int64_t] GetBytesWritten()
-
     cdef cppclass CFileFormat "arrow::dataset::FileFormat":
         shared_ptr[CFragmentScanOptions] default_fragment_scan_options
         c_string type_name() const
@@ -214,6 +200,23 @@ cdef extern from "arrow/dataset/api.h" namespace "arrow::dataset" nogil:
         const CFileSource& source() const
         const shared_ptr[CFileFormat]& format() const
 
+    cdef cppclass CParquetFileWriteOptions \
+            "arrow::dataset::ParquetFileWriteOptions"(CFileWriteOptions):
+        shared_ptr[WriterProperties] writer_properties
+        shared_ptr[ArrowWriterProperties] arrow_writer_properties
+
+    cdef cppclass CParquetFileFragment "arrow::dataset::ParquetFileFragment"(
+            CFileFragment):
+        const vector[int]& row_groups() const
+        shared_ptr[CFileMetaData] metadata() const
+        CResult[vector[shared_ptr[CFragment]]] SplitByRowGroup(
+            CExpression predicate)
+        CResult[shared_ptr[CFragment]] SubsetWithFilter "Subset"(
+            CExpression predicate)
+        CResult[shared_ptr[CFragment]] SubsetWithIds "Subset"(
+            vector[int] row_group_ids)
+        CStatus EnsureCompleteMetadata()
+
     cdef cppclass CFileSystemDatasetWriteOptions \
             "arrow::dataset::FileSystemDatasetWriteOptions":
         shared_ptr[CFileWriteOptions] file_write_options
@@ -222,14 +225,6 @@ cdef extern from "arrow/dataset/api.h" namespace "arrow::dataset" nogil:
         shared_ptr[CPartitioning] partitioning
         int max_partitions
         c_string basename_template
-        function[cb_writer_finish_internal] writer_pre_finish
-        function[cb_writer_finish_internal] writer_post_finish
-        ExistingDataBehavior existing_data_behavior
-        c_bool create_dir
-        uint32_t max_open_files
-        uint64_t max_rows_per_file
-        uint64_t min_rows_per_group
-        uint64_t max_rows_per_group
 
     cdef cppclass CFileSystemDataset \
             "arrow::dataset::FileSystemDataset"(CDataset):
@@ -250,7 +245,25 @@ cdef extern from "arrow/dataset/api.h" namespace "arrow::dataset" nogil:
         vector[c_string] files()
         const shared_ptr[CFileFormat]& format() const
         const shared_ptr[CFileSystem]& filesystem() const
-        const shared_ptr[CPartitioning]& partitioning() const
+
+    cdef cppclass CParquetFileFormatReaderOptions \
+            "arrow::dataset::ParquetFileFormat::ReaderOptions":
+        unordered_set[c_string] dict_columns
+
+    cdef cppclass CParquetFileFormat "arrow::dataset::ParquetFileFormat"(
+            CFileFormat):
+        CParquetFileFormatReaderOptions reader_options
+        CResult[shared_ptr[CFileFragment]] MakeFragment(
+            CFileSource source,
+            CExpression partition_expression,
+            shared_ptr[CSchema] physical_schema,
+            vector[int] row_groups)
+
+    cdef cppclass CParquetFragmentScanOptions \
+            "arrow::dataset::ParquetFragmentScanOptions"(CFragmentScanOptions):
+        shared_ptr[CReaderProperties] reader_properties
+        shared_ptr[ArrowReaderProperties] arrow_reader_properties
+        c_bool enable_parallel_column_conversion
 
     cdef cppclass CIpcFileWriteOptions \
             "arrow::dataset::IpcFileWriteOptions"(CFileWriteOptions):
@@ -259,15 +272,6 @@ cdef extern from "arrow/dataset/api.h" namespace "arrow::dataset" nogil:
     cdef cppclass CIpcFileFormat "arrow::dataset::IpcFileFormat"(
             CFileFormat):
         pass
-
-    cdef cppclass COrcFileFormat "arrow::dataset::OrcFileFormat"(
-            CFileFormat):
-        pass
-
-    cdef cppclass CCsvFileWriteOptions \
-            "arrow::dataset::CsvFileWriteOptions"(CFileWriteOptions):
-        shared_ptr[CCSVWriteOptions] write_options
-        CMemoryPool* pool
 
     cdef cppclass CCsvFileFormat "arrow::dataset::CsvFileFormat"(
             CFileFormat):
@@ -283,46 +287,19 @@ cdef extern from "arrow/dataset/api.h" namespace "arrow::dataset" nogil:
         CResult[CExpression] Parse(const c_string & path) const
         const shared_ptr[CSchema] & schema()
 
-    cdef cppclass CSegmentEncoding" arrow::dataset::SegmentEncoding":
-        pass
-
-    CSegmentEncoding CSegmentEncodingNone\
-        " arrow::dataset::SegmentEncoding::None"
-    CSegmentEncoding CSegmentEncodingUri\
-        " arrow::dataset::SegmentEncoding::Uri"
-
-    cdef cppclass CKeyValuePartitioningOptions \
-            "arrow::dataset::KeyValuePartitioningOptions":
-        CSegmentEncoding segment_encoding
-
-    cdef cppclass CHivePartitioningOptions \
-            "arrow::dataset::HivePartitioningOptions":
-        CSegmentEncoding segment_encoding
-        c_string null_fallback
-
     cdef cppclass CPartitioningFactoryOptions \
             "arrow::dataset::PartitioningFactoryOptions":
         c_bool infer_dictionary
         shared_ptr[CSchema] schema
-        CSegmentEncoding segment_encoding
 
     cdef cppclass CHivePartitioningFactoryOptions \
             "arrow::dataset::HivePartitioningFactoryOptions":
-        c_bool infer_dictionary
+        c_bool infer_dictionary,
         c_string null_fallback
         shared_ptr[CSchema] schema
-        CSegmentEncoding segment_encoding
 
     cdef cppclass CPartitioningFactory "arrow::dataset::PartitioningFactory":
-        c_string type_name() const
-
-    cdef cppclass CKeyValuePartitioning \
-            "arrow::dataset::KeyValuePartitioning"(CPartitioning):
-        CKeyValuePartitioning(shared_ptr[CSchema] schema,
-                              vector[shared_ptr[CArray]] dictionaries,
-                              CKeyValuePartitioningOptions options)
-
-        vector[shared_ptr[CArray]] dictionaries() const
+        pass
 
     cdef cppclass CDirectoryPartitioning \
             "arrow::dataset::DirectoryPartitioning"(CPartitioning):
@@ -333,30 +310,14 @@ cdef extern from "arrow/dataset/api.h" namespace "arrow::dataset" nogil:
         shared_ptr[CPartitioningFactory] MakeFactory(
             vector[c_string] field_names, CPartitioningFactoryOptions)
 
-        vector[shared_ptr[CArray]] dictionaries() const
-
     cdef cppclass CHivePartitioning \
             "arrow::dataset::HivePartitioning"(CPartitioning):
         CHivePartitioning(shared_ptr[CSchema] schema,
-                          vector[shared_ptr[CArray]] dictionaries,
-                          CHivePartitioningOptions options)
+                          vector[shared_ptr[CArray]] dictionaries)
 
         @staticmethod
         shared_ptr[CPartitioningFactory] MakeFactory(
             CHivePartitioningFactoryOptions)
-
-        vector[shared_ptr[CArray]] dictionaries() const
-
-    cdef cppclass CFilenamePartitioning \
-            "arrow::dataset::FilenamePartitioning"(CPartitioning):
-        CFilenamePartitioning(shared_ptr[CSchema] schema,
-                              vector[shared_ptr[CArray]] dictionaries)
-
-        @staticmethod
-        shared_ptr[CPartitioningFactory] MakeFactory(
-            vector[c_string] field_names, CPartitioningFactoryOptions)
-
-        vector[shared_ptr[CArray]] dictionaries() const
 
     cdef cppclass CPartitioningOrFactory \
             "arrow::dataset::PartitioningOrFactory":
@@ -367,6 +328,10 @@ cdef extern from "arrow/dataset/api.h" namespace "arrow::dataset" nogil:
             shared_ptr[CPartitioningFactory])
         shared_ptr[CPartitioning] partitioning() const
         shared_ptr[CPartitioningFactory] factory() const
+
+    cdef CResult[unordered_map[CFieldRef, CDatum, CFieldRefHash]] \
+        CExtractKnownFieldValues "arrow::dataset::ExtractKnownFieldValues"(
+            const CExpression& partition_expression)
 
     cdef cppclass CFileSystemFactoryOptions \
             "arrow::dataset::FileSystemFactoryOptions":
@@ -392,4 +357,29 @@ cdef extern from "arrow/dataset/api.h" namespace "arrow::dataset" nogil:
             CFileSelector,
             shared_ptr[CFileFormat] format,
             CFileSystemFactoryOptions options
+        )
+
+    cdef cppclass CParquetFactoryOptions \
+            "arrow::dataset::ParquetFactoryOptions":
+        CPartitioningOrFactory partitioning
+        c_string partition_base_dir
+        c_bool validate_column_chunk_paths
+
+    cdef cppclass CParquetDatasetFactory \
+            "arrow::dataset::ParquetDatasetFactory"(CDatasetFactory):
+        @staticmethod
+        CResult[shared_ptr[CDatasetFactory]] MakeFromMetaDataPath "Make"(
+            const c_string& metadata_path,
+            shared_ptr[CFileSystem] filesystem,
+            shared_ptr[CParquetFileFormat] format,
+            CParquetFactoryOptions options
+        )
+
+        @staticmethod
+        CResult[shared_ptr[CDatasetFactory]] MakeFromMetaDataSource "Make"(
+            const CFileSource& metadata_path,
+            const c_string& base_path,
+            shared_ptr[CFileSystem] filesystem,
+            shared_ptr[CParquetFileFormat] format,
+            CParquetFactoryOptions options
         )
