@@ -80,6 +80,19 @@ class GANDIVA_EXPORT VectorReadFixedLenValueDex : public VectorReadBaseDex {
   void Accept(DexVisitor& visitor) override { visitor.Visit(*this); }
 };
 
+/// value component of a fixed-len list ValueVector
+class GANDIVA_EXPORT VectorReadFixedLenValueListDex : public VectorReadBaseDex {
+ public:
+  explicit VectorReadFixedLenValueListDex(FieldDescriptorPtr field_desc)
+      : VectorReadBaseDex(field_desc) {}
+
+  int DataIdx() const { return field_desc_->data_idx(); }
+
+  int OffsetsIdx() const { return field_desc_->offsets_idx(); }
+
+  void Accept(DexVisitor& visitor) override { visitor.Visit(*this); }
+};
+
 /// value component of a variable-len ValueVector
 class GANDIVA_EXPORT VectorReadVarLenValueDex : public VectorReadBaseDex {
  public:
@@ -89,6 +102,21 @@ class GANDIVA_EXPORT VectorReadVarLenValueDex : public VectorReadBaseDex {
   int DataIdx() const { return field_desc_->data_idx(); }
 
   int OffsetsIdx() const { return field_desc_->offsets_idx(); }
+
+  void Accept(DexVisitor& visitor) override { visitor.Visit(*this); }
+};
+
+/// value component of a variable-len list ValueVector
+class GANDIVA_EXPORT VectorReadVarLenValueListDex : public VectorReadBaseDex {
+ public:
+  explicit VectorReadVarLenValueListDex(FieldDescriptorPtr field_desc)
+      : VectorReadBaseDex(field_desc) {}
+
+  int DataIdx() const { return field_desc_->data_idx(); }
+
+  int OffsetsIdx() const { return field_desc_->offsets_idx(); }
+
+  int ChildOffsetsIdx() const { return field_desc_->child_data_offsets_idx(); }
 
   void Accept(DexVisitor& visitor) override { visitor.Visit(*this); }
 };
@@ -111,19 +139,17 @@ class GANDIVA_EXPORT LocalBitMapValidityDex : public Dex {
 class GANDIVA_EXPORT FuncDex : public Dex {
  public:
   FuncDex(FuncDescriptorPtr func_descriptor, const NativeFunction* native_function,
-          FunctionHolderPtr function_holder, int function_holder_idx,
-          const ValueValidityPairVector& args)
+          FunctionHolderPtr function_holder, const ValueValidityPairVector& args)
       : func_descriptor_(func_descriptor),
         native_function_(native_function),
         function_holder_(function_holder),
-        function_holder_idx_(function_holder_idx),
         args_(args) {}
 
   FuncDescriptorPtr func_descriptor() const { return func_descriptor_; }
 
   const NativeFunction* native_function() const { return native_function_; }
 
-  int get_holder_idx() const { return function_holder_idx_; }
+  FunctionHolderPtr function_holder() const { return function_holder_; }
 
   const ValueValidityPairVector& args() const { return args_; }
 
@@ -131,7 +157,6 @@ class GANDIVA_EXPORT FuncDex : public Dex {
   FuncDescriptorPtr func_descriptor_;
   const NativeFunction* native_function_;
   FunctionHolderPtr function_holder_;
-  int function_holder_idx_;
   ValueValidityPairVector args_;
 };
 
@@ -141,10 +166,9 @@ class GANDIVA_EXPORT NonNullableFuncDex : public FuncDex {
  public:
   NonNullableFuncDex(FuncDescriptorPtr func_descriptor,
                      const NativeFunction* native_function,
-                     FunctionHolderPtr function_holder, int function_holder_idx,
+                     FunctionHolderPtr function_holder,
                      const ValueValidityPairVector& args)
-      : FuncDex(func_descriptor, native_function, function_holder, function_holder_idx,
-                args) {}
+      : FuncDex(func_descriptor, native_function, function_holder, args) {}
 
   void Accept(DexVisitor& visitor) override { visitor.Visit(*this); }
 };
@@ -155,10 +179,9 @@ class GANDIVA_EXPORT NullableNeverFuncDex : public FuncDex {
  public:
   NullableNeverFuncDex(FuncDescriptorPtr func_descriptor,
                        const NativeFunction* native_function,
-                       FunctionHolderPtr function_holder, int function_holder_idx,
+                       FunctionHolderPtr function_holder,
                        const ValueValidityPairVector& args)
-      : FuncDex(func_descriptor, native_function, function_holder, function_holder_idx,
-                args) {}
+      : FuncDex(func_descriptor, native_function, function_holder, args) {}
 
   void Accept(DexVisitor& visitor) override { visitor.Visit(*this); }
 };
@@ -169,10 +192,9 @@ class GANDIVA_EXPORT NullableInternalFuncDex : public FuncDex {
  public:
   NullableInternalFuncDex(FuncDescriptorPtr func_descriptor,
                           const NativeFunction* native_function,
-                          FunctionHolderPtr function_holder, int function_holder_idx,
+                          FunctionHolderPtr function_holder,
                           const ValueValidityPairVector& args, int local_bitmap_idx)
-      : FuncDex(func_descriptor, native_function, function_holder, function_holder_idx,
-                args),
+      : FuncDex(func_descriptor, native_function, function_holder, args),
         local_bitmap_idx_(local_bitmap_idx) {}
 
   void Accept(DexVisitor& visitor) override { visitor.Visit(*this); }
@@ -302,51 +324,10 @@ class InExprDexBase : public Dex {
 
   const std::shared_ptr<InHolder<Type>>& in_holder() const { return in_holder_; }
 
-  void set_holder_idx(int holder_idx) { holder_idx_ = holder_idx; }
-
-  int get_holder_idx() const { return holder_idx_; }
-
  protected:
   ValueValidityPairVector args_;
   std::string runtime_function_;
   std::shared_ptr<InHolder<Type>> in_holder_;
-  int holder_idx_;
-};
-
-template <>
-class InExprDexBase<gandiva::DecimalScalar128> : public Dex {
- public:
-  InExprDexBase(const ValueValidityPairVector& args,
-                const std::unordered_set<gandiva::DecimalScalar128>& values,
-                int32_t precision, int32_t scale)
-      : args_(args), precision_(precision), scale_(scale) {
-    in_holder_.reset(new InHolder<gandiva::DecimalScalar128>(values));
-  }
-
-  int32_t get_precision() const { return precision_; }
-
-  int32_t get_scale() const { return scale_; }
-
-  const ValueValidityPairVector& args() const { return args_; }
-
-  void Accept(DexVisitor& visitor) override { visitor.Visit(*this); }
-
-  const std::string& runtime_function() const { return runtime_function_; }
-
-  const std::shared_ptr<InHolder<gandiva::DecimalScalar128>>& in_holder() const {
-    return in_holder_;
-  }
-
-  void set_holder_idx(int holder_idx) { holder_idx_ = holder_idx; }
-
-  int get_holder_idx() const { return holder_idx_; }
-
- protected:
-  ValueValidityPairVector args_;
-  std::string runtime_function_;
-  std::shared_ptr<InHolder<gandiva::DecimalScalar128>> in_holder_;
-  int32_t precision_, scale_;
-  int holder_idx_;
 };
 
 template <>
@@ -366,36 +347,6 @@ class InExprDex<int64_t> : public InExprDexBase<int64_t> {
             const std::unordered_set<int64_t>& values)
       : InExprDexBase(args, values) {
     runtime_function_ = "gdv_fn_in_expr_lookup_int64";
-  }
-};
-
-template <>
-class InExprDex<float> : public InExprDexBase<float> {
- public:
-  InExprDex(const ValueValidityPairVector& args, const std::unordered_set<float>& values)
-      : InExprDexBase(args, values) {
-    runtime_function_ = "gdv_fn_in_expr_lookup_float";
-  }
-};
-
-template <>
-class InExprDex<double> : public InExprDexBase<double> {
- public:
-  InExprDex(const ValueValidityPairVector& args, const std::unordered_set<double>& values)
-      : InExprDexBase(args, values) {
-    runtime_function_ = "gdv_fn_in_expr_lookup_double";
-  }
-};
-
-template <>
-class InExprDex<gandiva::DecimalScalar128>
-    : public InExprDexBase<gandiva::DecimalScalar128> {
- public:
-  InExprDex(const ValueValidityPairVector& args,
-            const std::unordered_set<gandiva::DecimalScalar128>& values,
-            int32_t precision, int32_t scale)
-      : InExprDexBase<gandiva::DecimalScalar128>(args, values, precision, scale) {
-    runtime_function_ = "gdv_fn_in_expr_lookup_decimal";
   }
 };
 

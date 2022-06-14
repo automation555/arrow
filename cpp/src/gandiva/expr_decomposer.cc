@@ -39,8 +39,16 @@ Status ExprDecomposer::Visit(const FieldNode& node) {
 
   DexPtr validity_dex = std::make_shared<VectorReadValidityDex>(desc);
   DexPtr value_dex;
-  if (desc->HasOffsetsIdx()) {
-    value_dex = std::make_shared<VectorReadVarLenValueDex>(desc);
+  if (desc->HasChildOffsetsIdx()) {
+    // handle list<binary> type
+    value_dex = std::make_shared<VectorReadVarLenValueListDex>(desc);
+  } else if (desc->HasOffsetsIdx()) {
+    if (desc->field()->type()->id() == arrow::Type::LIST) {
+      // handle list<primitive> type
+      value_dex = std::make_shared<VectorReadFixedLenValueListDex>(desc);
+    } else {
+      value_dex = std::make_shared<VectorReadVarLenValueDex>(desc);
+    }
   } else {
     value_dex = std::make_shared<VectorReadFixedLenValueDex>(desc);
   }
@@ -79,10 +87,8 @@ Status ExprDecomposer::Visit(const FunctionNode& in_node) {
 
   // Make a function holder, if required.
   std::shared_ptr<FunctionHolder> holder;
-  int holder_idx = -1;
   if (native_function->NeedsFunctionHolder()) {
     auto status = FunctionHolderRegistry::Make(desc->name(), node, &holder);
-    holder_idx = annotator_.AddHolderPointer(holder.get());
     ARROW_RETURN_NOT_OK(status);
   }
 
@@ -97,13 +103,13 @@ Status ExprDecomposer::Visit(const FunctionNode& in_node) {
                              decomposed->validity_exprs().end());
     }
 
-    auto value_dex = std::make_shared<NonNullableFuncDex>(desc, native_function, holder,
-                                                          holder_idx, args);
+    auto value_dex =
+        std::make_shared<NonNullableFuncDex>(desc, native_function, holder, args);
     result_ = std::make_shared<ValueValidityPair>(merged_validity, value_dex);
   } else if (native_function->result_nullable_type() == kResultNullNever) {
     // These functions always output valid results. So, no validity dex.
-    auto value_dex = std::make_shared<NullableNeverFuncDex>(desc, native_function, holder,
-                                                            holder_idx, args);
+    auto value_dex =
+        std::make_shared<NullableNeverFuncDex>(desc, native_function, holder, args);
     result_ = std::make_shared<ValueValidityPair>(value_dex);
   } else {
     DCHECK(native_function->result_nullable_type() == kResultNullInternal);
@@ -113,7 +119,7 @@ Status ExprDecomposer::Visit(const FunctionNode& in_node) {
     auto validity_dex = std::make_shared<LocalBitMapValidityDex>(local_bitmap_idx);
 
     auto value_dex = std::make_shared<NullableInternalFuncDex>(
-        desc, native_function, holder, holder_idx, args, local_bitmap_idx);
+        desc, native_function, holder, args, local_bitmap_idx);
     result_ = std::make_shared<ValueValidityPair>(validity_dex, value_dex);
   }
   return Status::OK();
@@ -121,11 +127,6 @@ Status ExprDecomposer::Visit(const FunctionNode& in_node) {
 
 // Decompose an IfNode
 Status ExprDecomposer::Visit(const IfNode& node) {
-  // nested_if_else_ might get overwritten when visiting the condition-node, so
-  // saving the value to a local variable and resetting nested_if_else_ to false
-  bool svd_nested_if_else = nested_if_else_;
-  nested_if_else_ = false;
-
   PushConditionEntry(node);
   auto status = node.condition()->Accept(*this);
   ARROW_RETURN_NOT_OK(status);
@@ -133,15 +134,13 @@ Status ExprDecomposer::Visit(const IfNode& node) {
   PopConditionEntry(node);
 
   // Add a local bitmap to track the output validity.
-  int local_bitmap_idx = PushThenEntry(node, svd_nested_if_else);
+  int local_bitmap_idx = PushThenEntry(node);
   status = node.then_node()->Accept(*this);
   ARROW_RETURN_NOT_OK(status);
   auto then_vv = result();
   PopThenEntry(node);
 
   PushElseEntry(node, local_bitmap_idx);
-  nested_if_else_ = (dynamic_cast<IfNode*>(node.else_node().get()) != nullptr);
-
   status = node.else_node()->Accept(*this);
   ARROW_RETURN_NOT_OK(status);
   auto else_vv = result();
@@ -184,55 +183,22 @@ Status ExprDecomposer::Visit(const BooleanNode& node) {
   return Status::OK();
 }
 
-Status ExprDecomposer::Visit(const InExpressionNode<gandiva::DecimalScalar128>& node) {
-  /* decompose the children. */
-  std::vector<ValueValidityPairPtr> args;
-  auto status = node.eval_expr()->Accept(*this);
-  ARROW_RETURN_NOT_OK(status);
-  args.push_back(result());
-  /* In always outputs valid results, so no validity dex */
-  auto value_dex = std::make_shared<InExprDex<gandiva::DecimalScalar128>>(
-      args, node.values(), node.get_precision(), node.get_scale());
-  int holder_idx = annotator_.AddHolderPointer(value_dex->in_holder().get());
-  value_dex->set_holder_idx(holder_idx);
-  result_ = std::make_shared<ValueValidityPair>(value_dex);
-  return Status::OK();
-}
+#define MAKE_VISIT_IN(ctype)                                                  \
+  Status ExprDecomposer::Visit(const InExpressionNode<ctype>& node) {         \
+    /* decompose the children. */                                             \
+    std::vector<ValueValidityPairPtr> args;                                   \
+    auto status = node.eval_expr()->Accept(*this);                            \
+    ARROW_RETURN_NOT_OK(status);                                              \
+    args.push_back(result());                                                 \
+    /* In always outputs valid results, so no validity dex */                 \
+    auto value_dex = std::make_shared<InExprDex<ctype>>(args, node.values()); \
+    result_ = std::make_shared<ValueValidityPair>(value_dex);                 \
+    return Status::OK();                                                      \
+  }
 
-template <typename ctype>
-Status ExprDecomposer::VisitInGeneric(const InExpressionNode<ctype>& node) {
-  /* decompose the children. */
-  std::vector<ValueValidityPairPtr> args;
-  auto status = node.eval_expr()->Accept(*this);
-  ARROW_RETURN_NOT_OK(status);
-  args.push_back(result());
-  /* In always outputs valid results, so no validity dex */
-  auto value_dex = std::make_shared<InExprDex<ctype>>(args, node.values());
-  int holder_idx = annotator_.AddHolderPointer(value_dex->in_holder().get());
-  value_dex->set_holder_idx(holder_idx);
-  result_ = std::make_shared<ValueValidityPair>(value_dex);
-  return Status::OK();
-}
-
-Status ExprDecomposer::Visit(const InExpressionNode<int32_t>& node) {
-  return VisitInGeneric<int32_t>(node);
-}
-
-Status ExprDecomposer::Visit(const InExpressionNode<int64_t>& node) {
-  return VisitInGeneric<int64_t>(node);
-}
-
-Status ExprDecomposer::Visit(const InExpressionNode<float>& node) {
-  return VisitInGeneric<float>(node);
-}
-
-Status ExprDecomposer::Visit(const InExpressionNode<double>& node) {
-  return VisitInGeneric<double>(node);
-}
-
-Status ExprDecomposer::Visit(const InExpressionNode<std::string>& node) {
-  return VisitInGeneric<std::string>(node);
-}
+MAKE_VISIT_IN(int32_t);
+MAKE_VISIT_IN(int64_t);
+MAKE_VISIT_IN(std::string);
 
 Status ExprDecomposer::Visit(const LiteralNode& node) {
   auto value_dex = std::make_shared<LiteralDex>(node.return_type(), node.holder());
@@ -254,16 +220,11 @@ Status ExprDecomposer::Visit(const LiteralNode& node) {
 //    that has a match will do it).
 // Both of the above optimisations save CPU cycles during expression evaluation.
 
-int ExprDecomposer::PushThenEntry(const IfNode& node, bool reuse_bitmap) {
+int ExprDecomposer::PushThenEntry(const IfNode& node) {
   int local_bitmap_idx;
 
-  if (reuse_bitmap) {
-    // we also need stack in addition to reuse_bitmap flag since we
-    // can also enter other if-else nodes when we visit the condition-node
-    // (which themselves might be nested) before we visit then-node
-    DCHECK_EQ(if_entries_stack_.empty(), false) << "PushThenEntry: stack is empty";
-    DCHECK_EQ(if_entries_stack_.top()->entry_type_, kStackEntryElse)
-        << "PushThenEntry: top of stack is not of type entry_else";
+  if (!if_entries_stack_.empty() &&
+      if_entries_stack_.top()->entry_type_ == kStackEntryElse) {
     auto top = if_entries_stack_.top().get();
 
     // inside a nested else statement (i.e if-else-if). use the parent's bitmap.
