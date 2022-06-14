@@ -42,17 +42,14 @@ class ExecContext;
 
 /// \brief Control general scalar aggregate kernel behavior
 ///
-/// By default, null values are ignored (skip_nulls = true).
+/// By default, null values are ignored
 class ARROW_EXPORT ScalarAggregateOptions : public FunctionOptions {
  public:
   explicit ScalarAggregateOptions(bool skip_nulls = true, uint32_t min_count = 1);
-  static constexpr char const kTypeName[] = "ScalarAggregateOptions";
+  constexpr static char const kTypeName[] = "ScalarAggregateOptions";
   static ScalarAggregateOptions Defaults() { return ScalarAggregateOptions{}; }
 
-  /// If true (the default), null values are ignored. Otherwise, if any value is null,
-  /// emit null.
   bool skip_nulls;
-  /// If less than this many non-null values are observed, emit null.
   uint32_t min_count;
 };
 
@@ -70,7 +67,7 @@ class ARROW_EXPORT CountOptions : public FunctionOptions {
     ALL,
   };
   explicit CountOptions(CountMode mode = CountMode::ONLY_VALID);
-  static constexpr char const kTypeName[] = "CountOptions";
+  constexpr static char const kTypeName[] = "CountOptions";
   static CountOptions Defaults() { return CountOptions{}; }
 
   CountMode mode;
@@ -82,16 +79,11 @@ class ARROW_EXPORT CountOptions : public FunctionOptions {
 /// By default, returns the most common value and count.
 class ARROW_EXPORT ModeOptions : public FunctionOptions {
  public:
-  explicit ModeOptions(int64_t n = 1, bool skip_nulls = true, uint32_t min_count = 0);
-  static constexpr char const kTypeName[] = "ModeOptions";
+  explicit ModeOptions(int64_t n = 1);
+  constexpr static char const kTypeName[] = "ModeOptions";
   static ModeOptions Defaults() { return ModeOptions{}; }
 
   int64_t n = 1;
-  /// If true (the default), null values are ignored. Otherwise, if any value is null,
-  /// emit null.
-  bool skip_nulls;
-  /// If less than this many non-null values are observed, emit null.
-  uint32_t min_count;
 };
 
 /// \brief Control Delta Degrees of Freedom (ddof) of Variance and Stddev kernel
@@ -100,16 +92,11 @@ class ARROW_EXPORT ModeOptions : public FunctionOptions {
 /// By default, ddof is zero, and population variance or stddev is returned.
 class ARROW_EXPORT VarianceOptions : public FunctionOptions {
  public:
-  explicit VarianceOptions(int ddof = 0, bool skip_nulls = true, uint32_t min_count = 0);
-  static constexpr char const kTypeName[] = "VarianceOptions";
+  explicit VarianceOptions(int ddof = 0);
+  constexpr static char const kTypeName[] = "VarianceOptions";
   static VarianceOptions Defaults() { return VarianceOptions{}; }
 
   int ddof = 0;
-  /// If true (the default), null values are ignored. Otherwise, if any value is null,
-  /// emit null.
-  bool skip_nulls;
-  /// If less than this many non-null values are observed, emit null.
-  uint32_t min_count;
 };
 
 /// \brief Control Quantile kernel behavior
@@ -126,24 +113,17 @@ class ARROW_EXPORT QuantileOptions : public FunctionOptions {
     MIDPOINT,
   };
 
-  explicit QuantileOptions(double q = 0.5, enum Interpolation interpolation = LINEAR,
-                           bool skip_nulls = true, uint32_t min_count = 0);
+  explicit QuantileOptions(double q = 0.5, enum Interpolation interpolation = LINEAR);
 
   explicit QuantileOptions(std::vector<double> q,
-                           enum Interpolation interpolation = LINEAR,
-                           bool skip_nulls = true, uint32_t min_count = 0);
+                           enum Interpolation interpolation = LINEAR);
 
-  static constexpr char const kTypeName[] = "QuantileOptions";
+  constexpr static char const kTypeName[] = "QuantileOptions";
   static QuantileOptions Defaults() { return QuantileOptions{}; }
 
   /// quantile must be between 0 and 1 inclusive
   std::vector<double> q;
   enum Interpolation interpolation;
-  /// If true (the default), null values are ignored. Otherwise, if any value is null,
-  /// emit null.
-  bool skip_nulls;
-  /// If less than this many non-null values are observed, emit null.
-  uint32_t min_count;
 };
 
 /// \brief Control TDigest approximate quantile kernel behavior
@@ -152,12 +132,10 @@ class ARROW_EXPORT QuantileOptions : public FunctionOptions {
 class ARROW_EXPORT TDigestOptions : public FunctionOptions {
  public:
   explicit TDigestOptions(double q = 0.5, uint32_t delta = 100,
-                          uint32_t buffer_size = 500, bool skip_nulls = true,
-                          uint32_t min_count = 0);
+                          uint32_t buffer_size = 500);
   explicit TDigestOptions(std::vector<double> q, uint32_t delta = 100,
-                          uint32_t buffer_size = 500, bool skip_nulls = true,
-                          uint32_t min_count = 0);
-  static constexpr char const kTypeName[] = "TDigestOptions";
+                          uint32_t buffer_size = 500);
+  constexpr static char const kTypeName[] = "TDigestOptions";
   static TDigestOptions Defaults() { return TDigestOptions{}; }
 
   /// quantile must be between 0 and 1 inclusive
@@ -166,11 +144,6 @@ class ARROW_EXPORT TDigestOptions : public FunctionOptions {
   uint32_t delta;
   /// input buffer size, default 500
   uint32_t buffer_size;
-  /// If true (the default), null values are ignored. Otherwise, if any value is null,
-  /// emit null.
-  bool skip_nulls;
-  /// If less than this many non-null values are observed, emit null.
-  uint32_t min_count;
 };
 
 /// \brief Control Index kernel behavior
@@ -179,7 +152,7 @@ class ARROW_EXPORT IndexOptions : public FunctionOptions {
   explicit IndexOptions(std::shared_ptr<Scalar> value);
   // Default constructor for serialization
   IndexOptions();
-  static constexpr char const kTypeName[] = "IndexOptions";
+  constexpr static char const kTypeName[] = "IndexOptions";
 
   std::shared_ptr<Scalar> value;
 };
@@ -409,6 +382,11 @@ class ARROW_EXPORT Grouper {
   /// Currently only uint32 indices will be produced, eventually the bit width will only
   /// be as wide as necessary.
   virtual Result<Datum> Consume(const ExecBatch& batch) = 0;
+
+  /// Finds/ queries the group IDs for the given ExecBatch for every index. Returns the
+  /// group IDs as an integer array. If a group ID not found, a null will be added to that
+  /// index. This is a thread-safe lookup.
+  virtual Result<Datum> Find(const ExecBatch& batch) const = 0;
 
   /// Get current unique keys. May be called multiple times.
   virtual Result<ExecBatch> GetUniques() = 0;

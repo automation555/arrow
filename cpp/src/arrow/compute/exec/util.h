@@ -33,33 +33,18 @@
 #include "arrow/util/logging.h"
 #include "arrow/util/mutex.h"
 #include "arrow/util/optional.h"
-#include "arrow/util/thread_pool.h"
 
 #if defined(__clang__) || defined(__GNUC__)
 #define BYTESWAP(x) __builtin_bswap64(x)
-#define ROTL(x, n) (((x) << (n)) | ((x) >> ((-n) & 31)))
-#define ROTL64(x, n) (((x) << (n)) | ((x) >> ((-n) & 63)))
-#define PREFETCH(ptr) __builtin_prefetch((ptr), 0 /* rw==read */, 3 /* locality */)
+#define ROTL(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
 #elif defined(_MSC_VER)
 #include <intrin.h>
 #define BYTESWAP(x) _byteswap_uint64(x)
 #define ROTL(x, n) _rotl((x), (n))
-#define ROTL64(x, n) _rotl64((x), (n))
-#if defined(_M_X64) || defined(_M_I86)
-#include <mmintrin.h>  // https://msdn.microsoft.com/fr-fr/library/84szxsww(v=vs.90).aspx
-#define PREFETCH(ptr) _mm_prefetch((const char*)(ptr), _MM_HINT_T0)
-#else
-#define PREFETCH(ptr) (void)(ptr) /* disabled */
-#endif
 #endif
 
 namespace arrow {
 namespace util {
-
-template <typename T>
-inline void CheckAlignment(const void* ptr) {
-  ARROW_DCHECK(reinterpret_cast<uint64_t>(ptr) % sizeof(T) == 0);
-}
 
 // Some platforms typedef int64_t as long int instead of long long int,
 // which breaks the _mm256_i64gather_epi64 and _mm256_i32gather_epi64 intrinsics
@@ -68,17 +53,6 @@ inline void CheckAlignment(const void* ptr) {
 // compile in all cases.
 //
 using int64_for_gather_t = const long long int;  // NOLINT runtime-int
-
-// All MiniBatch... classes use TempVectorStack for vector allocations and can
-// only work with vectors up to 1024 elements.
-//
-// They should only be allocated on the stack to guarantee the right sequence
-// of allocation and deallocation of vectors from TempVectorStack.
-//
-class MiniBatch {
- public:
-  static constexpr int kMiniBatchLength = 1024;
-};
 
 /// Storage used to allocate temporary vectors of a batch size.
 /// Temporary vectors should resemble allocating temporary variables on the stack
@@ -92,10 +66,8 @@ class TempVectorStack {
   Status Init(MemoryPool* pool, int64_t size) {
     num_vectors_ = 0;
     top_ = 0;
-    buffer_size_ = PaddedAllocationSize(size) + kPadding + 2 * sizeof(uint64_t);
+    buffer_size_ = size;
     ARROW_ASSIGN_OR_RAISE(auto buffer, AllocateResizableBuffer(size, pool));
-    // Ensure later operations don't accidentally read uninitialized memory.
-    std::memset(buffer->mutable_data(), 0xFF, size);
     buffer_ = std::move(buffer);
     return Status::OK();
   }
@@ -109,35 +81,24 @@ class TempVectorStack {
     // using SIMD when number of vector elements is not divisible
     // by the number of SIMD lanes.
     //
-    return ::arrow::bit_util::RoundUp(num_bytes, sizeof(int64_t)) + kPadding;
+    return ::arrow::BitUtil::RoundUp(num_bytes, sizeof(int64_t)) + padding;
   }
   void alloc(uint32_t num_bytes, uint8_t** data, int* id) {
     int64_t old_top = top_;
-    top_ += PaddedAllocationSize(num_bytes) + 2 * sizeof(uint64_t);
+    top_ += PaddedAllocationSize(num_bytes);
     // Stack overflow check
     ARROW_DCHECK(top_ <= buffer_size_);
-    *data = buffer_->mutable_data() + old_top + sizeof(uint64_t);
-    // We set 8 bytes before the beginning of the allocated range and
-    // 8 bytes after the end to check for stack overflow (which would
-    // result in those known bytes being corrupted).
-    reinterpret_cast<uint64_t*>(buffer_->mutable_data() + old_top)[0] = kGuard1;
-    reinterpret_cast<uint64_t*>(buffer_->mutable_data() + top_)[-1] = kGuard2;
+    *data = buffer_->mutable_data() + old_top;
     *id = num_vectors_++;
   }
   void release(int id, uint32_t num_bytes) {
     ARROW_DCHECK(num_vectors_ == id + 1);
-    int64_t size = PaddedAllocationSize(num_bytes) + 2 * sizeof(uint64_t);
-    ARROW_DCHECK(reinterpret_cast<const uint64_t*>(buffer_->mutable_data() + top_)[-1] ==
-                 kGuard2);
+    int64_t size = PaddedAllocationSize(num_bytes);
     ARROW_DCHECK(top_ >= size);
     top_ -= size;
-    ARROW_DCHECK(reinterpret_cast<const uint64_t*>(buffer_->mutable_data() + top_)[0] ==
-                 kGuard1);
     --num_vectors_;
   }
-  static constexpr uint64_t kGuard1 = 0x3141592653589793ULL;
-  static constexpr uint64_t kGuard2 = 0x0577215664901532ULL;
-  static constexpr int64_t kPadding = 64;
+  static constexpr int64_t padding = 64;
   int num_vectors_;
   int64_t top_;
   std::unique_ptr<Buffer> buffer_;
@@ -164,7 +125,7 @@ class TempVectorHolder {
   uint32_t num_elements_;
 };
 
-class bit_util {
+class BitUtil {
  public:
   static void bits_to_indexes(int bit_to_search, int64_t hardware_flags,
                               const int num_bits, const uint8_t* bits, int* num_indexes,
@@ -193,8 +154,6 @@ class bit_util {
                                  uint32_t num_bytes);
 
  private:
-  inline static uint64_t SafeLoadUpTo8Bytes(const uint8_t* bytes, int num_bytes);
-  inline static void SafeStoreUpTo8Bytes(uint8_t* bytes, int num_bytes, uint64_t value);
   inline static void bits_to_indexes_helper(uint64_t word, uint16_t base_index,
                                             int* num_indexes, uint16_t* indexes);
   inline static void bits_filter_indexes_helper(uint64_t word,
@@ -203,20 +162,18 @@ class bit_util {
   template <int bit_to_search, bool filter_input_indexes>
   static void bits_to_indexes_internal(int64_t hardware_flags, const int num_bits,
                                        const uint8_t* bits, const uint16_t* input_indexes,
-                                       int* num_indexes, uint16_t* indexes,
-                                       uint16_t base_index = 0);
+                                       int* num_indexes, uint16_t* indexes);
 
 #if defined(ARROW_HAVE_AVX2)
   static void bits_to_indexes_avx2(int bit_to_search, const int num_bits,
                                    const uint8_t* bits, int* num_indexes,
-                                   uint16_t* indexes, uint16_t base_index = 0);
+                                   uint16_t* indexes);
   static void bits_filter_indexes_avx2(int bit_to_search, const int num_bits,
                                        const uint8_t* bits, const uint16_t* input_indexes,
                                        int* num_indexes, uint16_t* indexes);
   template <int bit_to_search>
   static void bits_to_indexes_imp_avx2(const int num_bits, const uint8_t* bits,
-                                       int* num_indexes, uint16_t* indexes,
-                                       uint16_t base_index = 0);
+                                       int* num_indexes, uint16_t* indexes);
   template <int bit_to_search>
   static void bits_filter_indexes_imp_avx2(const int num_bits, const uint8_t* bits,
                                            const uint16_t* input_indexes,
@@ -238,7 +195,7 @@ ARROW_EXPORT
 Result<std::shared_ptr<Table>> TableFromExecBatches(
     const std::shared_ptr<Schema>& schema, const std::vector<ExecBatch>& exec_batches);
 
-class ARROW_EXPORT AtomicCounter {
+class AtomicCounter {
  public:
   AtomicCounter() = default;
 
@@ -268,9 +225,6 @@ class ARROW_EXPORT AtomicCounter {
   // return true if the counter has not already been completed
   bool Cancel() { return DoneOnce(); }
 
-  // return true if the counter has finished or been cancelled
-  bool Completed() { return complete_.load(); }
-
  private:
   // ensure there is only one true return from Increment(), SetTotal(), or Cancel()
   bool DoneOnce() {
@@ -282,7 +236,7 @@ class ARROW_EXPORT AtomicCounter {
   std::atomic<bool> complete_{false};
 };
 
-class ARROW_EXPORT ThreadIndexer {
+class ThreadIndexer {
  public:
   size_t operator()();
 

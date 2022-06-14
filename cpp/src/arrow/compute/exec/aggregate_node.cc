@@ -16,7 +16,6 @@
 // under the License.
 
 #include <mutex>
-#include <sstream>
 #include <thread>
 #include <unordered_map>
 
@@ -31,7 +30,6 @@
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/thread_pool.h"
-#include "arrow/util/tracing_internal.h"
 
 namespace arrow {
 
@@ -60,42 +58,19 @@ Result<FieldVector> ResolveKernels(
 
 namespace {
 
-void AggregatesToString(
-    std::stringstream* ss, const Schema& input_schema,
-    const std::vector<internal::Aggregate>& aggs,
-    const std::vector<int>& target_field_ids,
-    const std::vector<std::unique_ptr<FunctionOptions>>& owned_options, int indent = 0) {
-  *ss << "aggregates=[" << std::endl;
-  for (size_t i = 0; i < aggs.size(); i++) {
-    for (int j = 0; j < indent; ++j) *ss << "  ";
-    *ss << '\t' << aggs[i].function << '('
-        << input_schema.field(target_field_ids[i])->name();
-    if (owned_options[i]) {
-      *ss << ", " << owned_options[i]->ToString();
-    }
-    *ss << ")," << std::endl;
-  }
-  for (int j = 0; j < indent; ++j) *ss << "  ";
-  *ss << ']';
-}
-
 class ScalarAggregateNode : public ExecNode {
  public:
   ScalarAggregateNode(ExecPlan* plan, std::vector<ExecNode*> inputs,
                       std::shared_ptr<Schema> output_schema,
                       std::vector<int> target_field_ids,
-                      std::vector<internal::Aggregate> aggs,
                       std::vector<const ScalarAggregateKernel*> kernels,
-                      std::vector<std::vector<std::unique_ptr<KernelState>>> states,
-                      std::vector<std::unique_ptr<FunctionOptions>> owned_options)
+                      std::vector<std::vector<std::unique_ptr<KernelState>>> states)
       : ExecNode(plan, std::move(inputs), {"target"},
                  /*output_schema=*/std::move(output_schema),
                  /*num_outputs=*/1),
         target_field_ids_(std::move(target_field_ids)),
-        aggs_(std::move(aggs)),
         kernels_(std::move(kernels)),
-        states_(std::move(states)),
-        owned_options_(std::move(owned_options)) {}
+        states_(std::move(states)) {}
 
   static Result<ExecNode*> Make(ExecPlan* plan, std::vector<ExecNode*> inputs,
                                 const ExecNodeOptions& options) {
@@ -112,7 +87,6 @@ class ScalarAggregateNode : public ExecNode {
     FieldVector fields(kernels.size());
     const auto& field_names = aggregate_options.names;
     std::vector<int> target_field_ids(kernels.size());
-    std::vector<std::unique_ptr<FunctionOptions>> owned_options(aggregates.size());
 
     for (size_t i = 0; i < kernels.size(); ++i) {
       ARROW_ASSIGN_OR_RAISE(auto match,
@@ -135,10 +109,6 @@ class ScalarAggregateNode : public ExecNode {
       if (aggregates[i].options == nullptr) {
         aggregates[i].options = function->default_options();
       }
-      if (aggregates[i].options) {
-        owned_options[i] = aggregates[i].options->Copy();
-        aggregates[i].options = owned_options[i].get();
-      }
 
       KernelContext kernel_ctx{exec_ctx};
       states[i].resize(ThreadIndexer::Capacity());
@@ -160,25 +130,13 @@ class ScalarAggregateNode : public ExecNode {
 
     return plan->EmplaceNode<ScalarAggregateNode>(
         plan, std::move(inputs), schema(std::move(fields)), std::move(target_field_ids),
-        std::move(aggregates), std::move(kernels), std::move(states),
-        std::move(owned_options));
+        std::move(kernels), std::move(states));
   }
 
-  const char* kind_name() const override { return "ScalarAggregateNode"; }
+  const char* kind_name() override { return "ScalarAggregateNode"; }
 
   Status DoConsume(const ExecBatch& batch, size_t thread_index) {
-    util::tracing::Span span;
-    START_COMPUTE_SPAN(span, "Consume",
-                       {{"aggregate", ToStringExtra()},
-                        {"node.label", label()},
-                        {"batch.length", batch.length}});
     for (size_t i = 0; i < kernels_.size(); ++i) {
-      util::tracing::Span span;
-      START_COMPUTE_SPAN(span, aggs_[i].function,
-                         {{"function.name", aggs_[i].function},
-                          {"function.options",
-                           aggs_[i].options ? aggs_[i].options->ToString() : "<NULLPTR>"},
-                          {"function.kind", std::string(kind_name()) + "::Consume"}});
       KernelContext batch_ctx{plan()->exec_context()};
       batch_ctx.SetState(states_[i][thread_index].get());
 
@@ -188,13 +146,7 @@ class ScalarAggregateNode : public ExecNode {
     return Status::OK();
   }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {
-    EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
-    util::tracing::Span span;
-    START_COMPUTE_SPAN_WITH_PARENT(span, span_, "InputReceived",
-                                   {{"aggregate", ToStringExtra()},
-                                    {"node.label", label()},
-                                    {"batch.length", batch.length}});
+  void InputReceived(ExecNode* input, int seq, ExecBatch batch) override {
     DCHECK_EQ(input, inputs_[0]);
 
     auto thread_index = get_thread_index_();
@@ -207,38 +159,28 @@ class ScalarAggregateNode : public ExecNode {
   }
 
   void ErrorReceived(ExecNode* input, Status error) override {
-    EVENT(span_, "ErrorReceived", {{"error", error.message()}});
     DCHECK_EQ(input, inputs_[0]);
     outputs_[0]->ErrorReceived(this, std::move(error));
   }
 
-  void InputFinished(ExecNode* input, int total_batches) override {
-    EVENT(span_, "InputFinished", {{"batches.length", total_batches}});
+  void InputFinished(ExecNode* input, int num_total) override {
     DCHECK_EQ(input, inputs_[0]);
-    if (input_counter_.SetTotal(total_batches)) {
+
+    if (input_counter_.SetTotal(num_total)) {
       ErrorIfNotOk(Finish());
     }
   }
 
   Status StartProducing() override {
-    START_COMPUTE_SPAN(span_, std::string(kind_name()) + ":" + label(),
-                       {{"node.label", label()},
-                        {"node.detail", ToString()},
-                        {"node.kind", kind_name()}});
     finished_ = Future<>::Make();
-    END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
     // Scalar aggregates will only output a single batch
     outputs_[0]->InputFinished(this, 1);
     return Status::OK();
   }
 
-  void PauseProducing(ExecNode* output, int32_t counter) override {
-    inputs_[0]->PauseProducing(this, counter);
-  }
+  void PauseProducing(ExecNode* output) override {}
 
-  void ResumeProducing(ExecNode* output, int32_t counter) override {
-    inputs_[0]->ResumeProducing(this, counter);
-  }
+  void ResumeProducing(ExecNode* output) override {}
 
   void StopProducing(ExecNode* output) override {
     DCHECK_EQ(output, outputs_[0]);
@@ -246,7 +188,6 @@ class ScalarAggregateNode : public ExecNode {
   }
 
   void StopProducing() override {
-    EVENT(span_, "StopProducing");
     if (input_counter_.Cancel()) {
       finished_.MarkFinished();
     }
@@ -255,46 +196,28 @@ class ScalarAggregateNode : public ExecNode {
 
   Future<> finished() override { return finished_; }
 
- protected:
-  std::string ToStringExtra(int indent = 0) const override {
-    std::stringstream ss;
-    const auto input_schema = inputs_[0]->output_schema();
-    AggregatesToString(&ss, *input_schema, aggs_, target_field_ids_, owned_options_);
-    return ss.str();
-  }
-
  private:
   Status Finish() {
-    util::tracing::Span span;
-    START_COMPUTE_SPAN(span, "Finish",
-                       {{"aggregate", ToStringExtra()}, {"node.label", label()}});
     ExecBatch batch{{}, 1};
     batch.values.resize(kernels_.size());
 
     for (size_t i = 0; i < kernels_.size(); ++i) {
-      util::tracing::Span span;
-      START_COMPUTE_SPAN(span, aggs_[i].function,
-                         {{"function.name", aggs_[i].function},
-                          {"function.options",
-                           aggs_[i].options ? aggs_[i].options->ToString() : "<NULLPTR>"},
-                          {"function.kind", std::string(kind_name()) + "::Finalize"}});
       KernelContext ctx{plan()->exec_context()};
       ARROW_ASSIGN_OR_RAISE(auto merged, ScalarAggregateKernel::MergeAll(
                                              kernels_[i], &ctx, std::move(states_[i])));
       RETURN_NOT_OK(kernels_[i]->finalize(&ctx, &batch.values[i]));
     }
 
-    outputs_[0]->InputReceived(this, std::move(batch));
+    outputs_[0]->InputReceived(this, 0, std::move(batch));
     finished_.MarkFinished();
     return Status::OK();
   }
 
+  Future<> finished_ = Future<>::MakeFinished();
   const std::vector<int> target_field_ids_;
-  const std::vector<internal::Aggregate> aggs_;
   const std::vector<const ScalarAggregateKernel*> kernels_;
 
   std::vector<std::vector<std::unique_ptr<KernelState>>> states_;
-  const std::vector<std::unique_ptr<FunctionOptions>> owned_options_;
 
   ThreadIndexer get_thread_index_;
   AtomicCounter input_counter_;
@@ -393,14 +316,9 @@ class GroupByNode : public ExecNode {
         std::move(owned_options));
   }
 
-  const char* kind_name() const override { return "GroupByNode"; }
+  const char* kind_name() override { return "GroupByNode"; }
 
   Status Consume(ExecBatch batch) {
-    util::tracing::Span span;
-    START_COMPUTE_SPAN(span, "Consume",
-                       {{"group_by", ToStringExtra()},
-                        {"node.label", label()},
-                        {"batch.length", batch.length}});
     size_t thread_index = get_thread_index_();
     if (thread_index >= local_states_.size()) {
       return Status::IndexError("thread index ", thread_index, " is out of range [0, ",
@@ -415,19 +333,13 @@ class GroupByNode : public ExecNode {
     for (size_t i = 0; i < key_field_ids_.size(); ++i) {
       keys[i] = batch.values[key_field_ids_[i]];
     }
-    ExecBatch key_batch(std::move(keys), batch.length);
+    ARROW_ASSIGN_OR_RAISE(ExecBatch key_batch, ExecBatch::Make(keys));
 
     // Create a batch with group ids
     ARROW_ASSIGN_OR_RAISE(Datum id_batch, state->grouper->Consume(key_batch));
 
     // Execute aggregate kernels
     for (size_t i = 0; i < agg_kernels_.size(); ++i) {
-      util::tracing::Span span;
-      START_COMPUTE_SPAN(span, aggs_[i].function,
-                         {{"function.name", aggs_[i].function},
-                          {"function.options",
-                           aggs_[i].options ? aggs_[i].options->ToString() : "<NULLPTR>"},
-                          {"function.kind", std::string(kind_name()) + "::Consume"}});
       KernelContext kernel_ctx{ctx_};
       kernel_ctx.SetState(state->agg_states[i].get());
 
@@ -443,9 +355,6 @@ class GroupByNode : public ExecNode {
   }
 
   Status Merge() {
-    util::tracing::Span span;
-    START_COMPUTE_SPAN(span, "Merge",
-                       {{"group_by", ToStringExtra()}, {"node.label", label()}});
     ThreadLocalState* state0 = &local_states_[0];
     for (size_t i = 1; i < local_states_.size(); ++i) {
       ThreadLocalState* state = &local_states_[i];
@@ -458,13 +367,6 @@ class GroupByNode : public ExecNode {
       state->grouper.reset();
 
       for (size_t i = 0; i < agg_kernels_.size(); ++i) {
-        util::tracing::Span span;
-        START_COMPUTE_SPAN(
-            span, aggs_[i].function,
-            {{"function.name", aggs_[i].function},
-             {"function.options",
-              aggs_[i].options ? aggs_[i].options->ToString() : "<NULLPTR>"},
-             {"function.kind", std::string(kind_name()) + "::Merge"}});
         KernelContext batch_ctx{ctx_};
         DCHECK(state0->agg_states[i]);
         batch_ctx.SetState(state0->agg_states[i].get());
@@ -479,25 +381,13 @@ class GroupByNode : public ExecNode {
   }
 
   Result<ExecBatch> Finalize() {
-    util::tracing::Span span;
-    START_COMPUTE_SPAN(span, "Finalize",
-                       {{"group_by", ToStringExtra()}, {"node.label", label()}});
-
     ThreadLocalState* state = &local_states_[0];
-    // If we never got any batches, then state won't have been initialized
-    RETURN_NOT_OK(InitLocalStateIfNeeded(state));
 
     ExecBatch out_data{{}, state->grouper->num_groups()};
     out_data.values.resize(agg_kernels_.size() + key_field_ids_.size());
 
     // Aggregate fields come before key fields to match the behavior of GroupBy function
     for (size_t i = 0; i < agg_kernels_.size(); ++i) {
-      util::tracing::Span span;
-      START_COMPUTE_SPAN(span, aggs_[i].function,
-                         {{"function.name", aggs_[i].function},
-                          {"function.options",
-                           aggs_[i].options ? aggs_[i].options->ToString() : "<NULLPTR>"},
-                          {"function.kind", std::string(kind_name()) + "::Finalize"}});
       KernelContext batch_ctx{ctx_};
       batch_ctx.SetState(state->agg_states[i].get());
       RETURN_NOT_OK(agg_kernels_[i]->finalize(&batch_ctx, &out_data.values[i]));
@@ -510,7 +400,7 @@ class GroupByNode : public ExecNode {
     state->grouper.reset();
 
     if (output_counter_.SetTotal(
-            static_cast<int>(bit_util::CeilDiv(out_data.length, output_batch_size())))) {
+            static_cast<int>(BitUtil::CeilDiv(out_data.length, output_batch_size())))) {
       // this will be hit if out_data.length == 0
       finished_.MarkFinished();
     }
@@ -522,7 +412,7 @@ class GroupByNode : public ExecNode {
     if (finished_.is_finished()) return;
 
     int64_t batch_size = output_batch_size();
-    outputs_[0]->InputReceived(this, out_data_.Slice(batch_size * n, batch_size));
+    outputs_[0]->InputReceived(this, n, out_data_.Slice(batch_size * n, batch_size));
 
     if (output_counter_.Increment()) {
       finished_.MarkFinished();
@@ -542,8 +432,7 @@ class GroupByNode : public ExecNode {
         // bail if StopProducing was called
         if (finished_.is_finished()) break;
 
-        auto plan = this->plan()->shared_from_this();
-        RETURN_NOT_OK(executor->Spawn([plan, this, i] { OutputNthBatch(i); }));
+        RETURN_NOT_OK(executor->Spawn([this, i] { OutputNthBatch(i); }));
       } else {
         OutputNthBatch(i);
       }
@@ -552,14 +441,7 @@ class GroupByNode : public ExecNode {
     return Status::OK();
   }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {
-    EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
-    util::tracing::Span span;
-    START_COMPUTE_SPAN_WITH_PARENT(span, span_, "InputReceived",
-                                   {{"group_by", ToStringExtra()},
-                                    {"node.label", label()},
-                                    {"batch.length", batch.length}});
-
+  void InputReceived(ExecNode* input, int seq, ExecBatch batch) override {
     // bail if StopProducing was called
     if (finished_.is_finished()) return;
 
@@ -573,54 +455,39 @@ class GroupByNode : public ExecNode {
   }
 
   void ErrorReceived(ExecNode* input, Status error) override {
-    EVENT(span_, "ErrorReceived", {{"error", error.message()}});
-
     DCHECK_EQ(input, inputs_[0]);
 
     outputs_[0]->ErrorReceived(this, std::move(error));
   }
 
-  void InputFinished(ExecNode* input, int total_batches) override {
-    EVENT(span_, "InputFinished", {{"batches.length", total_batches}});
-
+  void InputFinished(ExecNode* input, int num_total) override {
     // bail if StopProducing was called
     if (finished_.is_finished()) return;
 
     DCHECK_EQ(input, inputs_[0]);
 
-    if (input_counter_.SetTotal(total_batches)) {
+    if (input_counter_.SetTotal(num_total)) {
       ErrorIfNotOk(OutputResult());
     }
   }
 
   Status StartProducing() override {
-    START_COMPUTE_SPAN(span_, std::string(kind_name()) + ":" + label(),
-                       {{"node.label", label()},
-                        {"node.detail", ToString()},
-                        {"node.kind", kind_name()}});
     finished_ = Future<>::Make();
-    END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
 
     local_states_.resize(ThreadIndexer::Capacity());
     return Status::OK();
   }
 
-  void PauseProducing(ExecNode* output, int32_t counter) override {
-    // TODO(ARROW-16260)
-    // Without spillover there is way to handle backpressure in this node
-  }
+  void PauseProducing(ExecNode* output) override {}
 
-  void ResumeProducing(ExecNode* output, int32_t counter) override {
-    // TODO(ARROW-16260)
-    // Without spillover there is way to handle backpressure in this node
-  }
+  void ResumeProducing(ExecNode* output) override {}
 
   void StopProducing(ExecNode* output) override {
-    EVENT(span_, "StopProducing");
     DCHECK_EQ(output, outputs_[0]);
 
-    ARROW_UNUSED(input_counter_.Cancel());
-    if (output_counter_.Cancel()) {
+    if (input_counter_.Cancel()) {
+      finished_.MarkFinished();
+    } else if (output_counter_.Cancel()) {
       finished_.MarkFinished();
     }
     inputs_[0]->StopProducing(this);
@@ -629,21 +496,6 @@ class GroupByNode : public ExecNode {
   void StopProducing() override { StopProducing(outputs_[0]); }
 
   Future<> finished() override { return finished_; }
-
- protected:
-  std::string ToStringExtra(int indent = 0) const override {
-    std::stringstream ss;
-    const auto input_schema = inputs_[0]->output_schema();
-    ss << "keys=[";
-    for (size_t i = 0; i < key_field_ids_.size(); i++) {
-      if (i > 0) ss << ", ";
-      ss << '"' << input_schema->field(key_field_ids_[i])->name() << '"';
-    }
-    ss << "], ";
-    AggregatesToString(&ss, *input_schema, aggs_, agg_src_field_ids_, owned_options_,
-                       indent);
-    return ss.str();
-  }
 
  private:
   struct ThreadLocalState {
@@ -696,6 +548,7 @@ class GroupByNode : public ExecNode {
   }
 
   ExecContext* ctx_;
+  Future<> finished_ = Future<>::MakeFinished();
 
   const std::vector<int> key_field_ids_;
   const std::vector<int> agg_src_field_ids_;
@@ -711,26 +564,19 @@ class GroupByNode : public ExecNode {
   ExecBatch out_data_;
 };
 
+ExecFactoryRegistry::AddOnLoad kRegisterAggregate(
+    "aggregate",
+    [](ExecPlan* plan, std::vector<ExecNode*> inputs,
+       const ExecNodeOptions& options) -> Result<ExecNode*> {
+      const auto& aggregate_options = checked_cast<const AggregateNodeOptions&>(options);
+
+      if (aggregate_options.keys.empty()) {
+        // construct scalar agg node
+        return ScalarAggregateNode::Make(plan, std::move(inputs), options);
+      }
+      return GroupByNode::Make(plan, std::move(inputs), options);
+    });
+
 }  // namespace
-
-namespace internal {
-
-void RegisterAggregateNode(ExecFactoryRegistry* registry) {
-  DCHECK_OK(registry->AddFactory(
-      "aggregate",
-      [](ExecPlan* plan, std::vector<ExecNode*> inputs,
-         const ExecNodeOptions& options) -> Result<ExecNode*> {
-        const auto& aggregate_options =
-            checked_cast<const AggregateNodeOptions&>(options);
-
-        if (aggregate_options.keys.empty()) {
-          // construct scalar agg node
-          return ScalarAggregateNode::Make(plan, std::move(inputs), options);
-        }
-        return GroupByNode::Make(plan, std::move(inputs), options);
-      }));
-}
-
-}  // namespace internal
 }  // namespace compute
 }  // namespace arrow

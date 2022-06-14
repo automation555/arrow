@@ -158,7 +158,6 @@ set(ARROW_SRCS
     builder.cc
     buffer.cc
     chunked_array.cc
-    chunk_resolver.cc
     compare.cc
     config.cc
     datum.cc
@@ -191,7 +190,6 @@ set(ARROW_SRCS
     io/slow.cc
     io/stdio.cc
     io/transform.cc
-    util/async_util.cc
     util/basic_decimal.cc
     util/bit_block_counter.cc
     util/bit_run_reader.cc
@@ -200,12 +198,9 @@ set(ARROW_SRCS
     util/bitmap_builders.cc
     util/bitmap_ops.cc
     util/bpacking.cc
-    util/byte_size.cc
     util/cancel.cc
     util/compression.cc
-    util/counting_semaphore.cc
     util/cpu_info.cc
-    util/debug.cc
     util/decimal.cc
     util/delimiting.cc
     util/formatting.cc
@@ -222,7 +217,6 @@ set(ARROW_SRCS
     util/tdigest.cc
     util/thread_pool.cc
     util/time.cc
-    util/tracing.cc
     util/trie.cc
     util/unreachable.cc
     util/uri.cc
@@ -288,10 +282,6 @@ endif()
 if(ARROW_WITH_LZ4)
   add_definitions(-DARROW_WITH_LZ4)
   list(APPEND ARROW_SRCS util/compression_lz4.cc)
-endif()
-
-if(ARROW_WITH_OPENTELEMETRY)
-  list(APPEND ARROW_SRCS util/tracing_internal.cc)
 endif()
 
 if(ARROW_WITH_SNAPPY)
@@ -381,32 +371,15 @@ if(ARROW_COMPUTE)
        compute/cast.cc
        compute/exec.cc
        compute/exec/aggregate_node.cc
-       compute/exec/bloom_filter.cc
        compute/exec/exec_plan.cc
        compute/exec/expression.cc
        compute/exec/filter_node.cc
-       compute/exec/hash_join.cc
-       compute/exec/hash_join_dict.cc
-       compute/exec/hash_join_node.cc
-       compute/exec/ir_consumer.cc
-       compute/exec/key_compare.cc
-       compute/exec/key_encode.cc
-       compute/exec/key_hash.cc
-       compute/exec/key_map.cc
-       compute/exec/order_by_impl.cc
-       compute/exec/partition_util.cc
-       compute/exec/options.cc
        compute/exec/project_node.cc
-       compute/exec/sink_node.cc
        compute/exec/source_node.cc
-       compute/exec/task_util.cc
-       compute/exec/tpch_node.cc
-       compute/exec/union_node.cc
-       compute/exec/util.cc
+       compute/exec/sink_node.cc
        compute/function.cc
        compute/function_internal.cc
        compute/kernel.cc
-       compute/light_array.cc
        compute/registry.cc
        compute/kernels/aggregate_basic.cc
        compute/kernels/aggregate_mode.cc
@@ -415,7 +388,6 @@ if(ARROW_COMPUTE)
        compute/kernels/aggregate_var_std.cc
        compute/kernels/codegen_internal.cc
        compute/kernels/hash_aggregate.cc
-       compute/kernels/row_encoder.cc
        compute/kernels/scalar_arithmetic.cc
        compute/kernels/scalar_boolean.cc
        compute/kernels/scalar_cast_boolean.cc
@@ -426,32 +398,33 @@ if(ARROW_COMPUTE)
        compute/kernels/scalar_cast_string.cc
        compute/kernels/scalar_cast_temporal.cc
        compute/kernels/scalar_compare.cc
-       compute/kernels/scalar_if_else.cc
        compute/kernels/scalar_nested.cc
-       compute/kernels/scalar_random.cc
        compute/kernels/scalar_set_lookup.cc
-       compute/kernels/scalar_string_ascii.cc
-       compute/kernels/scalar_string_utf8.cc
-       compute/kernels/scalar_temporal_binary.cc
-       compute/kernels/scalar_temporal_unary.cc
+       compute/kernels/scalar_string.cc
+       compute/kernels/scalar_temporal.cc
        compute/kernels/scalar_validity.cc
+       compute/kernels/scalar_fill_null.cc
+       compute/kernels/scalar_if_else.cc
        compute/kernels/util_internal.cc
-       compute/kernels/vector_array_sort.cc
-       compute/kernels/vector_cumulative_ops.cc
        compute/kernels/vector_hash.cc
        compute/kernels/vector_nested.cc
        compute/kernels/vector_replace.cc
        compute/kernels/vector_selection.cc
-       compute/kernels/vector_sort.cc)
+       compute/kernels/vector_sort.cc
+       compute/exec/hash_join_node.cc
+       compute/exec/key_hash.cc
+       compute/exec/key_map.cc
+       compute/exec/key_compare.cc
+       compute/exec/key_encode.cc
+       compute/exec/util.cc)
 
   append_avx2_src(compute/kernels/aggregate_basic_avx2.cc)
   append_avx512_src(compute/kernels/aggregate_basic_avx512.cc)
 
-  append_avx2_src(compute/exec/bloom_filter_avx2.cc)
-  append_avx2_src(compute/exec/key_compare_avx2.cc)
-  append_avx2_src(compute/exec/key_encode_avx2.cc)
   append_avx2_src(compute/exec/key_hash_avx2.cc)
   append_avx2_src(compute/exec/key_map_avx2.cc)
+  append_avx2_src(compute/exec/key_compare_avx2.cc)
+  append_avx2_src(compute/exec/key_encode_avx2.cc)
   append_avx2_src(compute/exec/util_avx2.cc)
 
   list(APPEND ARROW_TESTING_SRCS compute/exec/test_util.cc)
@@ -470,12 +443,6 @@ if(ARROW_FILESYSTEM)
        filesystem/path_util.cc
        filesystem/util_internal.cc)
 
-  if(ARROW_GCS)
-    list(APPEND ARROW_SRCS filesystem/gcsfs.cc filesystem/gcsfs_internal.cc)
-    set_source_files_properties(filesystem/gcsfs.cc filesystem/gcsfs_internal.cc
-                                PROPERTIES SKIP_PRECOMPILE_HEADERS ON
-                                           SKIP_UNITY_BUILD_INCLUSION ON)
-  endif()
   if(ARROW_HDFS)
     list(APPEND ARROW_SRCS filesystem/hdfs.cc)
   endif()
@@ -519,11 +486,7 @@ if(ARROW_JSON)
 endif()
 
 if(ARROW_ORC)
-  list(APPEND
-       ARROW_SRCS
-       adapters/orc/adapter.cc
-       adapters/orc/options.cc
-       adapters/orc/util.cc)
+  list(APPEND ARROW_SRCS adapters/orc/adapter.cc adapters/orc/adapter_util.cc)
 endif()
 
 if(CXX_LINKER_SUPPORTS_VERSION_SCRIPT)
@@ -570,9 +533,10 @@ add_arrow_lib(arrow
               ${ARROW_SHARED_PRIVATE_LINK_LIBS}
               STATIC_LINK_LIBS
               ${ARROW_STATIC_LINK_LIBS}
-              ${ARROW_STATIC_INSTALL_INTERFACE_LIBS}
               SHARED_INSTALL_INTERFACE_LIBS
-              ${ARROW_SHARED_INSTALL_INTERFACE_LIBS})
+              ${ARROW_SHARED_INSTALL_INTERFACE_LIBS}
+              STATIC_INSTALL_INTERFACE_LIBS
+              ${ARROW_STATIC_INSTALL_INTERFACE_LIBS})
 
 add_dependencies(arrow ${ARROW_LIBRARIES})
 
@@ -622,15 +586,10 @@ if(ARROW_TESTING)
                 DEPENDENCIES
                 arrow_test_dependencies
                 SHARED_LINK_LIBS
-                arrow::flatbuffers
-                rapidjson::rapidjson
                 arrow_shared
                 GTest::gtest
                 STATIC_LINK_LIBS
-                arrow::flatbuffers
-                rapidjson::rapidjson
-                arrow_static
-                GTest::gtest)
+                arrow_static)
 
   add_custom_target(arrow_testing)
   add_dependencies(arrow_testing ${ARROW_TESTING_LIBRARIES})
@@ -734,10 +693,6 @@ endif()
 
 if(ARROW_COMPUTE)
   add_subdirectory(compute)
-endif()
-
-if(ARROW_SUBSTRAIT)
-  add_subdirectory(engine)
 endif()
 
 if(ARROW_CUDA)
