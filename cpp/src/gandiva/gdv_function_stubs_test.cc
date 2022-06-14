@@ -21,10 +21,17 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <cfloat>
+#include <cmath>
+
 #include "arrow/util/logging.h"
 #include "gandiva/execution_context.h"
 
 namespace gandiva {
+
+void VerifyAlmostEquals(double actual, double expected, double max_error = FLT_EPSILON) {
+  EXPECT_TRUE(fabs(actual - expected) < max_error) << actual << " != " << expected;
+}
 
 TEST(TestGdvFnStubs, TestCrc32) {
   gandiva::ExecutionContext ctx;
@@ -167,7 +174,6 @@ TEST(TestGdvFnStubs, TestCastINT) {
   EXPECT_EQ(gdv_fn_castINT_utf8(ctx_ptr, "-2147483648", 11), -2147483648LL);
   EXPECT_EQ(gdv_fn_castINT_utf8(ctx_ptr, "-02147483648", 12), -2147483648LL);
   EXPECT_EQ(gdv_fn_castINT_utf8(ctx_ptr, " 12 ", 4), 12);
-  EXPECT_EQ(gdv_fn_castINT_utf8(ctx_ptr, "12", 2), 12);
 
   gdv_fn_castINT_utf8(ctx_ptr, "2147483648", 10);
   EXPECT_THAT(ctx.get_error(),
@@ -950,4 +956,59 @@ TEST(TestGdvFnStubs, TestMaskLastN) {
   EXPECT_EQ(expected, std::string(result, out_len));
 }
 
+TEST(TestGdvFnStubs, TestAbs) {
+  gandiva::ExecutionContext ctx;
+  uint64_t ctx_ptr = reinterpret_cast<int64_t>(&ctx);
+
+  // Abs functions
+  EXPECT_EQ(gdv_fn_abs_int32(ctx_ptr, 0), 0);
+  EXPECT_EQ(gdv_fn_abs_uint32(ctx_ptr, 0), 0);
+  EXPECT_EQ(gdv_fn_abs_int64(ctx_ptr, 0), 0L);
+  EXPECT_EQ(gdv_fn_abs_uint64(ctx_ptr, 0), 0L);
+  VerifyAlmostEquals(gdv_fn_abs_float32(ctx_ptr, 0.0f), abs(0.0f));
+  VerifyAlmostEquals(gdv_fn_abs_float64(ctx_ptr, 0.0), abs(0.0));
+
+  EXPECT_EQ(gdv_fn_abs_int32(ctx_ptr, (INT32_MIN + 1)), abs(INT32_MIN + 1));
+  EXPECT_EQ(gdv_fn_abs_int64(ctx_ptr, (INT64_MIN + 1)), abs(INT64_MIN + 1));
+  VerifyAlmostEquals(gdv_fn_abs_float32(ctx_ptr, static_cast<float>(INT32_MIN + 1)),
+                     abs(static_cast<float>(INT32_MIN + 1)));
+  VerifyAlmostEquals(gdv_fn_abs_float64(ctx_ptr, static_cast<double>(INT32_MIN + 1)),
+                     abs(static_cast<double>(INT32_MIN + 1)));
+
+  VerifyAlmostEquals(gdv_fn_abs_float32(ctx_ptr, std::numeric_limits<float>::max()),
+                     abs(std::numeric_limits<float>::max()));
+  VerifyAlmostEquals(gdv_fn_abs_float32(ctx_ptr, std::numeric_limits<float>::min()),
+                     abs(std::numeric_limits<float>::min()));
+  VerifyAlmostEquals(gdv_fn_abs_float64(ctx_ptr, std::numeric_limits<double>::max()),
+                     abs(std::numeric_limits<double>::max()));
+  VerifyAlmostEquals(gdv_fn_abs_float64(ctx_ptr, std::numeric_limits<double>::min()),
+                     abs(std::numeric_limits<double>::min()));
+
+  EXPECT_EQ(gdv_fn_abs_int64(ctx_ptr, (INT64_MIN + 1)),
+            abs(static_cast<double>(INT64_MIN + 1)));
+  VerifyAlmostEquals(gdv_fn_abs_float64(ctx_ptr, static_cast<double>(INT64_MIN + 1)),
+                     abs(static_cast<double>(INT64_MIN + 1)));
+
+  VerifyAlmostEquals(gdv_fn_abs_float32(ctx_ptr, -3600.50f), abs(-3600.50f));
+  VerifyAlmostEquals(gdv_fn_abs_float64(ctx_ptr, -3600.50), abs(-3600.50));
+}
+
+TEST(TestGdvFnStubs, TestAbsOverflow) {
+  gandiva::ExecutionContext ctx;
+  uint64_t ctx_ptr = reinterpret_cast<int64_t>(&ctx);
+
+  int64_t value = gdv_fn_abs_int64(ctx_ptr, INT64_MIN);
+  EXPECT_TRUE(ctx.has_error());
+  EXPECT_THAT(ctx.get_error(), ::testing::HasSubstr("Overflow in abs execution"));
+  EXPECT_EQ(value, 0);
+
+  ctx.Reset();
+
+  int32_t value_int32 = gdv_fn_abs_int32(ctx_ptr, INT32_MIN);
+  EXPECT_TRUE(ctx.has_error());
+  EXPECT_THAT(ctx.get_error(), ::testing::HasSubstr("Overflow in abs execution"));
+  EXPECT_EQ(value_int32, 0);
+
+  ctx.Reset();
+}
 }  // namespace gandiva
