@@ -16,19 +16,28 @@
 # under the License.
 
 from pathlib import Path
-import time
 
 import click
 
 from .core import Config, Repo, Queue, Target, Job, CrossbowError
-from .reports import (ChatReport, Report, ReportUtils, ConsoleReport,
-                      EmailReport)
+from .reports import EmailReport, ConsoleReport
 from ..utils.source import ArrowSources
 
 
-_default_arrow_path = ArrowSources.find().path
-_default_queue_path = _default_arrow_path.parent / "crossbow"
-_default_config_path = _default_arrow_path / "dev" / "tasks" / "tasks.yml"
+def _default_arrow_path():
+    return ArrowSources.find().path
+
+
+def _default_queue_path():
+    return _default_arrow_path().parent / "crossbow"
+
+
+def _default_config_path():
+    return _default_arrow_path().parent / "dev" / "tasks" / "tasks.yml"
+
+
+def _default_packages_path():
+    return _default_arrow_path() / 'packages'
 
 
 @click.group()
@@ -279,8 +288,8 @@ def report(obj, job_name, sender_name, sender_email, recipient_email,
         queue.fetch()
 
     job = queue.get(job_name)
-    email_report = EmailReport(
-        report=Report(job),
+    report = EmailReport(
+        job=job,
         sender_name=sender_name,
         sender_email=sender_email,
         recipient_email=recipient_email
@@ -293,81 +302,20 @@ def report(obj, job_name, sender_name, sender_email, recipient_email,
         )
 
     if send:
-        ReportUtils.send_email(
+        report.send(
             smtp_user=smtp_user,
             smtp_password=smtp_password,
             smtp_server=smtp_server,
-            smtp_port=smtp_port,
-            recipient_email=recipient_email,
-            message=email_report.render("text")
+            smtp_port=smtp_port
         )
     else:
-        output.write(email_report.render("text"))
-
-
-@crossbow.command()
-@click.argument('job-name', required=True)
-@click.option('--send/--dry-run', default=False,
-              help='Just display the report, don\'t send it')
-@click.option('--webhook', '-w',
-              help='Zulip/Slack Webhook address to send the report to')
-@click.option('--extra-message-success', '-s', default=None,
-              help='Extra message, will be appended if no failures.')
-@click.option('--extra-message-failure', '-f', default=None,
-              help='Extra message, will be appended if there are failures.')
-@click.option('--fetch/--no-fetch', default=True,
-              help='Fetch references (branches and tags) from the remote')
-@click.pass_obj
-def report_chat(obj, job_name, send, webhook, extra_message_success,
-                extra_message_failure, fetch):
-    """
-    Send a chat report to a webhook showing success/failure
-    of tasks in a Crossbow run.
-    """
-    output = obj['output']
-    queue = obj['queue']
-    if fetch:
-        queue.fetch()
-
-    job = queue.get(job_name)
-    report_chat = ChatReport(report=Report(job),
-                             extra_message_success=extra_message_success,
-                             extra_message_failure=extra_message_failure)
-    if send:
-        ReportUtils.send_message(webhook, report_chat.render("text"))
-    else:
-        output.write(report_chat.render("text"))
-
-
-@crossbow.command()
-@click.argument('job-name', required=True)
-@click.option('--save/--dry-run', default=False,
-              help='Just display the report, don\'t save it')
-@click.option('--fetch/--no-fetch', default=True,
-              help='Fetch references (branches and tags) from the remote')
-@click.pass_obj
-def report_csv(obj, job_name, save, fetch):
-    """
-    Generates a CSV report with the different tasks information
-    from a Crossbow run.
-    """
-    output = obj['output']
-    queue = obj['queue']
-    if fetch:
-        queue.fetch()
-
-    job = queue.get(job_name)
-    report = Report(job)
-    if save:
-        ReportUtils.write_csv(report)
-    else:
-        output.write("\n".join([str(row) for row in report.rows]))
+        report.show(output)
 
 
 @crossbow.command()
 @click.argument('job-name', required=True)
 @click.option('-t', '--target-dir',
-              default=_default_arrow_path / 'packages',
+              default=_default_packages_path,
               type=click.Path(file_okay=False, dir_okay=True),
               help='Directory to download the build artifacts')
 @click.option('--dry-run/--execute', default=False,
@@ -402,23 +350,7 @@ def download_artifacts(obj, job_name, target_dir, dry_run, fetch,
             path = target_dir / task_name / asset.name
             path.parent.mkdir(exist_ok=True)
             if not dry_run:
-                import github3
-                max_n_retries = 5
-                n_retries = 0
-                while True:
-                    try:
-                        asset.download(path)
-                    except github3.exceptions.GitHubException as error:
-                        n_retries += 1
-                        if n_retries == max_n_retries:
-                            raise
-                        wait_seconds = 60
-                        click.echo(f'Failed to download {path}')
-                        click.echo(f'Retry #{n_retries} after {wait_seconds}s')
-                        click.echo(error)
-                        time.sleep(wait_seconds)
-                    else:
-                        break
+                asset.download(path)
 
     click.echo('Downloading {}\'s artifacts.'.format(job_name))
     click.echo('Destination directory is {}'.format(target_dir))

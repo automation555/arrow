@@ -83,7 +83,5 @@ cpp/Brewfile.lock.json
 # docker volumes used for caching
 .docker
 
-# generated native binaries created by java JNI build
-java-dist/
-java-native-c/
-java-native-cpp/
+# Python
+venv/
