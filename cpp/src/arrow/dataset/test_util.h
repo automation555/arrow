@@ -81,14 +81,6 @@ using compute::project;
 
 using fs::internal::GetAbstractPathExtension;
 
-/// \brief Assert a dataset produces data with the schema
-void AssertDatasetHasSchema(std::shared_ptr<Dataset> ds, std::shared_ptr<Schema> schema) {
-  ASSERT_OK_AND_ASSIGN(auto scanner_builder, ds->NewScan());
-  ASSERT_OK_AND_ASSIGN(auto scanner, scanner_builder->Finish());
-  ASSERT_OK_AND_ASSIGN(auto table, scanner->ToTable());
-  ASSERT_EQ(*table->schema(), *schema);
-}
-
 class FileSourceFixtureMixin : public ::testing::Test {
  public:
   std::unique_ptr<FileSource> GetSource(std::shared_ptr<Buffer> buffer) {
@@ -521,6 +513,33 @@ class FileFormatFixtureMixin : public ::testing::Test {
     EXPECT_OK_AND_ASSIGN(auto written, sink->Finish());
     return written;
   }
+  std::shared_ptr<Buffer> WriteTableToBuffer(
+      std::shared_ptr<Table> table,
+      std::shared_ptr<FileWriteOptions> options = nullptr) {
+    auto format = format_;
+    auto schema = table->schema();
+    SetSchema(schema->fields());
+    EXPECT_OK_AND_ASSIGN(auto sink, GetFileSink());
+    if (!options) options = format->DefaultWriteOptions();
+
+    EXPECT_OK_AND_ASSIGN(auto fs, fs::internal::MockFileSystem::Make(fs::kNoTime, {}));
+    EXPECT_OK_AND_ASSIGN(auto writer,
+                         format->MakeWriter(sink, schema, options, {fs, "<buffer>"}));
+    TableBatchReader batch_iter(*table);
+    while (true) {
+      std::shared_ptr<RecordBatch> batch;
+      ARROW_EXPECT_OK(batch_iter.ReadNext(&batch));
+      if (batch == nullptr) {
+        break;
+      }
+      ARROW_EXPECT_OK(writer->Write(batch));
+    }
+    auto fut = writer->Finish();
+    EXPECT_FINISHES(fut);
+    ARROW_EXPECT_OK(fut.status());
+    EXPECT_OK_AND_ASSIGN(auto written, sink->Finish());
+    return written;
+  }
   void TestWrite() {
     auto reader = this->GetRecordBatchReader(schema({field("f64", float64())}));
     auto source = this->GetFileSource(reader.get());
@@ -831,6 +850,33 @@ class FileFormatScanMixin : public FileFormatFixtureMixin<FormatHelper>,
       ASSERT_EQ(row_count, expected_rows());
     }
   }
+
+  void TestScanWithFieldPathFilter() {
+    compute::Expression index_filter = equal(field_ref(0), literal(0));
+    compute::Expression name_filter = equal(field_ref("i64"), literal(0));
+    std::vector<int64_t> row_counts(2);
+    for (auto filter : {index_filter, name_filter}) {
+      auto i32 = field("i32", int32());
+      auto i64 = field("i64", int64());
+      this->opts_->dataset_schema = schema({i32, i64});
+      this->Project({});
+      this->SetFilter(filter);
+      auto reader = this->GetRecordBatchReader(opts_->dataset_schema);
+      auto source = this->GetFileSource(reader.get());
+      auto fragment = this->MakeFragment(*source);
+
+      int64_t row_count = 0;
+
+      for (auto maybe_batch : PhysicalBatches(fragment)) {
+        ASSERT_OK_AND_ASSIGN(auto batch, maybe_batch);
+        row_count += batch->num_rows();
+      }
+      ASSERT_EQ(row_count, expected_rows());
+      row_counts.push_back(row_count);
+    }
+    ASSERT_EQ(row_counts.at(0), row_counts.at(1));
+  }
+
   void TestScanWithDuplicateColumn() {
     // A duplicate column is ignored if not requested.
     auto i32 = field("i32", int32());
@@ -860,27 +906,6 @@ class FileFormatScanMixin : public FileFormatFixtureMixin<FormatHelper>,
     this->opts_->dataset_schema = schema({i32, i32, i64});
     ASSERT_RAISES(Invalid,
                   ProjectionDescr::FromNames({"i32"}, *this->opts_->dataset_schema));
-  }
-  void TestScanWithPushdownNulls() {
-    // Regression test for ARROW-15312
-    auto i64 = field("i64", int64());
-    this->SetSchema({i64});
-    this->SetFilter(is_null(field_ref("i64")));
-
-    auto rb = RecordBatchFromJSON(schema({i64}), R"([
-      [null],
-      [32]
-    ])");
-    ASSERT_OK_AND_ASSIGN(auto reader, RecordBatchReader::Make({rb}));
-    auto source = this->GetFileSource(reader.get());
-
-    auto fragment = this->MakeFragment(*source);
-    int64_t row_count = 0;
-    for (auto maybe_batch : Batches(fragment)) {
-      ASSERT_OK_AND_ASSIGN(auto batch, maybe_batch);
-      row_count += batch->num_rows();
-    }
-    ASSERT_EQ(row_count, 1);
   }
 
  protected:
@@ -1031,11 +1056,13 @@ struct MakeFileSystemDatasetMixin {
         continue;
       }
 
+      ASSERT_OK_AND_ASSIGN(partitions[i], partitions[i].Bind(*s));
       ASSERT_OK_AND_ASSIGN(auto fragment,
                            format->MakeFragment({info, fs_}, partitions[i]));
       fragments.push_back(std::move(fragment));
     }
 
+    ASSERT_OK_AND_ASSIGN(root_partition, root_partition.Bind(*s));
     ASSERT_OK_AND_ASSIGN(dataset_, FileSystemDataset::Make(s, root_partition, format, fs_,
                                                            std::move(fragments)));
   }
@@ -1086,6 +1113,9 @@ static std::vector<compute::Expression> PartitionExpressionsOf(
 void AssertFragmentsHavePartitionExpressions(std::shared_ptr<Dataset> dataset,
                                              std::vector<compute::Expression> expected) {
   ASSERT_OK_AND_ASSIGN(auto fragment_it, dataset->GetFragments());
+  for (auto& expr : expected) {
+    ASSERT_OK_AND_ASSIGN(expr, expr.Bind(*dataset->schema()));
+  }
   // Ordering is not guaranteed.
   EXPECT_THAT(PartitionExpressionsOf(IteratorToVector(std::move(fragment_it))),
               testing::UnorderedElementsAreArray(expected));

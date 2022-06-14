@@ -39,6 +39,15 @@ namespace ds = arrow::dataset;
 
 namespace cp = arrow::compute;
 
+// \brief Run Example
+// ./dataset-parquet-scan-example file:///sell_data.parquet
+// sample data set
+//   pickup_at dropoff_at  total_amount
+// 0         A          B            10
+// 1         B          A          1200
+// 2         C          A          2400
+// 3         A          C           500
+
 #define ABORT_ON_FAILURE(expr)                     \
   do {                                             \
     arrow::Status status_ = (expr);                \
@@ -60,11 +69,13 @@ struct Configuration {
   std::vector<std::string> projected_columns = {"pickup_at", "dropoff_at",
                                                 "total_amount"};
 
-  // Indicates the filter by which rows will be filtered. This optimization can
+  // Indicates the expression by which rows will be filtered. This optimization can
   // make use of partition information and/or file metadata if possible.
-  cp::Expression filter =
-      cp::greater(cp::field_ref("total_amount"), cp::literal(1000.0f));
-
+  // fields can be referenced by name or by index.  This example assumes the schema:
+  // 0: pickup_at, 1: dropoff_at, 2: total_amount
+  cp::Expression filter1 = cp::greater(cp::field_ref(2), cp::literal(1000));
+  cp::Expression filter2 = cp::less(cp::field_ref("total_amount"), cp::literal(2000));
+  cp::Expression filter = cp::and_(filter1, filter2);
   ds::InspectOptions inspect_options{};
   ds::FinishOptions finish_options{};
 } conf;
@@ -185,6 +196,10 @@ int main(int argc, char** argv) {
 
   auto table = GetTableFromScanner(scanner);
   std::cout << "Table size: " << table->num_rows() << "\n";
+
+  std::cout << "Data: " << std::endl;
+
+  std::cout << table->ToString() << std::endl;
 
   return EXIT_SUCCESS;
 }
