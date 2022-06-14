@@ -39,7 +39,7 @@
 #include "arrow/util/key_value_metadata.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/ubsan.h"
-#include "arrow/visit_type_inline.h"
+#include "arrow/visitor_inline.h"
 
 #include "generated/File_generated.h"
 #include "generated/Message_generated.h"
@@ -74,7 +74,7 @@ MetadataVersion GetMetadataVersion(flatbuf::MetadataVersion version) {
       return MetadataVersion::V2;
     case flatbuf::MetadataVersion::V3:
       // Arrow 0.3 to 0.7.1
-      return MetadataVersion::V3;
+      return MetadataVersion::V4;
     case flatbuf::MetadataVersion::V4:
       // Arrow 0.8 to 0.17
       return MetadataVersion::V4;
@@ -153,12 +153,29 @@ Status FloatFromFlatbuffer(const flatbuf::FloatingPoint* float_data,
   return Status::OK();
 }
 
+Status ComplexFromFlatbuffer(const flatbuf::Complex* complex_data,
+                             std::shared_ptr<DataType>* out) {
+  if(complex_data->precision() == flatbuf::Precision::SINGLE) {
+    *out = complex64();
+  } else if(complex_data->precision() == flatbuf::Precision::DOUBLE) {
+    *out = complex128();
+  } else {
+    return Status::NotImplemented("Invalid Complex Data precision");
+  }
+
+  return Status::OK();
+}
+
 Offset IntToFlatbuffer(FBB& fbb, int bitWidth, bool is_signed) {
   return flatbuf::CreateInt(fbb, bitWidth, is_signed).Union();
 }
 
 Offset FloatToFlatbuffer(FBB& fbb, flatbuf::Precision precision) {
   return flatbuf::CreateFloatingPoint(fbb, precision).Union();
+}
+
+Offset ComplexToFlatbuffer(FBB& fbb, flatbuf::Precision precision) {
+  return flatbuf::CreateComplex(fbb, precision).Union(); 
 }
 
 // ----------------------------------------------------------------------
@@ -203,9 +220,7 @@ Status UnionFromFlatbuffer(const flatbuf::Union* union_data,
   *offset = IntToFlatbuffer(fbb, BIT_WIDTH, IS_SIGNED); \
   break;
 
-}  // namespace
-
-flatbuf::TimeUnit ToFlatbufferUnit(TimeUnit::type unit) {
+static inline flatbuf::TimeUnit ToFlatbufferUnit(TimeUnit::type unit) {
   switch (unit) {
     case TimeUnit::SECOND:
       return flatbuf::TimeUnit::SECOND;
@@ -221,7 +236,7 @@ flatbuf::TimeUnit ToFlatbufferUnit(TimeUnit::type unit) {
   return flatbuf::TimeUnit::MIN;
 }
 
-TimeUnit::type FromFlatbufferUnit(flatbuf::TimeUnit unit) {
+static inline TimeUnit::type FromFlatbufferUnit(flatbuf::TimeUnit unit) {
   switch (unit) {
     case flatbuf::TimeUnit::SECOND:
       return TimeUnit::SECOND;
@@ -239,7 +254,8 @@ TimeUnit::type FromFlatbufferUnit(flatbuf::TimeUnit unit) {
 }
 
 Status ConcreteTypeFromFlatbuffer(flatbuf::Type type, const void* type_data,
-                                  FieldVector children, std::shared_ptr<DataType>* out) {
+                                  const std::vector<std::shared_ptr<Field>>& children,
+                                  std::shared_ptr<DataType>* out) {
   switch (type) {
     case flatbuf::Type::NONE:
       return Status::Invalid("Type metadata cannot be none");
@@ -251,6 +267,9 @@ Status ConcreteTypeFromFlatbuffer(flatbuf::Type type, const void* type_data,
     case flatbuf::Type::FloatingPoint:
       return FloatFromFlatbuffer(static_cast<const flatbuf::FloatingPoint*>(type_data),
                                  out);
+    case flatbuf::Type::Complex:
+      return ComplexFromFlatbuffer(static_cast<const flatbuf::Complex*>(type_data),
+                                   out);
     case flatbuf::Type::Binary:
       *out = binary();
       return Status::OK();
@@ -334,10 +353,6 @@ Status ConcreteTypeFromFlatbuffer(flatbuf::Type type, const void* type_data,
           *out = day_time_interval();
           return Status::OK();
         }
-        case flatbuf::IntervalUnit::MONTH_DAY_NANO: {
-          *out = month_day_nano_interval();
-          return Status::OK();
-        }
       }
       return Status::NotImplemented("Unrecognized interval type.");
     }
@@ -391,8 +406,6 @@ Status ConcreteTypeFromFlatbuffer(flatbuf::Type type, const void* type_data,
   }
 }
 
-namespace {
-
 Status TensorTypeToFlatbuffer(FBB& fbb, const DataType& type, flatbuf::Type* out_type,
                               Offset* offset) {
   switch (type.id()) {
@@ -423,6 +436,14 @@ Status TensorTypeToFlatbuffer(FBB& fbb, const DataType& type, flatbuf::Type* out
     case Type::DOUBLE:
       *out_type = flatbuf::Type::FloatingPoint;
       *offset = FloatToFlatbuffer(fbb, flatbuf::Precision::DOUBLE);
+      break;
+    case Type::COMPLEX_FLOAT:
+      *out_type = flatbuf::Type::Complex;
+      *offset = ComplexToFlatbuffer(fbb, flatbuf::Precision::SINGLE);
+      break;
+    case Type::COMPLEX_DOUBLE:
+      *out_type = flatbuf::Type::Complex;
+      *offset = ComplexToFlatbuffer(fbb, flatbuf::Precision::DOUBLE);
       break;
     default:
       *out_type = flatbuf::Type::NONE;  // Make clang-tidy happy
@@ -510,6 +531,18 @@ class FieldToFlatbufferVisitor {
     return Status::OK();
   }
 
+  Status Visit(const ComplexFloatType& type) {
+    fb_type_ = flatbuf::Type::Complex;
+    type_offset_ = ComplexToFlatbuffer(fbb_, flatbuf::Precision::SINGLE);
+    return Status::OK();
+  }
+
+  Status Visit(const ComplexDoubleType& type) {
+    fb_type_ = flatbuf::Type::Complex;
+    type_offset_ = ComplexToFlatbuffer(fbb_, flatbuf::Precision::DOUBLE);
+    return Status::OK();
+  }
+
   Status Visit(const FixedSizeBinaryType& type) {
     const auto& fw_type = checked_cast<const FixedSizeBinaryType&>(type);
     fb_type_ = flatbuf::Type::FixedSizeBinary;
@@ -591,13 +624,6 @@ class FieldToFlatbufferVisitor {
   Status Visit(const DayTimeIntervalType& type) {
     fb_type_ = flatbuf::Type::Interval;
     type_offset_ = flatbuf::CreateInterval(fbb_, flatbuf::IntervalUnit::DAY_TIME).Union();
-    return Status::OK();
-  }
-
-  Status Visit(const MonthDayNanoIntervalType& type) {
-    fb_type_ = flatbuf::Type::Interval;
-    type_offset_ =
-        flatbuf::CreateInterval(fbb_, flatbuf::IntervalUnit::MONTH_DAY_NANO).Union();
     return Status::OK();
   }
 
@@ -781,8 +807,8 @@ Status FieldFromFlatbuffer(const flatbuf::Field* field, FieldPosition field_pos,
   // 2. Top-level concrete data type
   auto type_data = field->type();
   CHECK_FLATBUFFERS_NOT_NULL(type_data, "Field.type");
-  RETURN_NOT_OK(ConcreteTypeFromFlatbuffer(field->type_type(), type_data,
-                                           std::move(child_fields), &type));
+  RETURN_NOT_OK(
+      ConcreteTypeFromFlatbuffer(field->type_type(), type_data, child_fields, &type));
 
   // 3. Is it a dictionary type?
   int64_t dictionary_id = -1;
@@ -1303,15 +1329,15 @@ Status WriteFileFooter(const Schema& schema, const std::vector<FileBlock>& dicti
 
 #ifndef NDEBUG
   for (size_t i = 0; i < dictionaries.size(); ++i) {
-    DCHECK(bit_util::IsMultipleOf8(dictionaries[i].offset)) << i;
-    DCHECK(bit_util::IsMultipleOf8(dictionaries[i].metadata_length)) << i;
-    DCHECK(bit_util::IsMultipleOf8(dictionaries[i].body_length)) << i;
+    DCHECK(BitUtil::IsMultipleOf8(dictionaries[i].offset)) << i;
+    DCHECK(BitUtil::IsMultipleOf8(dictionaries[i].metadata_length)) << i;
+    DCHECK(BitUtil::IsMultipleOf8(dictionaries[i].body_length)) << i;
   }
 
   for (size_t i = 0; i < record_batches.size(); ++i) {
-    DCHECK(bit_util::IsMultipleOf8(record_batches[i].offset)) << i;
-    DCHECK(bit_util::IsMultipleOf8(record_batches[i].metadata_length)) << i;
-    DCHECK(bit_util::IsMultipleOf8(record_batches[i].body_length)) << i;
+    DCHECK(BitUtil::IsMultipleOf8(record_batches[i].offset)) << i;
+    DCHECK(BitUtil::IsMultipleOf8(record_batches[i].metadata_length)) << i;
+    DCHECK(BitUtil::IsMultipleOf8(record_batches[i].body_length)) << i;
   }
 #endif
 

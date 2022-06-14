@@ -52,14 +52,13 @@
 #define ARROW_BYTE_SWAP32 __builtin_bswap32
 #endif
 
-#include <algorithm>
-#include <array>
+#include <complex>
 
 #include "arrow/util/type_traits.h"
 #include "arrow/util/ubsan.h"
 
 namespace arrow {
-namespace bit_util {
+namespace BitUtil {
 
 //
 // Byte-swap 16-bit, 32-bit and 64-bit values
@@ -91,6 +90,15 @@ static inline float ByteSwap(float value) {
   const uint32_t swapped = ARROW_BYTE_SWAP32(util::SafeCopy<uint32_t>(value));
   return util::SafeCopy<float>(swapped);
 }
+
+static inline std::complex<float> ByteSwap(std::complex<float> value) {
+  return value;
+}
+
+static inline std::complex<double> ByteSwap(std::complex<double> value) {
+  return value;
+}
+
 
 // Write the swapped bytes into dst. Src and dst cannot overlap.
 static inline void ByteSwap(void* dst, const void* src, int len) {
@@ -180,66 +188,5 @@ static inline T FromLittleEndian(T value) {
 }
 #endif
 
-// Handle endianness in *word* granuality (keep individual array element untouched)
-namespace little_endian {
-
-namespace detail {
-
-// Read a native endian array as little endian
-template <typename T, size_t N>
-struct Reader {
-  const std::array<T, N>& native_array;
-
-  explicit Reader(const std::array<T, N>& native_array) : native_array(native_array) {}
-
-  const T& operator[](size_t i) const {
-    return native_array[ARROW_LITTLE_ENDIAN ? i : N - 1 - i];
-  }
-};
-
-// Read/write a native endian array as little endian
-template <typename T, size_t N>
-struct Writer {
-  std::array<T, N>* native_array;
-
-  explicit Writer(std::array<T, N>* native_array) : native_array(native_array) {}
-
-  const T& operator[](size_t i) const {
-    return (*native_array)[ARROW_LITTLE_ENDIAN ? i : N - 1 - i];
-  }
-  T& operator[](size_t i) { return (*native_array)[ARROW_LITTLE_ENDIAN ? i : N - 1 - i]; }
-};
-
-}  // namespace detail
-
-// Construct array reader and try to deduce template augments
-template <typename T, size_t N>
-static inline detail::Reader<T, N> Make(const std::array<T, N>& native_array) {
-  return detail::Reader<T, N>(native_array);
-}
-
-// Construct array writer and try to deduce template augments
-template <typename T, size_t N>
-static inline detail::Writer<T, N> Make(std::array<T, N>* native_array) {
-  return detail::Writer<T, N>(native_array);
-}
-
-// Convert little endian array to native endian
-template <typename T, size_t N>
-static inline std::array<T, N> ToNative(std::array<T, N> array) {
-  if (!ARROW_LITTLE_ENDIAN) {
-    std::reverse(array.begin(), array.end());
-  }
-  return array;
-}
-
-// Convert native endian array to little endian
-template <typename T, size_t N>
-static inline std::array<T, N> FromNative(std::array<T, N> array) {
-  return ToNative(array);
-}
-
-}  // namespace little_endian
-
-}  // namespace bit_util
+}  // namespace BitUtil
 }  // namespace arrow

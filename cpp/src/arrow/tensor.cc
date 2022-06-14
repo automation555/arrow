@@ -31,9 +31,9 @@
 #include "arrow/type.h"
 #include "arrow/type_traits.h"
 #include "arrow/util/checked_cast.h"
-#include "arrow/util/int_util_overflow.h"
+#include "arrow/util/int_util_internal.h"
 #include "arrow/util/logging.h"
-#include "arrow/visit_type_inline.h"
+#include "arrow/visitor_inline.h"
 
 namespace arrow {
 
@@ -297,12 +297,23 @@ int64_t StridedTensorCountNonZero(int dim_index, int64_t offset, const Tensor& t
 }
 
 template <typename TYPE>
-int64_t ContiguousTensorCountNonZero(const Tensor& tensor) {
+enable_if_t<!is_complex_type<TYPE>::value, int64_t>
+ContiguousTensorCountNonZero(const Tensor& tensor) {
   using c_type = typename TYPE::c_type;
   auto* data = reinterpret_cast<c_type const*>(tensor.raw_data());
   return std::count_if(data, data + tensor.size(),
                        [](c_type const& x) { return x != 0; });
 }
+
+template <typename TYPE>
+enable_if_t<is_complex_type<TYPE>::value, int64_t>
+ContiguousTensorCountNonZero(const Tensor& tensor) {
+  using c_type = typename TYPE::c_type;
+  auto* data = reinterpret_cast<c_type const*>(tensor.raw_data());
+  return std::count_if(data, data + tensor.size(),
+                       [](c_type const& x) { return x != c_type(0, 0); });
+}
+
 
 template <typename TYPE>
 inline int64_t TensorCountNonZero(const Tensor& tensor) {
@@ -328,7 +339,7 @@ struct NonZeroCounter {
   }
 
   const Tensor& tensor_;
-  int64_t result = 0;
+  int64_t result;
 };
 
 }  // namespace

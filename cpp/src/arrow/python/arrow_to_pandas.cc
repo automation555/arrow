@@ -44,11 +44,10 @@
 #include "arrow/util/macros.h"
 #include "arrow/util/parallel.h"
 #include "arrow/util/string_view.h"
-#include "arrow/visit_type_inline.h"
+#include "arrow/visitor_inline.h"
 
 #include "arrow/compute/api.h"
 
-#include "arrow/python/arrow_to_python_internal.h"
 #include "arrow/python/common.h"
 #include "arrow/python/datetime.h"
 #include "arrow/python/decimal.h"
@@ -168,6 +167,8 @@ static inline bool ListTypeSupported(const DataType& type) {
     case Type::UINT64:
     case Type::FLOAT:
     case Type::DOUBLE:
+    case Type::COMPLEX_FLOAT:
+    case Type::COMPLEX_DOUBLE:
     case Type::DECIMAL128:
     case Type::DECIMAL256:
     case Type::BINARY:
@@ -182,7 +183,6 @@ static inline bool ListTypeSupported(const DataType& type) {
     case Type::TIMESTAMP:
     case Type::DURATION:
     case Type::DICTIONARY:
-    case Type::INTERVAL_MONTH_DAY_NANO:
     case Type::NA:  // empty list
       // The above types are all supported.
       return true;
@@ -348,10 +348,7 @@ class PandasWriter {
   };
 
   PandasWriter(const PandasOptions& options, int64_t num_rows, int num_columns)
-      : options_(options), num_rows_(num_rows), num_columns_(num_columns) {
-    PyAcquireGIL lock;
-    internal::InitPandasStaticData();
-  }
+      : options_(options), num_rows_(num_rows), num_columns_(num_columns) {}
   virtual ~PandasWriter() {}
 
   void SetBlockData(PyObject* arr) {
@@ -374,6 +371,7 @@ class PandasWriter {
       return Status::OK();
     }
     PyAcquireGIL lock;
+
     npy_intp placement_dims[1] = {num_columns_};
     PyObject* placement_arr = PyArray_SimpleNew(1, placement_dims, NPY_INT64);
     RETURN_IF_PYERROR();
@@ -578,6 +576,24 @@ inline void ConvertIntegerNoNullsCast(const PandasOptions& options,
   }
 }
 
+// Generic Array -> PyObject** converter that handles object deduplication, if
+// requested
+template <typename ArrayType, typename WriteValue>
+inline Status WriteArrayObjects(const ArrayType& arr, WriteValue&& write_func,
+                                PyObject** out_values) {
+  const bool has_nulls = arr.null_count() > 0;
+  for (int64_t i = 0; i < arr.length(); ++i) {
+    if (has_nulls && arr.IsNull(i)) {
+      Py_INCREF(Py_None);
+      *out_values = Py_None;
+    } else {
+      RETURN_NOT_OK(write_func(arr.GetView(i), out_values));
+    }
+    ++out_values;
+  }
+  return Status::OK();
+}
+
 template <typename T, typename Enable = void>
 struct MemoizationTraits {
   using Scalar = typename T::c_type;
@@ -590,15 +606,14 @@ struct MemoizationTraits<T, enable_if_has_string_view<T>> {
   using Scalar = util::string_view;
 };
 
-// Generic Array -> PyObject** converter that handles object deduplication, if
-// requested
 template <typename Type, typename WrapFunction>
 inline Status ConvertAsPyObjects(const PandasOptions& options, const ChunkedArray& data,
                                  WrapFunction&& wrap_func, PyObject** out_values) {
   using ArrayType = typename TypeTraits<Type>::ArrayType;
   using Scalar = typename MemoizationTraits<Type>::Scalar;
 
-  ::arrow::internal::ScalarMemoTable<Scalar> memo_table(options.pool);
+  // TODO(fsaintjacques): propagate memory pool.
+  ::arrow::internal::ScalarMemoTable<Scalar> memo_table(default_memory_pool());
   std::vector<PyObject*> unique_values;
   int32_t memo_size = 0;
 
@@ -623,11 +638,11 @@ inline Status ConvertAsPyObjects(const PandasOptions& options, const ChunkedArra
   };
 
   for (int c = 0; c < data.num_chunks(); c++) {
-    const auto& arr = arrow::internal::checked_cast<const ArrayType&>(*data.chunk(c));
+    const auto& arr = checked_cast<const ArrayType&>(*data.chunk(c));
     if (options.deduplicate_objects) {
-      RETURN_NOT_OK(internal::WriteArrayObjects(arr, WrapMemoized, out_values));
+      RETURN_NOT_OK(WriteArrayObjects(arr, WrapMemoized, out_values));
     } else {
-      RETURN_NOT_OK(internal::WriteArrayObjects(arr, WrapUnmemoized, out_values));
+      RETURN_NOT_OK(WriteArrayObjects(arr, WrapUnmemoized, out_values));
     }
     out_values += arr.length();
   }
@@ -657,12 +672,7 @@ Status ConvertStruct(PandasOptions options, const ChunkedArray& data,
     auto arr = checked_cast<const StructArray*>(data.chunk(c).get());
     // Convert the struct arrays first
     for (int32_t i = 0; i < num_fields; i++) {
-      auto field = arr->field(static_cast<int>(i));
-      // In case the field is an extension array, use .storage() to convert to Pandas
-      if (field->type()->id() == Type::EXTENSION) {
-        const ExtensionArray& arr_ext = checked_cast<const ExtensionArray&>(*field);
-        field = arr_ext.storage();
-      }
+      const auto field = arr->field(static_cast<int>(i));
       RETURN_NOT_OK(ConvertArrayToPandas(options, field, nullptr,
                                          fields_data[i + fields_data_offset].ref()));
       DCHECK(PyArray_Check(fields_data[i + fields_data_offset].obj()));
@@ -1089,42 +1099,6 @@ struct ObjectWriterVisitor {
     return Status::OK();
   }
 
-  template <typename Type>
-  enable_if_t<std::is_same<Type, MonthDayNanoIntervalType>::value, Status> Visit(
-      const Type& type) {
-    OwnedRef args(PyTuple_New(0));
-    OwnedRef kwargs(PyDict_New());
-    RETURN_IF_PYERROR();
-    auto to_date_offset = [&](const MonthDayNanoIntervalType::MonthDayNanos& interval,
-                              PyObject** out) {
-      DCHECK(internal::BorrowPandasDataOffsetType() != nullptr);
-      // DateOffset objects do not add nanoseconds component to pd.Timestamp.
-      // as of  Pandas 1.3.3
-      // (https://github.com/pandas-dev/pandas/issues/43892).
-      // So convert microseconds and remainder to preserve data
-      // but give users more expected results.
-      int64_t microseconds = interval.nanoseconds / 1000;
-      int64_t nanoseconds;
-      if (interval.nanoseconds >= 0) {
-        nanoseconds = interval.nanoseconds % 1000;
-      } else {
-        nanoseconds = -((-interval.nanoseconds) % 1000);
-      }
-
-      PyDict_SetItemString(kwargs.obj(), "months", PyLong_FromLong(interval.months));
-      PyDict_SetItemString(kwargs.obj(), "days", PyLong_FromLong(interval.days));
-      PyDict_SetItemString(kwargs.obj(), "microseconds",
-                           PyLong_FromLongLong(microseconds));
-      PyDict_SetItemString(kwargs.obj(), "nanoseconds", PyLong_FromLongLong(nanoseconds));
-      *out =
-          PyObject_Call(internal::BorrowPandasDataOffsetType(), args.obj(), kwargs.obj());
-      RETURN_IF_PYERROR();
-      return Status::OK();
-    };
-    return ConvertAsPyObjects<MonthDayNanoIntervalType>(options, data, to_date_offset,
-                                                        out_values);
-  }
-
   Status Visit(const Decimal128Type& type) {
     OwnedRef decimal;
     OwnedRef Decimal;
@@ -1196,11 +1170,11 @@ struct ObjectWriterVisitor {
 
   template <typename Type>
   enable_if_t<is_floating_type<Type>::value ||
+              is_complex_type<Type>::value ||
                   std::is_same<DictionaryType, Type>::value ||
                   std::is_same<DurationType, Type>::value ||
                   std::is_same<ExtensionType, Type>::value ||
-                  (std::is_base_of<IntervalType, Type>::value &&
-                   !std::is_same<MonthDayNanoIntervalType, Type>::value) ||
+                  std::is_base_of<IntervalType, Type>::value ||
                   std::is_base_of<UnionType, Type>::value,
               Status>
   Visit(const Type& type) {
@@ -1898,14 +1872,13 @@ static Status GetPandasWriterType(const ChunkedArray& data, const PandasOptions&
     case Type::LARGE_STRING:  // fall through
     case Type::BINARY:        // fall through
     case Type::LARGE_BINARY:
-    case Type::NA:                       // fall through
-    case Type::FIXED_SIZE_BINARY:        // fall through
-    case Type::STRUCT:                   // fall through
-    case Type::TIME32:                   // fall through
-    case Type::TIME64:                   // fall through
-    case Type::DECIMAL128:               // fall through
-    case Type::DECIMAL256:               // fall through
-    case Type::INTERVAL_MONTH_DAY_NANO:  // fall through
+    case Type::NA:                 // fall through
+    case Type::FIXED_SIZE_BINARY:  // fall through
+    case Type::STRUCT:             // fall through
+    case Type::TIME32:             // fall through
+    case Type::TIME64:             // fall through
+    case Type::DECIMAL128:         // fall through
+    case Type::DECIMAL256:         // fall through
       *output_type = PandasWriter::OBJECT;
       break;
     case Type::DATE32:  // fall through
@@ -2010,7 +1983,6 @@ class PandasBlockCreator {
     }
     column_block_placement_.resize(num_columns_);
   }
-  virtual ~PandasBlockCreator() = default;
 
   virtual Status Convert(PyObject** out) = 0;
 

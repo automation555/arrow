@@ -18,8 +18,6 @@
 #include "arrow/scalar.h"
 
 #include <memory>
-#include <ostream>
-#include <sstream>
 #include <string>
 #include <utility>
 
@@ -34,10 +32,8 @@
 #include "arrow/util/hashing.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/time.h"
-#include "arrow/util/unreachable.h"
-#include "arrow/util/utf8.h"
 #include "arrow/util/value_parsing.h"
-#include "arrow/visit_scalar_inline.h"
+#include "arrow/visitor_inline.h"
 
 namespace arrow {
 
@@ -52,14 +48,9 @@ bool Scalar::ApproxEquals(const Scalar& other, const EqualOptions& options) cons
   return ScalarApproxEquals(*this, other, options);
 }
 
-Status Scalar::Accept(ScalarVisitor* visitor) const {
-  return VisitScalarInline(*this, visitor);
-}
-
-namespace {
-
-// Implementation of Scalar::hash()
 struct ScalarHashImpl {
+  static std::hash<std::string> string_hash;
+
   Status Visit(const NullScalar& s) { return Status::OK(); }
 
   template <typename T>
@@ -69,17 +60,17 @@ struct ScalarHashImpl {
 
   Status Visit(const BaseBinaryScalar& s) { return BufferHash(*s.value); }
 
+  Status Visit(const ComplexFloatScalar& s) {
+    return StdHash(s.value.real()) & StdHash(s.value.imag());
+  }
+
   template <typename T>
   Status Visit(const TemporalScalar<T>& s) {
     return ValueHash(s);
   }
 
   Status Visit(const DayTimeIntervalScalar& s) {
-    return StdHash(s.value.days) & StdHash(s.value.milliseconds);
-  }
-
-  Status Visit(const MonthDayNanoIntervalScalar& s) {
-    return StdHash(s.value.days) & StdHash(s.value.months) & StdHash(s.value.nanoseconds);
+    return StdHash(s.value.days) & StdHash(s.value.days);
   }
 
   Status Visit(const Decimal128Scalar& s) {
@@ -88,8 +79,7 @@ struct ScalarHashImpl {
 
   Status Visit(const Decimal256Scalar& s) {
     Status status = Status::OK();
-    // endianness doesn't affect result
-    for (uint64_t elem : s.value.native_endian_array()) {
+    for (uint64_t elem : s.value.little_endian_array()) {
       status &= StdHash(elem);
     }
     return status;
@@ -109,21 +99,23 @@ struct ScalarHashImpl {
     return Status::OK();
   }
 
-  Status Visit(const UnionScalar& s) {
-    // type_code is ignored when comparing for equality, so do not hash it either
-    AccumulateHashFrom(*s.value);
-    return Status::OK();
-  }
-
-  Status Visit(const ExtensionScalar& s) {
-    AccumulateHashFrom(*s.value);
-    return Status::OK();
-  }
+  // TODO(bkietz) implement less wimpy hashing when these have ValueType
+  Status Visit(const UnionScalar& s) { return Status::OK(); }
+  Status Visit(const ExtensionScalar& s) { return Status::OK(); }
 
   template <typename T>
   Status StdHash(const T& t) {
     static std::hash<T> hash;
     hash_ ^= hash(t);
+    return Status::OK();
+  }
+
+  template <typename T>
+  Status StdHash(const std::complex<T>& t)
+  {
+    static std::hash<T> hash;
+    hash_ ^= hash(t.real());
+    hash_ ^= hash(t.imag());
     return Status::OK();
   }
 
@@ -153,341 +145,23 @@ struct ScalarHashImpl {
   }
 
   explicit ScalarHashImpl(const Scalar& scalar) : hash_(scalar.type->Hash()) {
-    AccumulateHashFrom(scalar);
+    if (scalar.is_valid) {
+      AccumulateHashFrom(scalar);
+    }
   }
 
   void AccumulateHashFrom(const Scalar& scalar) {
-    // Note we already injected the type in ScalarHashImpl::ScalarHashImpl
-    if (scalar.is_valid) {
-      DCHECK_OK(VisitScalarInline(scalar, this));
-    }
+    DCHECK_OK(StdHash(scalar.type->fingerprint()));
+    DCHECK_OK(VisitScalarInline(scalar, this));
   }
 
   size_t hash_;
 };
 
-struct ScalarBoundsCheckImpl {
-  int64_t min_value;
-  int64_t max_value;
-  int64_t actual_value = -1;
-  bool ok = true;
-
-  ScalarBoundsCheckImpl(int64_t min_value, int64_t max_value)
-      : min_value(min_value), max_value(max_value) {}
-
-  Status Visit(const Scalar&) {
-    Unreachable();
-    return Status::NotImplemented("");
-  }
-
-  template <typename ScalarType, typename Type = typename ScalarType::TypeClass>
-  enable_if_integer<Type, Status> Visit(const ScalarType& scalar) {
-    actual_value = static_cast<int64_t>(scalar.value);
-    ok = (actual_value >= min_value && actual_value <= max_value);
-    return Status::OK();
-  }
-};
-
-// Implementation of Scalar::Validate() and Scalar::ValidateFull()
-struct ScalarValidateImpl {
-  const bool full_validation_;
-
-  explicit ScalarValidateImpl(bool full_validation) : full_validation_(full_validation) {
-    ::arrow::util::InitializeUTF8();
-  }
-
-  Status Validate(const Scalar& scalar) {
-    if (!scalar.type) {
-      return Status::Invalid("scalar lacks a type");
-    }
-    return VisitScalarInline(scalar, this);
-  }
-
-  Status Visit(const NullScalar& s) {
-    if (s.is_valid) {
-      return Status::Invalid("null scalar should have is_valid = false");
-    }
-    return Status::OK();
-  }
-
-  template <typename T>
-  Status Visit(const internal::PrimitiveScalar<T>& s) {
-    return Status::OK();
-  }
-
-  Status Visit(const BaseBinaryScalar& s) { return ValidateBinaryScalar(s); }
-
-  Status Visit(const StringScalar& s) { return ValidateStringScalar(s); }
-
-  Status Visit(const LargeStringScalar& s) { return ValidateStringScalar(s); }
-
-  Status Visit(const FixedSizeBinaryScalar& s) {
-    RETURN_NOT_OK(ValidateBinaryScalar(s));
-    if (s.is_valid) {
-      const auto& byte_width =
-          checked_cast<const FixedSizeBinaryType&>(*s.type).byte_width();
-      if (s.value->size() != byte_width) {
-        return Status::Invalid(s.type->ToString(), " scalar should have a value of size ",
-                               byte_width, ", got ", s.value->size());
-      }
-    }
-    return Status::OK();
-  }
-
-  Status Visit(const Decimal128Scalar& s) {
-    const auto& ty = checked_cast<const DecimalType&>(*s.type);
-    if (!s.value.FitsInPrecision(ty.precision())) {
-      return Status::Invalid("Decimal value ", s.value.ToIntegerString(),
-                             " does not fit in precision of ", ty);
-    }
-    return Status::OK();
-  }
-
-  Status Visit(const Decimal256Scalar& s) {
-    const auto& ty = checked_cast<const DecimalType&>(*s.type);
-    if (!s.value.FitsInPrecision(ty.precision())) {
-      return Status::Invalid("Decimal value ", s.value.ToIntegerString(),
-                             " does not fit in precision of ", ty);
-    }
-    return Status::OK();
-  }
-
-  Status Visit(const BaseListScalar& s) { return ValidateBaseListScalar(s); }
-
-  Status Visit(const FixedSizeListScalar& s) {
-    RETURN_NOT_OK(ValidateBaseListScalar(s));
-    if (s.is_valid) {
-      const auto& list_type = checked_cast<const FixedSizeListType&>(*s.type);
-      if (s.value->length() != list_type.list_size()) {
-        return Status::Invalid(s.type->ToString(),
-                               " scalar should have a child value of length ",
-                               list_type.list_size(), ", got ", s.value->length());
-      }
-    }
-    return Status::OK();
-  }
-
-  Status Visit(const StructScalar& s) {
-    if (!s.is_valid) {
-      if (!s.value.empty()) {
-        return Status::Invalid(s.type->ToString(),
-                               " scalar is marked null but has child values");
-      }
-      return Status::OK();
-    }
-    const int num_fields = s.type->num_fields();
-    const auto& fields = s.type->fields();
-    if (fields.size() != s.value.size()) {
-      return Status::Invalid("non-null ", s.type->ToString(), " scalar should have ",
-                             num_fields, " child values, got ", s.value.size());
-    }
-    for (int i = 0; i < num_fields; ++i) {
-      if (!s.value[i]) {
-        return Status::Invalid("non-null ", s.type->ToString(),
-                               " scalar has missing child value at index ", i);
-      }
-      const auto st = Validate(*s.value[i]);
-      if (!st.ok()) {
-        return st.WithMessage(s.type->ToString(),
-                              " scalar fails validation for child at index ", i, ": ",
-                              st.message());
-      }
-      if (!s.value[i]->type->Equals(*fields[i]->type())) {
-        return Status::Invalid(
-            s.type->ToString(), " scalar should have a child value of type ",
-            fields[i]->type()->ToString(), "at index ", i, ", got ", s.value[i]->type);
-      }
-    }
-    return Status::OK();
-  }
-
-  Status Visit(const DictionaryScalar& s) {
-    const auto& dict_type = checked_cast<const DictionaryType&>(*s.type);
-
-    // Validate index
-    if (!s.value.index) {
-      return Status::Invalid(s.type->ToString(), " scalar doesn't have an index value");
-    }
-    {
-      const auto st = Validate(*s.value.index);
-      if (!st.ok()) {
-        return st.WithMessage(s.type->ToString(),
-                              " scalar fails validation for index value: ", st.message());
-      }
-    }
-    if (!s.value.index->type->Equals(*dict_type.index_type())) {
-      return Status::Invalid(
-          s.type->ToString(), " scalar should have an index value of type ",
-          dict_type.index_type()->ToString(), ", got ", s.value.index->type->ToString());
-    }
-    if (s.is_valid && !s.value.index->is_valid) {
-      return Status::Invalid("non-null ", s.type->ToString(),
-                             " scalar has null index value");
-    }
-    if (!s.is_valid && s.value.index->is_valid) {
-      return Status::Invalid("null ", s.type->ToString(),
-                             " scalar has non-null index value");
-    }
-
-    // Validate dictionary
-    if (!s.value.dictionary) {
-      return Status::Invalid(s.type->ToString(),
-                             " scalar doesn't have a dictionary value");
-    }
-    {
-      const auto st = full_validation_ ? s.value.dictionary->ValidateFull()
-                                       : s.value.dictionary->Validate();
-      if (!st.ok()) {
-        return st.WithMessage(
-            s.type->ToString(),
-            " scalar fails validation for dictionary value: ", st.message());
-      }
-    }
-    if (!s.value.dictionary->type()->Equals(*dict_type.value_type())) {
-      return Status::Invalid(s.type->ToString(),
-                             " scalar should have a dictionary value of type ",
-                             dict_type.value_type()->ToString(), ", got ",
-                             s.value.dictionary->type()->ToString());
-    }
-
-    // Check index is in bounds
-    if (full_validation_ && s.value.index->is_valid) {
-      ScalarBoundsCheckImpl bounds_checker{0, s.value.dictionary->length() - 1};
-      RETURN_NOT_OK(VisitScalarInline(*s.value.index, &bounds_checker));
-      if (!bounds_checker.ok) {
-        return Status::Invalid(s.type->ToString(), " scalar index value out of bounds: ",
-                               bounds_checker.actual_value);
-      }
-    }
-    return Status::OK();
-  }
-
-  Status Visit(const UnionScalar& s) {
-    RETURN_NOT_OK(ValidateOptionalValue(s));
-    const int type_code = s.type_code;  // avoid 8-bit int types for printing
-    const auto& union_type = checked_cast<const UnionType&>(*s.type);
-    const auto& child_ids = union_type.child_ids();
-    if (type_code < 0 || type_code >= static_cast<int64_t>(child_ids.size()) ||
-        child_ids[type_code] == UnionType::kInvalidChildId) {
-      return Status::Invalid(s.type->ToString(), " scalar has invalid type code ",
-                             type_code);
-    }
-    if (s.is_valid) {
-      const auto& field_type = *union_type.field(child_ids[type_code])->type();
-      if (!field_type.Equals(*s.value->type)) {
-        return Status::Invalid(s.type->ToString(), " scalar with type code ", type_code,
-                               " should have an underlying value of type ",
-                               field_type.ToString(), ", got ",
-                               s.value->type->ToString());
-      }
-      const auto st = Validate(*s.value);
-      if (!st.ok()) {
-        return st.WithMessage(
-            s.type->ToString(),
-            " scalar fails validation for underlying value: ", st.message());
-      }
-    }
-    return Status::OK();
-  }
-
-  Status Visit(const ExtensionScalar& s) {
-    if (!s.is_valid) {
-      if (s.value) {
-        return Status::Invalid("null ", s.type->ToString(), " scalar has storage value");
-      }
-      return Status::OK();
-    }
-
-    if (!s.value) {
-      return Status::Invalid("non-null ", s.type->ToString(),
-                             " scalar doesn't have storage value");
-    }
-    if (!s.value->is_valid) {
-      return Status::Invalid("non-null ", s.type->ToString(),
-                             " scalar has null storage value");
-    }
-    const auto st = Validate(*s.value);
-    if (!st.ok()) {
-      return st.WithMessage(s.type->ToString(),
-                            " scalar fails validation for storage value: ", st.message());
-    }
-    return Status::OK();
-  }
-
-  Status ValidateStringScalar(const BaseBinaryScalar& s) {
-    RETURN_NOT_OK(ValidateBinaryScalar(s));
-    if (s.is_valid && full_validation_) {
-      if (!::arrow::util::ValidateUTF8(s.value->data(), s.value->size())) {
-        return Status::Invalid(s.type->ToString(), " scalar contains invalid UTF8 data");
-      }
-    }
-    return Status::OK();
-  }
-
-  Status ValidateBinaryScalar(const BaseBinaryScalar& s) {
-    return ValidateOptionalValue(s);
-  }
-
-  Status ValidateBaseListScalar(const BaseListScalar& s) {
-    RETURN_NOT_OK(ValidateOptionalValue(s));
-    if (s.is_valid) {
-      const auto st = full_validation_ ? s.value->ValidateFull() : s.value->Validate();
-      if (!st.ok()) {
-        return st.WithMessage(s.type->ToString(),
-                              " scalar fails validation for value: ", st.message());
-      }
-
-      const auto& list_type = checked_cast<const BaseListType&>(*s.type);
-      const auto& value_type = *list_type.value_type();
-      if (!s.value->type()->Equals(value_type)) {
-        return Status::Invalid(
-            list_type.ToString(), " scalar should have a value of type ",
-            value_type.ToString(), ", got ", s.value->type()->ToString());
-      }
-    }
-    return Status::OK();
-  }
-
-  template <typename ScalarType>
-  Status ValidateOptionalValue(const ScalarType& s) {
-    return ValidateOptionalValue(s, s.value, "value");
-  }
-
-  template <typename ScalarType, typename ValueType>
-  Status ValidateOptionalValue(const ScalarType& s, const ValueType& value,
-                               const char* value_desc) {
-    if (s.is_valid && !s.value) {
-      return Status::Invalid(s.type->ToString(),
-                             " scalar is marked valid but doesn't have a ", value_desc);
-    }
-    if (!s.is_valid && s.value) {
-      return Status::Invalid(s.type->ToString(), " scalar is marked null but has a ",
-                             value_desc);
-    }
-    return Status::OK();
-  }
-};
-
-}  // namespace
-
 size_t Scalar::hash() const { return ScalarHashImpl(*this).hash_; }
-
-Status Scalar::Validate() const {
-  return ScalarValidateImpl(/*full_validation=*/false).Validate(*this);
-}
-
-Status Scalar::ValidateFull() const {
-  return ScalarValidateImpl(/*full_validation=*/true).Validate(*this);
-}
-
-BinaryScalar::BinaryScalar(std::string s)
-    : BinaryScalar(Buffer::FromString(std::move(s))) {}
 
 StringScalar::StringScalar(std::string s)
     : StringScalar(Buffer::FromString(std::move(s))) {}
-
-LargeBinaryScalar::LargeBinaryScalar(std::string s)
-    : LargeBinaryScalar(Buffer::FromString(std::move(s))) {}
 
 LargeStringScalar::LargeStringScalar(std::string s)
     : LargeStringScalar(Buffer::FromString(std::move(s))) {}
@@ -498,12 +172,6 @@ FixedSizeBinaryScalar::FixedSizeBinaryScalar(std::shared_ptr<Buffer> value,
   ARROW_CHECK_EQ(checked_cast<const FixedSizeBinaryType&>(*this->type).byte_width(),
                  this->value->size());
 }
-
-FixedSizeBinaryScalar::FixedSizeBinaryScalar(const std::shared_ptr<Buffer>& value)
-    : BinaryScalar(value, fixed_size_binary(static_cast<int>(value->size()))) {}
-
-FixedSizeBinaryScalar::FixedSizeBinaryScalar(std::string s)
-    : FixedSizeBinaryScalar(Buffer::FromString(std::move(s))) {}
 
 BaseListScalar::BaseListScalar(std::shared_ptr<Array> value,
                                std::shared_ptr<DataType> type)
@@ -567,7 +235,7 @@ Result<std::shared_ptr<Scalar>> StructScalar::field(FieldRef ref) const {
 }
 
 DictionaryScalar::DictionaryScalar(std::shared_ptr<DataType> type)
-    : internal::PrimitiveScalarBase(std::move(type)),
+    : Scalar(std::move(type)),
       value{MakeNullScalar(checked_cast<const DictionaryType&>(*this->type).index_type()),
             MakeArrayOfNull(checked_cast<const DictionaryType&>(*this->type).value_type(),
                             0)
@@ -624,12 +292,9 @@ Result<std::shared_ptr<Scalar>> DictionaryScalar::GetEncodedValue() const {
 std::shared_ptr<DictionaryScalar> DictionaryScalar::Make(std::shared_ptr<Scalar> index,
                                                          std::shared_ptr<Array> dict) {
   auto type = dictionary(index->type, dict->type());
-  auto is_valid = index->is_valid;
   return std::make_shared<DictionaryScalar>(ValueType{std::move(index), std::move(dict)},
-                                            std::move(type), is_valid);
+                                            std::move(type));
 }
-
-namespace {
 
 template <typename T>
 using scalar_constructor_has_arrow_type =
@@ -656,24 +321,6 @@ struct MakeNullImpl {
     return Status::OK();
   }
 
-  Status Visit(const SparseUnionType& type) { return MakeUnionScalar(type); }
-
-  Status Visit(const DenseUnionType& type) { return MakeUnionScalar(type); }
-
-  template <typename T, typename ScalarType = typename TypeTraits<T>::ScalarType>
-  Status MakeUnionScalar(const T& type) {
-    if (type.num_fields() == 0) {
-      return Status::Invalid("Cannot make scalar of empty union type");
-    }
-    out_ = std::make_shared<ScalarType>(type.type_codes()[0], type_);
-    return Status::OK();
-  }
-
-  Status Visit(const ExtensionType& type) {
-    out_ = std::make_shared<ExtensionScalar>(type_);
-    return Status::OK();
-  }
-
   std::shared_ptr<Scalar> Finish() && {
     // Should not fail.
     DCHECK_OK(VisitTypeInline(*type_, this));
@@ -683,8 +330,6 @@ struct MakeNullImpl {
   std::shared_ptr<DataType> type_;
   std::shared_ptr<Scalar> out_;
 };
-
-}  // namespace
 
 std::shared_ptr<Scalar> MakeNullScalar(std::shared_ptr<DataType> type) {
   return MakeNullImpl{std::move(type), nullptr}.Finish();
@@ -780,11 +425,31 @@ std::shared_ptr<Buffer> FormatToBuffer(Formatter&& formatter, const ScalarType& 
   });
 }
 
+// complex numeric to real numeric
+// template <typename From, typename To>
+// enable_if_t<is_complex_type<From>::value && !is_complex_type<To>::value, Status>
+// CastImpl(const NumericScalar<From>& from, NumericScalar<To>* to) {
+//   return Status::NotImplemented("casting complex ", *from.type, " to real ", *to->type);
+// }
+
 // error fallback
 Status CastImpl(const Scalar& from, Scalar* to) {
   return Status::NotImplemented("casting scalars of type ", *from.type, " to type ",
                                 *to->type);
 }
+
+template <typename To>
+Status CastImpl(const NumericScalar<ComplexFloatType>& from, NumericScalar<To>* to) {
+  return Status::NotImplemented("casting complex type ", *from.type, " to real type ",
+                                *to->type);
+}
+
+template <typename To>
+Status CastImpl(const NumericScalar<ComplexDoubleType>& from, NumericScalar<To>* to) {
+  return Status::NotImplemented("casting complex type ", *from.type, " to real type ",
+                                *to->type);
+}
+
 
 // numeric to numeric
 template <typename From, typename To>
@@ -792,6 +457,7 @@ Status CastImpl(const NumericScalar<From>& from, NumericScalar<To>* to) {
   to->value = static_cast<typename To::c_type>(from.value);
   return Status::OK();
 }
+
 
 // numeric to boolean
 template <typename T>
@@ -812,7 +478,7 @@ Status CastImpl(const BooleanScalar& from, NumericScalar<T>* to) {
 template <typename From, typename To>
 typename std::enable_if<std::is_base_of<TemporalType, To>::value &&
                             !std::is_same<DayTimeIntervalType, To>::value &&
-                            !std::is_same<MonthDayNanoIntervalType, To>::value,
+                            !is_complex_type<From>::value,
                         Status>::type
 CastImpl(const NumericScalar<From>& from, TemporalScalar<To>* to) {
   to->value = static_cast<typename To::c_type>(from.value);
@@ -823,7 +489,7 @@ CastImpl(const NumericScalar<From>& from, TemporalScalar<To>* to) {
 template <typename From, typename To>
 typename std::enable_if<std::is_base_of<TemporalType, From>::value &&
                             !std::is_same<DayTimeIntervalType, From>::value &&
-                            !std::is_same<MonthDayNanoIntervalType, From>::value,
+                            !is_complex_type<From>::value,
                         Status>::type
 CastImpl(const TemporalScalar<From>& from, NumericScalar<To>* to) {
   to->value = static_cast<typename To::c_type>(from.value);
@@ -916,7 +582,7 @@ template <typename ScalarType, typename T = typename ScalarType::TypeClass,
           // undefined
           typename Value = typename Formatter::value_type>
 Status CastImpl(const ScalarType& from, StringScalar* to) {
-  to->value = FormatToBuffer(Formatter{from.type.get()}, from);
+  to->value = FormatToBuffer(Formatter{from.type}, from);
   return Status::OK();
 }
 
@@ -929,28 +595,6 @@ Status CastImpl(const Decimal128Scalar& from, StringScalar* to) {
 Status CastImpl(const Decimal256Scalar& from, StringScalar* to) {
   auto from_type = checked_cast<const Decimal256Type*>(from.type.get());
   to->value = Buffer::FromString(from.value.ToString(from_type->scale()));
-  return Status::OK();
-}
-
-Status CastImpl(const StructScalar& from, StringScalar* to) {
-  std::stringstream ss;
-  ss << '{';
-  for (int i = 0; static_cast<size_t>(i) < from.value.size(); i++) {
-    if (i > 0) ss << ", ";
-    ss << from.type->field(i)->name() << ':' << from.type->field(i)->type()->ToString()
-       << " = " << from.value[i]->ToString();
-  }
-  ss << '}';
-  to->value = Buffer::FromString(ss.str());
-  return Status::OK();
-}
-
-Status CastImpl(const UnionScalar& from, StringScalar* to) {
-  const auto& union_ty = checked_cast<const UnionType&>(*from.type);
-  std::stringstream ss;
-  ss << "union{" << union_ty.field(union_ty.child_ids()[from.type_code])->ToString()
-     << " = " << from.value->ToString() << '}';
-  to->value = Buffer::FromString(ss.str());
   return Status::OK();
 }
 
@@ -987,6 +631,8 @@ struct FromTypeVisitor : CastImplVisitor {
   }
 
   Status Visit(const NullType&) { return NotImplemented(); }
+  Status Visit(const SparseUnionType&) { return NotImplemented(); }
+  Status Visit(const DenseUnionType&) { return NotImplemented(); }
   Status Visit(const DictionaryType&) { return NotImplemented(); }
   Status Visit(const ExtensionType&) { return NotImplemented(); }
 };
@@ -1015,6 +661,8 @@ struct ToTypeVisitor : CastImplVisitor {
     return Int32Scalar(0).CastTo(dict_type.index_type()).Value(&out.index);
   }
 
+  Status Visit(const SparseUnionType&) { return NotImplemented(); }
+  Status Visit(const DenseUnionType&) { return NotImplemented(); }
   Status Visit(const ExtensionType&) { return NotImplemented(); }
 };
 
@@ -1029,7 +677,5 @@ Result<std::shared_ptr<Scalar>> Scalar::CastTo(std::shared_ptr<DataType> to) con
   }
   return out;
 }
-
-void PrintTo(const Scalar& scalar, std::ostream* os) { *os << scalar.ToString(); }
 
 }  // namespace arrow
