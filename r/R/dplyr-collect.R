@@ -18,9 +18,20 @@
 
 # The following S3 methods are registered on load if dplyr is present
 
-collect.arrow_dplyr_query <- function(x, as_data_frame = TRUE, ...) {
+collect.arrow_dplyr_query <- function(x, as_data_frame = TRUE, metadata = empty_named_list(), ...) {
+  # head and tail are not ExecNodes, at best we can handle them via sink node
+  # so if there are any steps done after head/tail, we need to
+  # evaluate the query up to then and then do a new query for the rest
+  if (is_collapsed(x) && has_head_tail(x$.data)) {
+    x$.data <- as_adq(dplyr::compute(x$.data))$.data
+  }
+
+  # attach the metadata to the query
+  x$metadata <- prepare_key_value_metadata(metadata)
+
+  # See query-engine.R for ExecPlan/Nodes
   tryCatch(
-    out <- as_record_batch_reader(x)$read_table(),
+    tab <- do_exec_plan(x),
     # n = 4 because we want the error to show up as being from collect()
     # and not handle_csv_read_error()
     error = function(e, call = caller_env(n = 4)) {
@@ -29,9 +40,11 @@ collect.arrow_dplyr_query <- function(x, as_data_frame = TRUE, ...) {
   )
 
   if (as_data_frame) {
-    out <- as.data.frame(out)
+    df <- as.data.frame(tab)
+    restore_dplyr_features(df, x)
+  } else {
+    restore_dplyr_features(tab, x)
   }
-  restore_dplyr_features(out, x)
 }
 collect.ArrowTabular <- function(x, as_data_frame = TRUE, ...) {
   if (as_data_frame) {
