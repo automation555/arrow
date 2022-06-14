@@ -21,20 +21,29 @@
 
 jobs:
   autobrew:
-    name: "Autobrew"
-    runs-on: macOS-10.15
+    name: "Autobrew {{ "${{ matrix.platform }}" }}"
+    runs-on: {{ "${{ matrix.platform }}" }}
+    strategy:
+      matrix:
+          platform:
+            - macos-11
+            - macos-10.15
     steps:
       {{ macros.github_checkout_arrow()|indent }}
+
 
       - name: Configure autobrew script
         run: |
           cd arrow/r
           # Put the formula inside r/ so that it's included in the package build
           cp ../dev/tasks/homebrew-formulae/autobrew/apache-arrow.rb tools/apache-arrow.rb
+          cp ../dev/tasks/homebrew-formulae/autobrew/apache-arrow-static.rb tools/apache-arrow-static.rb
           # Pin the current commit in the formula to test so that we're not always pulling from master
           sed -i.bak -E -e 's@https://github.com/apache/arrow.git"$@{{ arrow.remote }}.git", :revision => "{{ arrow.head }}"@' tools/apache-arrow.rb && rm -f tools/apache-arrow.rb.bak
+          sed -i.bak -E -e 's@https://github.com/apache/arrow.git"$@{{ arrow.remote }}.git", :revision => "{{ arrow.head }}"@' tools/apache-arrow-static.rb && rm -f tools/apache-arrow-static.rb.bak
           # Sometimes crossbow gives a remote URL with .git and sometimes not. Make sure there's only one
           sed -i.bak -E -e 's@.git.git@.git@' tools/apache-arrow.rb && rm -f tools/apache-arrow.rb.bak
+          sed -i.bak -E -e 's@.git.git@.git@' tools/apache-arrow-static.rb && rm -f tools/apache-arrow-static.rb.bak
           # Get minio for S3 testing
           brew install minio
       - uses: r-lib/actions/setup-r@v1
@@ -54,6 +63,7 @@ jobs:
         env:
           _R_CHECK_CRAN_INCOMING_: false
           ARROW_USE_PKG_CONFIG: false
+          ARROW_R_DEV: true
         run: arrow/ci/scripts/r_test.sh arrow
       - name: Dump install logs
         run: cat arrow/r/check/arrow.Rcheck/00install.out
