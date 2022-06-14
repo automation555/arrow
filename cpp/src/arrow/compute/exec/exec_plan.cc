@@ -17,13 +17,11 @@
 
 #include "arrow/compute/exec/exec_plan.h"
 
-#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "arrow/compute/exec.h"
 #include "arrow/compute/exec/expression.h"
-#include "arrow/compute/exec/options.h"
 #include "arrow/compute/exec_internal.h"
 #include "arrow/compute/registry.h"
 #include "arrow/datum.h"
@@ -33,7 +31,6 @@
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/optional.h"
-#include "arrow/util/tracing_internal.h"
 
 namespace arrow {
 
@@ -44,9 +41,7 @@ namespace compute {
 namespace {
 
 struct ExecPlanImpl : public ExecPlan {
-  explicit ExecPlanImpl(ExecContext* exec_context,
-                        std::shared_ptr<const KeyValueMetadata> metadata = NULLPTR)
-      : ExecPlan(exec_context), metadata_(std::move(metadata)) {}
+  explicit ExecPlanImpl(ExecContext* exec_context) : ExecPlan(exec_context) {}
 
   ~ExecPlanImpl() override {
     if (started_ && !finished_.is_finished()) {
@@ -57,9 +52,6 @@ struct ExecPlanImpl : public ExecPlan {
   }
 
   ExecNode* AddNode(std::unique_ptr<ExecNode> node) {
-    if (node->label().empty()) {
-      node->SetLabel(std::to_string(auto_label_counter_++));
-    }
     if (node->num_inputs() == 0) {
       sources_.push_back(node.get());
     }
@@ -81,18 +73,6 @@ struct ExecPlanImpl : public ExecPlan {
   }
 
   Status StartProducing() {
-    START_COMPUTE_SPAN(span_, "ExecPlan", {{"plan", ToString()}});
-#ifdef ARROW_WITH_OPENTELEMETRY
-    if (HasMetadata()) {
-      auto pairs = metadata().get()->sorted_pairs();
-      opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> span =
-          ::arrow::internal::tracing::UnwrapSpan(span_.details.get());
-      std::for_each(std::begin(pairs), std::end(pairs),
-                    [span](std::pair<std::string, std::string> const& pair) {
-                      span->SetAttribute(pair.first, pair.second);
-                    });
-    }
-#endif
     if (started_) {
       return Status::Invalid("restarted ExecPlan");
     }
@@ -100,9 +80,6 @@ struct ExecPlanImpl : public ExecPlan {
 
     // producers precede consumers
     sorted_nodes_ = TopoSort();
-    for (ExecNode* node : sorted_nodes_) {
-      RETURN_NOT_OK(node->PrepareToProduce());
-    }
 
     std::vector<Future<>> futures;
 
@@ -112,10 +89,7 @@ struct ExecPlanImpl : public ExecPlan {
     for (rev_it it(sorted_nodes_.end()), end(sorted_nodes_.begin()); it != end; ++it) {
       auto node = *it;
 
-      EVENT(span_, "StartProducing:" + node->label(),
-            {{"node.label", node->label()}, {"node.kind_name", node->kind_name()}});
       st = node->StartProducing();
-      EVENT(span_, "StartProducing:" + node->label(), {{"status", st.ToString()}});
       if (!st.ok()) {
         // Stop nodes that successfully started, in reverse order
         stopped_ = true;
@@ -126,14 +100,12 @@ struct ExecPlanImpl : public ExecPlan {
       futures.push_back(node->finished());
     }
 
-    finished_ = AllFinished(futures);
-    END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
+    finished_ = AllComplete(std::move(futures));
     return st;
   }
 
   void StopProducing() {
     DCHECK(started_) << "stopped an ExecPlan which never started";
-    EVENT(span_, "StopProducing");
     stopped_ = true;
 
     StopProducingImpl(sorted_nodes_.begin(), sorted_nodes_.end());
@@ -143,13 +115,11 @@ struct ExecPlanImpl : public ExecPlan {
   void StopProducingImpl(It begin, It end) {
     for (auto it = begin; it != end; ++it) {
       auto node = *it;
-      EVENT(span_, "StopProducing:" + node->label(),
-            {{"node.label", node->label()}, {"node.kind_name", node->kind_name()}});
       node->StopProducing();
     }
   }
 
-  NodeVector TopoSort() const {
+  NodeVector TopoSort() {
     struct Impl {
       const std::vector<std::unique_ptr<ExecNode>>& nodes;
       std::unordered_set<ExecNode*> visited;
@@ -182,74 +152,11 @@ struct ExecPlanImpl : public ExecPlan {
     return std::move(Impl{nodes_}.sorted);
   }
 
-  // This function returns a node vector and a vector of integers with the
-  // number of spaces to add as an indentation. The main difference between
-  // this function and the TopoSort function is that here we visit the nodes
-  // in reverse order and we can have repeated nodes if necessary.
-  // For example, in the following plan:
-  // s1 --> s3 -
-  //   -        -
-  //    -        -> s5 --> s6
-  //     -      -
-  // s2 --> s4 -
-  // Toposort node vector: s1 s2 s3 s4 s5 s6
-  // OrderedNodes node vector: s6 s5 s3 s1 s4 s2 s1
-  std::pair<NodeVector, std::vector<int>> OrderedNodes() const {
-    struct Impl {
-      const std::vector<std::unique_ptr<ExecNode>>& nodes;
-      std::unordered_set<ExecNode*> visited;
-      std::unordered_set<ExecNode*> marked;
-      NodeVector sorted;
-      std::vector<int> indents;
-
-      explicit Impl(const std::vector<std::unique_ptr<ExecNode>>& nodes) : nodes(nodes) {
-        visited.reserve(nodes.size());
-
-        for (auto it = nodes.rbegin(); it != nodes.rend(); ++it) {
-          if (visited.count(it->get()) != 0) continue;
-          Visit(it->get());
-        }
-
-        DCHECK_EQ(visited.size(), nodes.size());
-      }
-
-      void Visit(ExecNode* node, int indent = 0) {
-        marked.insert(node);
-        for (auto input : node->inputs()) {
-          if (marked.count(input) != 0) continue;
-          Visit(input, indent + 1);
-        }
-        marked.erase(node);
-
-        indents.push_back(indent);
-        sorted.push_back(node);
-        visited.insert(node);
-      }
-    };
-
-    auto result = Impl{nodes_};
-    return std::make_pair(result.sorted, result.indents);
-  }
-
-  std::string ToString() const {
-    std::stringstream ss;
-    ss << "ExecPlan with " << nodes_.size() << " nodes:" << std::endl;
-    auto sorted = OrderedNodes();
-    for (size_t i = sorted.first.size(); i > 0; --i) {
-      for (int j = 0; j < sorted.second[i - 1]; ++j) ss << "  ";
-      ss << sorted.first[i - 1]->ToString(sorted.second[i - 1]) << std::endl;
-    }
-    return ss.str();
-  }
-
   Future<> finished_ = Future<>::MakeFinished();
   bool started_ = false, stopped_ = false;
   std::vector<std::unique_ptr<ExecNode>> nodes_;
   NodeVector sources_, sinks_;
   NodeVector sorted_nodes_;
-  uint32_t auto_label_counter_ = 0;
-  util::tracing::Span span_;
-  std::shared_ptr<const KeyValueMetadata> metadata_;
 };
 
 ExecPlanImpl* ToDerived(ExecPlan* ptr) { return checked_cast<ExecPlanImpl*>(ptr); }
@@ -268,9 +175,8 @@ util::optional<int> GetNodeIndex(const std::vector<ExecNode*>& nodes,
 
 }  // namespace
 
-Result<std::shared_ptr<ExecPlan>> ExecPlan::Make(
-    ExecContext* ctx, std::shared_ptr<const KeyValueMetadata> metadata) {
-  return std::shared_ptr<ExecPlan>(new ExecPlanImpl{ctx, metadata});
+Result<std::shared_ptr<ExecPlan>> ExecPlan::Make(ExecContext* ctx) {
+  return std::shared_ptr<ExecPlan>(new ExecPlanImpl{ctx});
 }
 
 ExecNode* ExecPlan::AddNode(std::unique_ptr<ExecNode> node) {
@@ -290,14 +196,6 @@ Status ExecPlan::StartProducing() { return ToDerived(this)->StartProducing(); }
 void ExecPlan::StopProducing() { ToDerived(this)->StopProducing(); }
 
 Future<> ExecPlan::finished() { return ToDerived(this)->finished_; }
-
-bool ExecPlan::HasMetadata() const { return !!(ToDerived(this)->metadata_); }
-
-std::shared_ptr<const KeyValueMetadata> ExecPlan::metadata() const {
-  return ToDerived(this)->metadata_;
-}
-
-std::string ExecPlan::ToString() const { return ToDerived(this)->ToString(); }
 
 ExecNode::ExecNode(ExecPlan* plan, NodeVector inputs,
                    std::vector<std::string> input_labels,
@@ -334,27 +232,6 @@ Status ExecNode::Validate() const {
   return Status::OK();
 }
 
-std::string ExecNode::ToString(int indent) const {
-  std::stringstream ss;
-
-  auto PrintLabelAndKind = [&](const ExecNode* node) {
-    ss << node->label() << ":" << node->kind_name();
-  };
-
-  PrintLabelAndKind(this);
-  ss << "{";
-
-  const std::string extra = ToStringExtra(indent);
-  if (!extra.empty()) {
-    ss << extra;
-  }
-
-  ss << '}';
-  return ss.str();
-}
-
-std::string ExecNode::ToStringExtra(int indent = 0) const { return ""; }
-
 bool ExecNode::ErrorIfNotOk(Status status) {
   if (status.ok()) return false;
 
@@ -362,104 +239,6 @@ bool ExecNode::ErrorIfNotOk(Status status) {
     out->ErrorReceived(this, out == outputs_.back() ? std::move(status) : status);
   }
   return true;
-}
-
-MapNode::MapNode(ExecPlan* plan, std::vector<ExecNode*> inputs,
-                 std::shared_ptr<Schema> output_schema, bool async_mode)
-    : ExecNode(plan, std::move(inputs), /*input_labels=*/{"target"},
-               std::move(output_schema),
-               /*num_outputs=*/1) {
-  if (async_mode) {
-    executor_ = plan_->exec_context()->executor();
-  } else {
-    executor_ = nullptr;
-  }
-}
-
-void MapNode::ErrorReceived(ExecNode* input, Status error) {
-  DCHECK_EQ(input, inputs_[0]);
-  EVENT(span_, "ErrorReceived", {{"error.message", error.message()}});
-  outputs_[0]->ErrorReceived(this, std::move(error));
-}
-
-void MapNode::InputFinished(ExecNode* input, int total_batches) {
-  DCHECK_EQ(input, inputs_[0]);
-  EVENT(span_, "InputFinished", {{"batches.length", total_batches}});
-  outputs_[0]->InputFinished(this, total_batches);
-  if (input_counter_.SetTotal(total_batches)) {
-    this->Finish();
-  }
-}
-
-Status MapNode::StartProducing() {
-  START_COMPUTE_SPAN(
-      span_, std::string(kind_name()) + ":" + label(),
-      {{"node.label", label()}, {"node.detail", ToString()}, {"node.kind", kind_name()}});
-  finished_ = Future<>::Make();
-  END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
-  return Status::OK();
-}
-
-void MapNode::PauseProducing(ExecNode* output, int32_t counter) {
-  inputs_[0]->PauseProducing(this, counter);
-}
-
-void MapNode::ResumeProducing(ExecNode* output, int32_t counter) {
-  inputs_[0]->ResumeProducing(this, counter);
-}
-
-void MapNode::StopProducing(ExecNode* output) {
-  DCHECK_EQ(output, outputs_[0]);
-  StopProducing();
-}
-
-void MapNode::StopProducing() {
-  EVENT(span_, "StopProducing");
-  if (executor_) {
-    this->stop_source_.RequestStop();
-  }
-  if (input_counter_.Cancel()) {
-    this->Finish();
-  }
-  inputs_[0]->StopProducing(this);
-}
-
-Future<> MapNode::finished() { return finished_; }
-
-void MapNode::SubmitTask(std::function<Result<ExecBatch>(ExecBatch)> map_fn,
-                         ExecBatch batch) {
-  Status status;
-  // This will be true if the node is stopped early due to an error or manual
-  // cancellation
-  if (input_counter_.Completed()) {
-    return;
-  }
-  auto task = [this, map_fn, batch]() {
-    auto guarantee = batch.guarantee;
-    auto output_batch = map_fn(std::move(batch));
-    if (ErrorIfNotOk(output_batch.status())) {
-      return output_batch.status();
-    }
-    output_batch->guarantee = guarantee;
-    outputs_[0]->InputReceived(this, output_batch.MoveValueUnsafe());
-    return Status::OK();
-  };
-
-  status = task();
-  if (!status.ok()) {
-    if (input_counter_.Cancel()) {
-      this->Finish(status);
-    }
-    inputs_[0]->StopProducing(this);
-    return;
-  }
-  if (input_counter_.Increment()) {
-    this->Finish();
-  }
-}
-
-void MapNode::Finish(Status finish_st /*= Status::OK()*/) {
-  this->finished_.MarkFinished(finish_st);
 }
 
 std::shared_ptr<RecordBatchReader> MakeGeneratorReader(
@@ -474,16 +253,6 @@ std::shared_ptr<RecordBatchReader> MakeGeneratorReader(
         ARROW_ASSIGN_OR_RAISE(*record_batch, batch->ToRecordBatch(schema_, pool_));
       } else {
         *record_batch = IterationEnd<std::shared_ptr<RecordBatch>>();
-      }
-      return Status::OK();
-    }
-
-    Status Close() override {
-      // reading from generator until end is reached.
-      std::shared_ptr<RecordBatch> batch;
-      RETURN_NOT_OK(ReadNext(&batch));
-      while (batch != NULLPTR) {
-        RETURN_NOT_OK(ReadNext(&batch));
       }
       return Status::OK();
     }
@@ -545,7 +314,6 @@ void RegisterProjectNode(ExecFactoryRegistry*);
 void RegisterUnionNode(ExecFactoryRegistry*);
 void RegisterAggregateNode(ExecFactoryRegistry*);
 void RegisterSinkNode(ExecFactoryRegistry*);
-void RegisterHashJoinNode(ExecFactoryRegistry*);
 
 }  // namespace internal
 
@@ -553,13 +321,11 @@ ExecFactoryRegistry* default_exec_factory_registry() {
   class DefaultRegistry : public ExecFactoryRegistry {
    public:
     DefaultRegistry() {
-      internal::RegisterSourceNode(this);
       internal::RegisterFilterNode(this);
       internal::RegisterProjectNode(this);
       internal::RegisterUnionNode(this);
       internal::RegisterAggregateNode(this);
       internal::RegisterSinkNode(this);
-      internal::RegisterHashJoinNode(this);
     }
 
     Result<Factory> GetFactory(const std::string& factory_name) override {
@@ -589,18 +355,6 @@ ExecFactoryRegistry* default_exec_factory_registry() {
 
   static DefaultRegistry instance;
   return &instance;
-}
-
-Result<std::function<Future<util::optional<ExecBatch>>()>> MakeReaderGenerator(
-    std::shared_ptr<RecordBatchReader> reader, ::arrow::internal::Executor* io_executor,
-    int max_q, int q_restart) {
-  auto batch_it = MakeMapIterator(
-      [](std::shared_ptr<RecordBatch> batch) {
-        return util::make_optional(ExecBatch(*batch));
-      },
-      MakeIteratorFromReader(reader));
-
-  return MakeBackgroundGenerator(std::move(batch_it), io_executor, max_q, q_restart);
 }
 
 }  // namespace compute
