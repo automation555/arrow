@@ -99,6 +99,30 @@ struct EnumTraits<compute::CompareOperator>
     return "<INVALID>";
   }
 };
+
+template <>
+struct EnumTraits<compute::BetweenOptions::Inclusive>
+    : BasicEnumTraits<compute::BetweenOptions::Inclusive,
+                      compute::BetweenOptions::Inclusive::BOTH,
+                      compute::BetweenOptions::Inclusive::LEFT,
+                      compute::BetweenOptions::Inclusive::RIGHT,
+                      compute::BetweenOptions::Inclusive::NEITHER> {
+  static std::string name() { return "Inclusive"; }
+  static std::string value_name(compute::BetweenOptions::Inclusive value) {
+    switch (value) {
+      case compute::BetweenOptions::Inclusive::BOTH:
+        return "BOTH";
+      case compute::BetweenOptions::Inclusive::LEFT:
+        return "LEFT";
+      case compute::BetweenOptions::Inclusive::RIGHT:
+        return "RIGHT";
+      case compute::BetweenOptions::Inclusive::NEITHER:
+        return "NEITHER";
+    }
+    return "<INVALID>";
+  }
+};
+
 template <>
 struct EnumTraits<compute::AssumeTimezoneOptions::Ambiguous>
     : BasicEnumTraits<compute::AssumeTimezoneOptions::Ambiguous,
@@ -292,6 +316,8 @@ static auto kAssumeTimezoneOptionsType = GetFunctionOptionsType<AssumeTimezoneOp
     DataMember("timezone", &AssumeTimezoneOptions::timezone),
     DataMember("ambiguous", &AssumeTimezoneOptions::ambiguous),
     DataMember("nonexistent", &AssumeTimezoneOptions::nonexistent));
+static auto kBetweenOptionsType = GetFunctionOptionsType<BetweenOptions>(
+    DataMember("inclusive", &BetweenOptions::inclusive));
 static auto kDayOfWeekOptionsType = GetFunctionOptionsType<DayOfWeekOptions>(
     DataMember("count_from_zero", &DayOfWeekOptions::count_from_zero),
     DataMember("week_start", &DayOfWeekOptions::week_start));
@@ -332,10 +358,7 @@ static auto kRoundOptionsType = GetFunctionOptionsType<RoundOptions>(
 static auto kRoundTemporalOptionsType = GetFunctionOptionsType<RoundTemporalOptions>(
     DataMember("multiple", &RoundTemporalOptions::multiple),
     DataMember("unit", &RoundTemporalOptions::unit),
-    DataMember("week_starts_monday", &RoundTemporalOptions::week_starts_monday),
-    DataMember("ceil_is_strictly_greater",
-               &RoundTemporalOptions::ceil_is_strictly_greater),
-    DataMember("calendar_based_origin", &RoundTemporalOptions::calendar_based_origin));
+    DataMember("week_starts_monday", &RoundTemporalOptions::week_starts_monday));
 static auto kRoundToMultipleOptionsType = GetFunctionOptionsType<RoundToMultipleOptions>(
     DataMember("multiple", &RoundToMultipleOptions::multiple),
     DataMember("round_mode", &RoundToMultipleOptions::round_mode));
@@ -356,8 +379,7 @@ static auto kStrftimeOptionsType = GetFunctionOptionsType<StrftimeOptions>(
     DataMember("format", &StrftimeOptions::format));
 static auto kStrptimeOptionsType = GetFunctionOptionsType<StrptimeOptions>(
     DataMember("format", &StrptimeOptions::format),
-    DataMember("unit", &StrptimeOptions::unit),
-    DataMember("error_is_null", &StrptimeOptions::error_is_null));
+    DataMember("unit", &StrptimeOptions::unit));
 static auto kStructFieldOptionsType = GetFunctionOptionsType<StructFieldOptions>(
     DataMember("indices", &StructFieldOptions::indices));
 static auto kTrimOptionsType = GetFunctionOptionsType<TrimOptions>(
@@ -369,6 +391,7 @@ static auto kWeekOptionsType = GetFunctionOptionsType<WeekOptions>(
     DataMember("count_from_zero", &WeekOptions::count_from_zero),
     DataMember("first_week_is_fully_in_year", &WeekOptions::first_week_is_fully_in_year));
 static auto kRandomOptionsType = GetFunctionOptionsType<RandomOptions>(
+    DataMember("length", &RandomOptions::length),
     DataMember("initializer", &RandomOptions::initializer),
     DataMember("seed", &RandomOptions::seed));
 
@@ -387,6 +410,10 @@ AssumeTimezoneOptions::AssumeTimezoneOptions(std::string timezone, Ambiguous amb
       nonexistent(nonexistent) {}
 AssumeTimezoneOptions::AssumeTimezoneOptions() : AssumeTimezoneOptions("UTC") {}
 constexpr char AssumeTimezoneOptions::kTypeName[];
+
+BetweenOptions::BetweenOptions(Inclusive inclusive)
+    : FunctionOptions(internal::kBetweenOptionsType), inclusive(inclusive) {}
+constexpr char BetweenOptions::kTypeName[];
 
 DayOfWeekOptions::DayOfWeekOptions(bool count_from_zero, uint32_t week_start)
     : FunctionOptions(internal::kDayOfWeekOptionsType),
@@ -493,15 +520,11 @@ RoundOptions::RoundOptions(int64_t ndigits, RoundMode round_mode)
 constexpr char RoundOptions::kTypeName[];
 
 RoundTemporalOptions::RoundTemporalOptions(int multiple, CalendarUnit unit,
-                                           bool week_starts_monday,
-                                           bool ceil_is_strictly_greater,
-                                           bool calendar_based_origin)
+                                           bool week_starts_monday)
     : FunctionOptions(internal::kRoundTemporalOptionsType),
       multiple(std::move(multiple)),
       unit(unit),
-      week_starts_monday(week_starts_monday),
-      ceil_is_strictly_greater(ceil_is_strictly_greater),
-      calendar_based_origin(calendar_based_origin) {}
+      week_starts_monday(week_starts_monday) {}
 constexpr char RoundTemporalOptions::kTypeName[];
 
 RoundToMultipleOptions::RoundToMultipleOptions(double multiple, RoundMode round_mode)
@@ -551,13 +574,11 @@ StrftimeOptions::StrftimeOptions() : StrftimeOptions(kDefaultFormat) {}
 constexpr char StrftimeOptions::kTypeName[];
 constexpr const char* StrftimeOptions::kDefaultFormat;
 
-StrptimeOptions::StrptimeOptions(std::string format, TimeUnit::type unit,
-                                 bool error_is_null)
+StrptimeOptions::StrptimeOptions(std::string format, TimeUnit::type unit)
     : FunctionOptions(internal::kStrptimeOptionsType),
       format(std::move(format)),
-      unit(unit),
-      error_is_null(error_is_null) {}
-StrptimeOptions::StrptimeOptions() : StrptimeOptions("", TimeUnit::MICRO, false) {}
+      unit(unit) {}
+StrptimeOptions::StrptimeOptions() : StrptimeOptions("", TimeUnit::SECOND) {}
 constexpr char StrptimeOptions::kTypeName[];
 
 StructFieldOptions::StructFieldOptions(std::vector<int> indices)
@@ -582,17 +603,19 @@ WeekOptions::WeekOptions(bool week_starts_monday, bool count_from_zero,
       first_week_is_fully_in_year(first_week_is_fully_in_year) {}
 constexpr char WeekOptions::kTypeName[];
 
-RandomOptions::RandomOptions(Initializer initializer, uint64_t seed)
+RandomOptions::RandomOptions(int64_t length, Initializer initializer, uint64_t seed)
     : FunctionOptions(internal::kRandomOptionsType),
+      length(length),
       initializer(initializer),
       seed(seed) {}
-RandomOptions::RandomOptions() : RandomOptions(SystemRandom, 0) {}
+RandomOptions::RandomOptions() : RandomOptions(0, SystemRandom, 0) {}
 constexpr char RandomOptions::kTypeName[];
 
 namespace internal {
 void RegisterScalarOptions(FunctionRegistry* registry) {
   DCHECK_OK(registry->AddFunctionOptionsType(kArithmeticOptionsType));
   DCHECK_OK(registry->AddFunctionOptionsType(kAssumeTimezoneOptionsType));
+  DCHECK_OK(registry->AddFunctionOptionsType(kBetweenOptionsType));
   DCHECK_OK(registry->AddFunctionOptionsType(kDayOfWeekOptionsType));
   DCHECK_OK(registry->AddFunctionOptionsType(kElementWiseAggregateOptionsType));
   DCHECK_OK(registry->AddFunctionOptionsType(kExtractRegexOptionsType));
@@ -755,6 +778,11 @@ Result<Datum> Compare(const Datum& left, const Datum& right, CompareOptions opti
   return CallFunction(func_name, {left, right}, nullptr, ctx);
 }
 
+Result<Datum> Between(const Datum& val, const Datum& left, const Datum& right,
+                      BetweenOptions options, ExecContext* ctx) {
+  return CallFunction("between", {val, left, right}, &options, ctx);
+}
+
 // ----------------------------------------------------------------------
 // Validity functions
 
@@ -830,27 +858,9 @@ Result<Datum> Strftime(const Datum& arg, StrftimeOptions options, ExecContext* c
   return CallFunction("strftime", {arg}, &options, ctx);
 }
 
-Result<Datum> Strptime(const Datum& arg, StrptimeOptions options, ExecContext* ctx) {
-  return CallFunction("strptime", {arg}, &options, ctx);
-}
-
 Result<Datum> Week(const Datum& arg, WeekOptions options, ExecContext* ctx) {
   return CallFunction("week", {arg}, &options, ctx);
 }
-
-SCALAR_EAGER_BINARY(YearsBetween, "years_between")
-SCALAR_EAGER_BINARY(QuartersBetween, "quarters_between")
-SCALAR_EAGER_BINARY(MonthsBetween, "month_interval_between")
-SCALAR_EAGER_BINARY(WeeksBetween, "weeks_between")
-SCALAR_EAGER_BINARY(MonthDayNanoBetween, "month_day_nano_interval_between")
-SCALAR_EAGER_BINARY(DayTimeBetween, "day_time_interval_between")
-SCALAR_EAGER_BINARY(DaysBetween, "days_between")
-SCALAR_EAGER_BINARY(HoursBetween, "hours_between")
-SCALAR_EAGER_BINARY(MinutesBetween, "minutes_between")
-SCALAR_EAGER_BINARY(SecondsBetween, "seconds_between")
-SCALAR_EAGER_BINARY(MillisecondsBetween, "milliseconds_between")
-SCALAR_EAGER_BINARY(MicrosecondsBetween, "microseconds_between")
-SCALAR_EAGER_BINARY(NanosecondsBetween, "nanoseconds_between")
 
 // ----------------------------------------------------------------------
 // Structural transforms

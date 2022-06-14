@@ -319,43 +319,43 @@ The supported aggregation functions are as follows. All function names are
 prefixed with ``hash_``, which differentiates them from their scalar
 equivalents above and reflects how they are implemented internally.
 
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
-| Function name           | Arity | Input types                        | Output type            | Options class                    | Notes     |
-+=========================+=======+====================================+========================+==================================+===========+
-| hash_all                | Unary | Boolean                            | Boolean                | :struct:`ScalarAggregateOptions` | \(1)      |
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
-| hash_any                | Unary | Boolean                            | Boolean                | :struct:`ScalarAggregateOptions` | \(1)      |
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
-| hash_approximate_median | Unary | Numeric                            | Float64                | :struct:`ScalarAggregateOptions` |           |
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
-| hash_count              | Unary | Any                                | Int64                  | :struct:`CountOptions`           | \(2)      |
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
-| hash_count_distinct     | Unary | Any                                | Int64                  | :struct:`CountOptions`           | \(2)      |
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
-| hash_distinct           | Unary | Any                                | List of input type     | :struct:`CountOptions`           | \(2) \(3) |
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
-| hash_list               | Unary | Any                                | List of input type     |                                  | \(3)      |
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
-| hash_max                | Unary | Non-nested, non-binary/string-like | Input type             | :struct:`ScalarAggregateOptions` |           |
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
-| hash_mean               | Unary | Numeric                            | Decimal/Float64        | :struct:`ScalarAggregateOptions` | \(4)      |
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
-| hash_min                | Unary | Non-nested, non-binary/string-like | Input type             | :struct:`ScalarAggregateOptions` |           |
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
-| hash_min_max            | Unary | Non-nested types                   | Struct                 | :struct:`ScalarAggregateOptions` | \(5)      |
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
-| hash_one                | Unary | Any                                | Input type             |                                  | \(6)      |
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
-| hash_product            | Unary | Numeric                            | Numeric                | :struct:`ScalarAggregateOptions` | \(7)      |
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
-| hash_stddev             | Unary | Numeric                            | Float64                | :struct:`VarianceOptions`        | \(8)      |
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
-| hash_sum                | Unary | Numeric                            | Numeric                | :struct:`ScalarAggregateOptions` | \(7)      |
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
-| hash_tdigest            | Unary | Numeric                            | FixedSizeList[Float64] | :struct:`TDigestOptions`         | \(9)      |
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
-| hash_variance           | Unary | Numeric                            | Float64                | :struct:`VarianceOptions`        | \(8)      |
-+-------------------------+-------+------------------------------------+------------------------+----------------------------------+-----------+
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
+| Function name           | Arity | Input types                        | Output type            | Options class                    | Notes |
++=========================+=======+====================================+========================+==================================+=======+
+| hash_all                | Unary | Boolean                            | Boolean                | :struct:`ScalarAggregateOptions` | \(1)  |
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
+| hash_any                | Unary | Boolean                            | Boolean                | :struct:`ScalarAggregateOptions` | \(1)  |
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
+| hash_approximate_median | Unary | Numeric                            | Float64                | :struct:`ScalarAggregateOptions` |       |
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
+| hash_count              | Unary | Any                                | Int64                  | :struct:`CountOptions`           | \(2)  |
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
+| hash_count_distinct     | Unary | Any                                | Int64                  | :struct:`CountOptions`           | \(2)  |
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
+| hash_distinct           | Unary | Any                                | Input type             | :struct:`CountOptions`           | \(2)  |
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
+| hash_list               | Unary | Any                                | List of input type     |                                  | \(3)  |
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
+| hash_max                | Unary | Non-nested, non-binary/string-like | Input type             | :struct:`ScalarAggregateOptions` |       |
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
+| hash_mean               | Unary | Numeric                            | Decimal/Float64        | :struct:`ScalarAggregateOptions` | \(4)  |
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
+| hash_min                | Unary | Non-nested, non-binary/string-like | Input type             | :struct:`ScalarAggregateOptions` |       |
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
+| hash_min_max            | Unary | Non-nested types                   | Struct                 | :struct:`ScalarAggregateOptions` | \(5)  |
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
+| hash_one                | Unary | Any                                | Input type             |                                  | \(6)  |
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
+| hash_product            | Unary | Numeric                            | Numeric                | :struct:`ScalarAggregateOptions` | \(7)  |
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
+| hash_stddev             | Unary | Numeric                            | Float64                | :struct:`VarianceOptions`        | \(8)  |
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
+| hash_sum                | Unary | Numeric                            | Numeric                | :struct:`ScalarAggregateOptions` | \(7)  |
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
+| hash_tdigest            | Unary | Numeric                            | FixedSizeList[Float64] | :struct:`TDigestOptions`         | \(9)  |
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
+| hash_variance           | Unary | Numeric                            | Float64                | :struct:`VarianceOptions`        | \(8)  |
++-------------------------+-------+------------------------------------+------------------------+----------------------------------+-------+
 
 * \(1) If null values are taken into account, by setting the
   :member:`ScalarAggregateOptions::skip_nulls` to false, then `Kleene logic`_
@@ -367,8 +367,7 @@ equivalents above and reflects how they are implemented internally.
   are emitted. This never affects the grouping keys, only group values
   (i.e. you may get a group where the key is null).
 
-* \(3) ``hash_distinct`` and ``hash_list`` gather the grouped values
-  into a list array.
+* \(3) ``hash_list`` gathers the grouped values into a list array.
 
 * \(4) For decimal inputs, the resulting decimal will have the same
   precision and scale. The result is rounded away from zero.
@@ -381,7 +380,7 @@ equivalents above and reflects how they are implemented internally.
 * \(6) ``hash_one`` returns one arbitrary value from the input for each
   group. The function is biased towards non-null values: if there is at least
   one non-null value for a certain group, that value is returned, and only if
-  all the values are ``null`` for the group will the function return ``null``.
+  all the values are ``null`` for the group will the function return ``null``. 
 
 * \(7) Output is Int64, UInt64, Float64, or Decimal128/256, depending on the
   input type.
@@ -688,34 +687,43 @@ Decimal values are accepted, but are cast to Float64 first.
 Comparisons
 ~~~~~~~~~~~
 
-These functions expect two inputs of numeric type (in which case they will be
+These functions expect two or three inputs of numeric type (in which case they will be
 cast to the :ref:`common numeric type <common-numeric-type>` before comparison),
-or two inputs of Binary- or String-like types, or two inputs of Temporal types.
-If any input is dictionary encoded it will be expanded for the purposes of
-comparison. If any of the input elements in a pair is null, the corresponding
+or two or three inputs of Binary- or String-like types, or two or three inputs of Temporal 
+types. If any input is dictionary encoded it will be expanded for the purposes of
+comparison. If any of the input elements in a pair or triple is null, the corresponding
 output element is null. Decimal arguments will be promoted in the same way as
 for ``add`` and ``subtract``.
 
-+----------------+------------+---------------------------------------------+---------------------+
-| Function names | Arity      | Input types                                 | Output type         |
-+================+============+=============================================+=====================+
-| equal          | Binary     | Numeric, Temporal, Binary- and String-like  | Boolean             |
-+----------------+------------+---------------------------------------------+---------------------+
-| greater        | Binary     | Numeric, Temporal, Binary- and String-like  | Boolean             |
-+----------------+------------+---------------------------------------------+---------------------+
-| greater_equal  | Binary     | Numeric, Temporal, Binary- and String-like  | Boolean             |
-+----------------+------------+---------------------------------------------+---------------------+
-| less           | Binary     | Numeric, Temporal, Binary- and String-like  | Boolean             |
-+----------------+------------+---------------------------------------------+---------------------+
-| less_equal     | Binary     | Numeric, Temporal, Binary- and String-like  | Boolean             |
-+----------------+------------+---------------------------------------------+---------------------+
-| not_equal      | Binary     | Numeric, Temporal, Binary- and String-like  | Boolean             |
-+----------------+------------+---------------------------------------------+---------------------+
++----------------+---------+---------------------------------------------+-------------+--------------------------+-------+
+| Function names | Arity   | Input types                                 | Output type | Options class            | Notes |
++================+=========+=============================================+=============+==========================+=======+
+| between        | Ternary | Numeric, Temporal, Binary- and String-like  | Boolean     | :struct:`BetweenOptions` | \(1)  |
++----------------+---------+---------------------------------------------+-------------+--------------------------+-------+
+| equal          | Binary  | Numeric, Temporal, Binary- and String-like  | Boolean     |                          |       |
++----------------+---------+---------------------------------------------+-------------+--------------------------+-------+
+| greater        | Binary  | Numeric, Temporal, Binary- and String-like  | Boolean     |                          |       |
++----------------+---------+---------------------------------------------+-------------+--------------------------+-------+
+| greater_equal  | Binary  | Numeric, Temporal, Binary- and String-like  | Boolean     |                          |       |
++----------------+---------+---------------------------------------------+-------------+--------------------------+-------+
+| less           | Binary  | Numeric, Temporal, Binary- and String-like  | Boolean     |                          |       |
++----------------+---------+---------------------------------------------+-------------+--------------------------+-------+
+| less_equal     | Binary  | Numeric, Temporal, Binary- and String-like  | Boolean     |                          |       |
++----------------+---------+---------------------------------------------+-------------+--------------------------+-------+
+| not_equal      | Binary  | Numeric, Temporal, Binary- and String-like  | Boolean     |                          |       |
++----------------+---------+---------------------------------------------+-------------+--------------------------+-------+
 
 These functions take any number of inputs of numeric type (in which case they
 will be cast to the :ref:`common numeric type <common-numeric-type>` before
 comparison) or of temporal types. If any input is dictionary encoded it will be
 expanded for the purposes of comparison.
+
+* \(1) Options are used to control whether either comparison endpoint is inclusive.
+  The default is ``BetweenOptions::Inclusive::BOTH``, other possible value are
+  ``BetweenOptions::Inclusive::LEFT``, ``BetweenOptions::Inclusive::RIGHT`` and
+  ``BetweenOptions::Inlcusive::NEITHER`` corresponding to ``a <= value <= b``,
+  ``a <= value < b``, ``a < value <= b`` and ``a < value < b`` (respectively).
+  Strings are presently compared by their UTF8 codepoint values.
 
 +------------------+------------+---------------------------------------------+---------------------+---------------------------------------+-------+
 | Function names   | Arity      | Input types                                 | Output type         | Options class                         | Notes |
@@ -1177,8 +1185,6 @@ Categorizations
 +-------------------+------------+-------------------------+---------------------+------------------------+---------+
 | is_valid          | Unary      | Any                     | Boolean             |                        | \(5)    |
 +-------------------+------------+-------------------------+---------------------+------------------------+---------+
-| true_unless_null  | Unary      | Any                     | Boolean             |                        | \(6)    |
-+-------------------+------------+-------------------------+---------------------+------------------------+---------+
 
 * \(1) Output is true iff the corresponding input element is finite (neither Infinity,
   -Infinity, nor NaN). Hence, for Decimal and integer inputs this always returns true.
@@ -1192,10 +1198,7 @@ Categorizations
 * \(4) Output is true iff the corresponding input element is null. NaN values
   can also be considered null by setting :member:`NullOptions::nan_is_null`.
 
-* \(5) Output is true iff the corresponding input element is non-null, else false.
-
-* \(6) Output is true iff the corresponding input element is non-null, else null.
-       Mostly intended for expression simplification/guarantees.
+* \(5) Output is true iff the corresponding input element is non-null.
 
 .. _cpp-compute-scalar-selections:
 
@@ -1552,32 +1555,6 @@ random generator.
 Array-wise ("vector") functions
 -------------------------------
 
-Cumulative Functions
-~~~~~~~~~~~~~~~~~~~~
-
-Cumulative functions are vector functions that perform a running total on their
-input using an given binary associatve operation and output an array containing
-the corresponding intermediate running values. The input is expected to be of
-numeric type. By default these functions do not detect overflow. They are also
-available in an overflow-checking variant, suffixed ``_checked``, which returns
-an ``Invalid`` :class:`Status` when overflow is detected.
-
-+------------------------+-------+-------------+-------------+--------------------------------+-------+
-| Function name          | Arity | Input types | Output type | Options class                  | Notes |
-+========================+=======+=============+=============+================================+=======+
-| cumulative_sum         | Unary | Numeric     | Numeric     | :struct:`CumulativeSumOptions` | \(1)  |
-+------------------------+-------+-------------+-------------+--------------------------------+-------+
-| cumulative_sum_checked | Unary | Numeric     | Numeric     | :struct:`CumulativeSumOptions` | \(1)  |
-+------------------------+-------+-------------+-------------+--------------------------------+-------+
-
-* \(1) CumulativeSumOptions has two optional parameters. The first parameter
-  :member:`CumulativeSumOptions::start` is a starting value for the running
-  sum. It has a default value of 0. Specified values of ``start`` must have the
-  same type as the input. The second parameter 
-  :member:`CumulativeSumOptions::skip_nulls` is a boolean. When set to
-  false (the default), the first encountered null is propagated. When set to
-  true, each null in the input produces a corresponding null in the output.
-
 Associative transforms
 ~~~~~~~~~~~~~~~~~~~~~~
 
@@ -1666,13 +1643,10 @@ in the respective option classes.
 +-----------------------+------------+---------------------------------------------------------+-------------------+--------------------------------+----------------+
 | partition_nth_indices | Unary      | Boolean, Numeric, Temporal, Binary- and String-like     | UInt64            | :struct:`PartitionNthOptions`  | \(3)           |
 +-----------------------+------------+---------------------------------------------------------+-------------------+--------------------------------+----------------+
-| rank                  | Unary      | Boolean, Numeric, Temporal, Binary- and String-like     | UInt64            | :struct:`RankOptions`          | \(4)           |
+| select_k_unstable     | Unary      | Boolean, Numeric, Temporal, Binary- and String-like     | UInt64            | :struct:`SelectKOptions`       | \(4) \(5)      |
 +-----------------------+------------+---------------------------------------------------------+-------------------+--------------------------------+----------------+
-| select_k_unstable     | Unary      | Boolean, Numeric, Temporal, Binary- and String-like     | UInt64            | :struct:`SelectKOptions`       | \(5) \(6)      |
+| sort_indices          | Unary      | Boolean, Numeric, Temporal, Binary- and String-like     | UInt64            | :struct:`SortOptions`          | \(1) \(4)      |
 +-----------------------+------------+---------------------------------------------------------+-------------------+--------------------------------+----------------+
-| sort_indices          | Unary      | Boolean, Numeric, Temporal, Binary- and String-like     | UInt64            | :struct:`SortOptions`          | \(1) \(5)      |
-+-----------------------+------------+---------------------------------------------------------+-------------------+--------------------------------+----------------+
-
 
 * \(1) The output is an array of indices into the input, that define a
   stable sort of the input.
@@ -1686,13 +1660,11 @@ in the respective option classes.
   :func:`std::nth_element`).  *N* is given in
   :member:`PartitionNthOptions::pivot`.
 
-* \(4) The output is a one-based numerical array of ranks
-
-* \(5) The input can be an array, chunked array, record batch or
+* \(4) The input can be an array, chunked array, record batch or
   table. If the input is a record batch or table, one or more sort
   keys must be specified.
 
-* \(6) The output is an array of indices into the input, that define a
+* \(5) The output is an array of indices into the input, that define a
   non-stable sort of the input.
 
 .. _cpp-compute-vector-structural-transforms:
