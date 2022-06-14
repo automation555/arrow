@@ -47,7 +47,7 @@ if(POLICY CMP0074)
   cmake_policy(SET CMP0074 NEW)
 endif()
 
-set(ARROW_VERSION "9.0.0-SNAPSHOT")
+set(ARROW_VERSION "5.0.0-SNAPSHOT")
 
 string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+" ARROW_BASE_VERSION "${ARROW_VERSION}")
 
@@ -104,21 +104,6 @@ include(ExternalProject)
 include(FindPackageHandleStandardArgs)
 
 include(GNUInstallDirs)
-if(IS_ABSOLUTE "${CMAKE_INSTALL_BINDIR}")
-  set(ARROW_PKG_CONFIG_BINDIR "${CMAKE_INSTALL_BINDIR}")
-else()
-  set(ARROW_PKG_CONFIG_BINDIR "\${prefix}/${CMAKE_INSTALL_BINDIR}")
-endif()
-if(IS_ABSOLUTE "${CMAKE_INSTALL_INCLUDEDIR}")
-  set(ARROW_PKG_CONFIG_INCLUDEDIR "${CMAKE_INSTALL_INCLUDEDIR}")
-else()
-  set(ARROW_PKG_CONFIG_INCLUDEDIR "\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}")
-endif()
-if(IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}")
-  set(ARROW_PKG_CONFIG_LIBDIR "${CMAKE_INSTALL_LIBDIR}")
-else()
-  set(ARROW_PKG_CONFIG_LIBDIR "\${prefix}/${CMAKE_INSTALL_LIBDIR}")
-endif()
 
 set(BUILD_SUPPORT_DIR "${CMAKE_SOURCE_DIR}/build-support")
 
@@ -126,8 +111,6 @@ set(ARROW_CMAKE_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}")
 set(ARROW_DOC_DIR "share/doc/${PROJECT_NAME}")
 
 set(ARROW_LLVM_VERSIONS
-    "14.0"
-    "13.0"
     "12.0"
     "11.1"
     "11.0"
@@ -207,14 +190,12 @@ else()
   set(PYTHON_EXECUTABLE ${Python3_EXECUTABLE})
 endif()
 
-if(ARROW_USE_CCACHE
-   AND NOT CMAKE_C_COMPILER_LAUNCHER
-   AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+if(ARROW_USE_CCACHE)
   find_program(CCACHE_FOUND ccache)
   if(CCACHE_FOUND)
     message(STATUS "Using ccache: ${CCACHE_FOUND}")
-    set(CMAKE_C_COMPILER_LAUNCHER ${CCACHE_FOUND})
-    set(CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE_FOUND})
+    set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ${CCACHE_FOUND})
+    set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK ${CCACHE_FOUND})
     # ARROW-3985: let ccache preserve C++ comments, because some of them may be
     # meaningful to the compiler
     set(ENV{CCACHE_COMMENTS} "1")
@@ -251,22 +232,15 @@ find_program(CPPLINT_BIN
              HINTS ${BUILD_SUPPORT_DIR})
 message(STATUS "Found cpplint executable at ${CPPLINT_BIN}")
 
-set(COMMON_LINT_OPTIONS
-    --exclude_globs
-    ${LINT_EXCLUSIONS_FILE}
-    --source_dir
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    --source_dir
-    ${CMAKE_CURRENT_SOURCE_DIR}/examples
-    --source_dir
-    ${CMAKE_CURRENT_SOURCE_DIR}/tools)
-
 add_custom_target(lint
                   ${PYTHON_EXECUTABLE}
                   ${BUILD_SUPPORT_DIR}/run_cpplint.py
                   --cpplint_binary
                   ${CPPLINT_BIN}
-                  ${COMMON_LINT_OPTIONS}
+                  --exclude_globs
+                  ${LINT_EXCLUSIONS_FILE}
+                  --source_dir
+                  ${CMAKE_CURRENT_SOURCE_DIR}/src
                   ${ARROW_LINT_QUIET})
 
 #
@@ -279,7 +253,10 @@ if(${CLANG_FORMAT_FOUND})
                     ${BUILD_SUPPORT_DIR}/run_clang_format.py
                     --clang_format_binary
                     ${CLANG_FORMAT_BIN}
-                    ${COMMON_LINT_OPTIONS}
+                    --exclude_globs
+                    ${LINT_EXCLUSIONS_FILE}
+                    --source_dir
+                    ${CMAKE_CURRENT_SOURCE_DIR}/src
                     --fix
                     ${ARROW_LINT_QUIET})
 
@@ -289,7 +266,10 @@ if(${CLANG_FORMAT_FOUND})
                     ${BUILD_SUPPORT_DIR}/run_clang_format.py
                     --clang_format_binary
                     ${CLANG_FORMAT_BIN}
-                    ${COMMON_LINT_OPTIONS}
+                    --exclude_globs
+                    ${LINT_EXCLUSIONS_FILE}
+                    --source_dir
+                    ${CMAKE_CURRENT_SOURCE_DIR}/src
                     ${ARROW_LINT_QUIET})
 endif()
 
@@ -313,9 +293,12 @@ if(${CLANG_TIDY_FOUND})
                     ${BUILD_SUPPORT_DIR}/run_clang_tidy.py
                     --clang_tidy_binary
                     ${CLANG_TIDY_BIN}
+                    --exclude_globs
+                    ${LINT_EXCLUSIONS_FILE}
                     --compile_commands
                     ${CMAKE_BINARY_DIR}/compile_commands.json
-                    ${COMMON_LINT_OPTIONS}
+                    --source_dir
+                    ${CMAKE_CURRENT_SOURCE_DIR}/src
                     --fix
                     ${ARROW_LINT_QUIET})
 
@@ -325,9 +308,12 @@ if(${CLANG_TIDY_FOUND})
                     ${BUILD_SUPPORT_DIR}/run_clang_tidy.py
                     --clang_tidy_binary
                     ${CLANG_TIDY_BIN}
+                    --exclude_globs
+                    ${LINT_EXCLUSIONS_FILE}
                     --compile_commands
                     ${CMAKE_BINARY_DIR}/compile_commands.json
-                    ${COMMON_LINT_OPTIONS}
+                    --source_dir
+                    ${CMAKE_CURRENT_SOURCE_DIR}/src
                     ${ARROW_LINT_QUIET})
 endif()
 
@@ -348,16 +334,12 @@ if(ARROW_BUILD_BENCHMARKS
   set(ARROW_TESTING ON)
 endif()
 
+if(ARROW_DATASET_JNI)
+  set(ARROW_JSON ON)
+endif()
+
 if(ARROW_GANDIVA)
   set(ARROW_WITH_RE2 ON)
-endif()
-
-if(ARROW_BUILD_INTEGRATION AND ARROW_FLIGHT)
-  set(ARROW_FLIGHT_SQL ON)
-endif()
-
-if(ARROW_FLIGHT_SQL)
-  set(ARROW_FLIGHT ON)
 endif()
 
 if(ARROW_CUDA
@@ -368,18 +350,8 @@ if(ARROW_CUDA
   set(ARROW_IPC ON)
 endif()
 
-if(ARROW_SUBSTRAIT)
-  set(ARROW_PARQUET ON)
-  set(ARROW_IPC ON)
+if(ARROW_ENGINE)
   set(ARROW_COMPUTE ON)
-  set(ARROW_DATASET ON)
-endif()
-
-if(ARROW_SKYHOOK)
-  set(ARROW_DATASET ON)
-  set(ARROW_PARQUET ON)
-  set(ARROW_WITH_LZ4 ON)
-  set(ARROW_WITH_SNAPPY ON)
 endif()
 
 if(ARROW_DATASET)
@@ -484,26 +456,6 @@ if(ARROW_EXTRA_ERROR_CONTEXT)
 endif()
 
 include(SetupCxxFlags)
-
-#
-# Linker flags
-#
-
-# Localize thirdparty symbols using a linker version script. This hides them
-# from the client application. The OS X linker does not support the
-# version-script option.
-if(CMAKE_VERSION VERSION_LESS 3.18)
-  if(APPLE OR WIN32)
-    set(CXX_LINKER_SUPPORTS_VERSION_SCRIPT FALSE)
-  else()
-    set(CXX_LINKER_SUPPORTS_VERSION_SCRIPT TRUE)
-  endif()
-else()
-  include(CheckLinkerFlag)
-  check_linker_flag(CXX
-                    "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/src/arrow/symbols.map"
-                    CXX_LINKER_SUPPORTS_VERSION_SCRIPT)
-endif()
 
 #
 # Build output directory
@@ -706,19 +658,10 @@ endif()
 # Linker and Dependencies
 #
 
-# Libraries to link statically with libarrow.so.
-#
-# Note that arrow::hadoop is a header only target that refers
-# cpp/thirdparty/hadoop/include/. See
-# cpp/cmake_modules/ThirdpartyToolchain.cmake for details.
-set(ARROW_LINK_LIBS arrow::flatbuffers arrow::hadoop)
-set(ARROW_STATIC_LINK_LIBS arrow::flatbuffers arrow::hadoop)
+# Libraries to link statically with libarrow.so
+set(ARROW_LINK_LIBS)
+set(ARROW_STATIC_LINK_LIBS)
 set(ARROW_STATIC_INSTALL_INTERFACE_LIBS)
-
-if(ARROW_USE_BOOST)
-  list(APPEND ARROW_LINK_LIBS Boost::headers)
-  list(APPEND ARROW_STATIC_LINK_LIBS Boost::headers)
-endif()
 
 if(ARROW_USE_OPENSSL)
   set(ARROW_OPENSSL_LIBS OpenSSL::Crypto OpenSSL::SSL)
@@ -745,9 +688,9 @@ if(ARROW_WITH_BZ2)
 endif()
 
 if(ARROW_WITH_LZ4)
-  list(APPEND ARROW_STATIC_LINK_LIBS lz4::lz4)
-  if(lz4_SOURCE STREQUAL "SYSTEM")
-    list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS lz4::lz4)
+  list(APPEND ARROW_STATIC_LINK_LIBS LZ4::lz4)
+  if(Lz4_SOURCE STREQUAL "SYSTEM")
+    list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS LZ4::lz4)
   endif()
 endif()
 
@@ -781,14 +724,6 @@ if(ARROW_ORC)
   endif()
 endif()
 
-if(ARROW_GCS)
-  list(APPEND ARROW_LINK_LIBS google-cloud-cpp::storage)
-  list(APPEND ARROW_STATIC_LINK_LIBS google-cloud-cpp::storage)
-  if(google_cloud_cpp_storage_SOURCE STREQUAL "SYSTEM")
-    list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS google-cloud-cpp::storage)
-  endif()
-endif()
-
 if(ARROW_USE_GLOG)
   list(APPEND ARROW_LINK_LIBS glog::glog)
   list(APPEND ARROW_STATIC_LINK_LIBS glog::glog)
@@ -801,19 +736,6 @@ endif()
 if(ARROW_S3)
   list(APPEND ARROW_LINK_LIBS ${AWSSDK_LINK_LIBRARIES})
   list(APPEND ARROW_STATIC_LINK_LIBS ${AWSSDK_LINK_LIBRARIES})
-endif()
-
-if(ARROW_WITH_OPENTELEMETRY)
-  list(APPEND
-       ARROW_LINK_LIBS
-       opentelemetry-cpp::trace
-       opentelemetry-cpp::ostream_span_exporter
-       opentelemetry-cpp::otlp_http_exporter)
-  list(APPEND
-       ARROW_STATIC_LINK_LIBS
-       opentelemetry-cpp::trace
-       opentelemetry-cpp::ostream_span_exporter
-       opentelemetry-cpp::otlp_http_exporter)
 endif()
 
 if(ARROW_WITH_UTF8PROC)
@@ -830,16 +752,6 @@ if(ARROW_WITH_RE2)
   if(re2_SOURCE STREQUAL "SYSTEM")
     list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS re2::re2)
   endif()
-endif()
-
-if(ARROW_WITH_RAPIDJSON)
-  list(APPEND ARROW_LINK_LIBS rapidjson::rapidjson)
-  list(APPEND ARROW_STATIC_LINK_LIBS rapidjson::rapidjson)
-endif()
-
-if(ARROW_USE_XSIMD)
-  list(APPEND ARROW_LINK_LIBS xsimd)
-  list(APPEND ARROW_STATIC_LINK_LIBS xsimd)
 endif()
 
 add_custom_target(arrow_dependencies)
@@ -864,13 +776,22 @@ endif()
 
 set(ARROW_SHARED_PRIVATE_LINK_LIBS ${ARROW_STATIC_LINK_LIBS})
 
+# boost::filesystem is needed for S3 and Flight tests as a boost::process dependency.
+if(((ARROW_FLIGHT OR ARROW_S3) AND (ARROW_BUILD_TESTS OR ARROW_BUILD_INTEGRATION)))
+  list(APPEND ARROW_TEST_LINK_LIBS ${BOOST_FILESYSTEM_LIBRARY} ${BOOST_SYSTEM_LIBRARY})
+endif()
+
 if(NOT MSVC_TOOLCHAIN)
   list(APPEND ARROW_LINK_LIBS ${CMAKE_DL_LIBS})
   list(APPEND ARROW_SHARED_INSTALL_INTERFACE_LIBS ${CMAKE_DL_LIBS})
 endif()
 
-set(ARROW_TEST_LINK_TOOLCHAIN arrow::flatbuffers GTest::gtest_main GTest::gtest
-                              GTest::gmock)
+set(ARROW_TEST_LINK_TOOLCHAIN
+    GTest::gtest_main
+    GTest::gtest
+    GTest::gmock
+    ${BOOST_FILESYSTEM_LIBRARY}
+    ${BOOST_SYSTEM_LIBRARY})
 
 if(ARROW_BUILD_TESTS)
   add_dependencies(arrow_test_dependencies ${ARROW_TEST_LINK_TOOLCHAIN})
@@ -986,10 +907,6 @@ endif()
 
 if(ARROW_GANDIVA)
   add_subdirectory(src/gandiva)
-endif()
-
-if(ARROW_SKYHOOK)
-  add_subdirectory(src/skyhook)
 endif()
 
 if(ARROW_BUILD_EXAMPLES)
