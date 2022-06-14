@@ -22,6 +22,7 @@ import os
 import pathlib
 import signal
 import struct
+import sys
 import tempfile
 import threading
 import time
@@ -32,7 +33,7 @@ import numpy as np
 import pytest
 import pyarrow as pa
 
-from pyarrow.lib import IpcReadOptions, tobytes
+from pyarrow.lib import tobytes
 from pyarrow.util import find_free_port
 from pyarrow.tests import util
 
@@ -119,12 +120,6 @@ def simple_dicts_table():
     return pa.Table.from_arrays(data, names=['some_dicts'])
 
 
-def multiple_column_table():
-    return pa.Table.from_arrays([pa.array(['foo', 'bar', 'baz', 'qux']),
-                                 pa.array([1, 2, 3, 4])],
-                                names=['a', 'b'])
-
-
 class ConstantFlightServer(FlightServerBase):
     """A Flight server that always returns the same data.
 
@@ -140,7 +135,6 @@ class ConstantFlightServer(FlightServerBase):
         self.table_factories = {
             b'ints': simple_ints_table,
             b'dicts': simple_dicts_table,
-            b'multi': multiple_column_table,
         }
         self.options = options
 
@@ -362,23 +356,17 @@ class SlowFlightServer(FlightServerBase):
 class ErrorFlightServer(FlightServerBase):
     """A Flight server that uses all the Flight-specific errors."""
 
-    @staticmethod
-    def error_cases():
-        return {
-            "internal": flight.FlightInternalError,
-            "timedout": flight.FlightTimedOutError,
-            "cancel": flight.FlightCancelledError,
-            "unauthenticated": flight.FlightUnauthenticatedError,
-            "unauthorized": flight.FlightUnauthorizedError,
-            "notimplemented": NotImplementedError,
-            "invalid": pa.ArrowInvalid,
-            "key": KeyError,
-        }
-
     def do_action(self, context, action):
-        error_cases = ErrorFlightServer.error_cases()
-        if action.type in error_cases:
-            raise error_cases[action.type]("foo")
+        if action.type == "internal":
+            raise flight.FlightInternalError("foo")
+        elif action.type == "timedout":
+            raise flight.FlightTimedOutError("foo")
+        elif action.type == "cancel":
+            raise flight.FlightCancelledError("foo")
+        elif action.type == "unauthenticated":
+            raise flight.FlightUnauthenticatedError("foo")
+        elif action.type == "unauthorized":
+            raise flight.FlightUnauthorizedError("foo")
         elif action.type == "protobuf":
             err_msg = b'this is an error message'
             raise flight.FlightUnauthorizedError("foo", err_msg)
@@ -819,9 +807,6 @@ class MultiHeaderClientMiddleware(ClientMiddleware):
     EXPECTED = {
         "x-text": ["foo", "bar"],
         "x-binary-bin": [b"\x00", b"\x01"],
-        # ARROW-16606: ensure mixed-case headers are accepted
-        "x-MIXED-case": ["baz"],
-        b"x-other-MIXED-case": ["baz"],
     }
 
     def __init__(self, factory):
@@ -1172,23 +1157,6 @@ def test_timeout_passes():
             FlightClient(('localhost', server.port)) as client:
         options = flight.FlightCallOptions(timeout=5.0)
         client.do_get(flight.Ticket(b'ints'), options=options).read_all()
-
-
-def test_read_options():
-    """Make sure ReadOptions can be used."""
-    expected = pa.Table.from_arrays([pa.array([1, 2, 3, 4])], names=["b"])
-    with ConstantFlightServer() as server, \
-            FlightClient(('localhost', server.port)) as client:
-        options = flight.FlightCallOptions(
-            read_options=IpcReadOptions(included_fields=[1]))
-        response1 = client.do_get(flight.Ticket(
-            b'multi'), options=options).read_all()
-        response2 = client.do_get(flight.Ticket(b'multi')).read_all()
-
-        assert response2.num_columns == 2
-        assert response1.num_columns == 1
-        assert response1 == expected
-        assert response2 == multiple_column_table()
 
 
 basic_auth_handler = HttpBasicServerAuthHandler(creds={
@@ -1595,9 +1563,16 @@ def test_roundtrip_errors():
     with ErrorFlightServer() as server, \
             FlightClient(('localhost', server.port)) as client:
 
-        for arg, exc_type in ErrorFlightServer.error_cases().items():
-            with pytest.raises(exc_type, match=".*foo.*"):
-                list(client.do_action(flight.Action(arg, b"")))
+        with pytest.raises(flight.FlightInternalError, match=".*foo.*"):
+            list(client.do_action(flight.Action("internal", b"")))
+        with pytest.raises(flight.FlightTimedOutError, match=".*foo.*"):
+            list(client.do_action(flight.Action("timedout", b"")))
+        with pytest.raises(flight.FlightCancelledError, match=".*foo.*"):
+            list(client.do_action(flight.Action("cancel", b"")))
+        with pytest.raises(flight.FlightUnauthenticatedError, match=".*foo.*"):
+            list(client.do_action(flight.Action("unauthenticated", b"")))
+        with pytest.raises(flight.FlightUnauthorizedError, match=".*foo.*"):
+            list(client.do_action(flight.Action("unauthorized", b"")))
         with pytest.raises(flight.FlightInternalError, match=".*foo.*"):
             list(client.list_flights())
 
@@ -1913,9 +1888,6 @@ def test_middleware_multi_header():
             client_headers = ast.literal_eval(raw_headers)
             # Don't directly compare; gRPC may add headers like User-Agent.
             for header, values in MultiHeaderClientMiddleware.EXPECTED.items():
-                header = header.lower()
-                if isinstance(header, bytes):
-                    header = header.decode("ascii")
                 assert client_headers.get(header) == values
                 assert headers.last_headers.get(header) == values
 
@@ -2000,11 +1972,6 @@ def test_interrupt():
         descriptor = flight.FlightDescriptor.for_command(b"echo")
         writer, reader = client.do_exchange(descriptor)
         test(reader.read_all)
-        try:
-            writer.close()
-        except (KeyboardInterrupt, flight.FlightCancelledError):
-            # Silence the Cancelled/Interrupt exception
-            pass
 
 
 def test_never_sends_data():
@@ -2099,81 +2066,131 @@ def test_none_action_side_effect():
         assert json.loads(next(r).body.to_pybytes()) == [True]
 
 
-@pytest.mark.slow  # Takes a while for gRPC to "realize" writes fail
-def test_write_error_propagation():
+class ExceptionLoggingServer(FlightServerBase):
+    def list_flights(self, *args, **kwargs):
+        raise ValueError("uncaught")
+
+    def get_flight_info(self, *args, **kwargs):
+        raise ValueError("uncaught")
+
+    def get_schema(self, *args, **kwargs):
+        raise ValueError("uncaught")
+
+    def do_put(self, *args, **kwargs):
+        raise ValueError("uncaught")
+
+    def do_get(self, context, ticket):
+        if ticket.ticket == b"generator":
+            schema = pa.schema([])
+
+            def _gen():
+                yield pa.record_batch([], schema=schema)
+                raise ValueError("uncaught generator")
+
+            return flight.GeneratorStream(schema, _gen())
+        raise ValueError("uncaught")
+
+    def do_exchange(self, *args, **kwargs):
+        raise ValueError("uncaught")
+
+    def do_action(self, context, action):
+        if action.type == "generator":
+            def _gen():
+                yield b""
+                raise ValueError("uncaught action")
+            return _gen()
+        raise ValueError("uncaught")
+
+    def list_actions(self, *args, **kwargs):
+        raise ValueError("uncaught")
+
+
+class CaptureUnraisableExceptions:
+    def __init__(self):
+        self._old_hook = None
+        self.recorded = None
+
+    def _hook(self, unraisable):
+        self.recorded = (
+            unraisable.exc_type,
+            unraisable.object,
+            repr(unraisable.exc_value),
+        )
+
+    def __enter__(self):
+        self._old_hook = sys.unraisablehook
+        sys.unraisablehook = self._hook
+        return self
+
+    def __exit__(self, *args, **kwargs):
+        sys.unraisablehook = self._old_hook
+        self.recorded = None
+
+
+@pytest.mark.skipif(sys.version_info < (3, 8),
+                    reason="sys.unraisablehook requires Python >=3.8")
+def test_logging_unhandled_exceptions():
+    """Ensure that unhandled exceptions are logged.
+
+    See https://issues.apache.org/jira/browse/ARROW-15909.
     """
-    Ensure that exceptions during writing preserve error context.
+    with ExceptionLoggingServer() as server, \
+            FlightClient(("localhost", server.port)) as client, \
+            CaptureUnraisableExceptions() as capture_unraisable:
+        with pytest.raises(ValueError):
+            list(client.list_flights())
+        assert capture_unraisable.recorded == \
+            (ValueError, server.list_flights, "ValueError('uncaught')")
 
-    See https://issues.apache.org/jira/browse/ARROW-16592.
-    """
-    expected_message = "foo"
-    expected_info = b"bar"
-    exc = flight.FlightCancelledError(
-        expected_message, extra_info=expected_info)
-    descriptor = flight.FlightDescriptor.for_command(b"")
-    schema = pa.schema([("int64", pa.int64())])
+        with pytest.raises(ValueError):
+            client.get_flight_info(flight.FlightDescriptor.for_path(""))
+        assert capture_unraisable.recorded == \
+            (ValueError, server.get_flight_info, "ValueError('uncaught')")
 
-    class FailServer(flight.FlightServerBase):
-        def do_put(self, context, descriptor, reader, writer):
-            raise exc
+        with pytest.raises(ValueError):
+            client.get_schema(flight.FlightDescriptor.for_path(""))
+        assert capture_unraisable.recorded == \
+            (ValueError, server.get_schema, "ValueError('uncaught')")
 
-        def do_exchange(self, context, descriptor, reader, writer):
-            raise exc
-
-    with FailServer() as server, \
-            FlightClient(('localhost', server.port)) as client:
-        # DoPut
-        writer, reader = client.do_put(descriptor, schema)
-
-        # Set a concurrent reader - ensure this doesn't block the
-        # writer side from calling Close()
-        def _reader():
-            try:
-                while True:
-                    reader.read()
-            except flight.FlightError:
-                return
-
-        thread = threading.Thread(target=_reader, daemon=True)
-        thread.start()
-
-        with pytest.raises(flight.FlightCancelledError) as exc_info:
-            while True:
-                writer.write_batch(pa.record_batch([[1]], schema=schema))
-        assert exc_info.value.extra_info == expected_info
-
-        with pytest.raises(flight.FlightCancelledError) as exc_info:
+        with pytest.raises(ValueError):
+            writer, _ = client.do_put(
+                flight.FlightDescriptor.for_path(""), pa.schema([]))
             writer.close()
-        assert exc_info.value.extra_info == expected_info
-        thread.join()
+        assert capture_unraisable.recorded == \
+            (ValueError, server.do_put, "ValueError('uncaught')")
 
-        # DoExchange
-        writer, reader = client.do_exchange(descriptor)
+        with pytest.raises(ValueError):
+            client.do_get(flight.Ticket(b"")).read_all()
+        assert capture_unraisable.recorded == \
+            (ValueError, server.do_get, "ValueError('uncaught')")
 
-        def _reader():
-            try:
-                while True:
-                    reader.read_chunk()
-            except flight.FlightError:
-                return
+        reader = client.do_get(flight.Ticket(b"generator"))
+        reader.read_chunk()
+        with pytest.raises(ValueError, match=".*uncaught generator.*"):
+            reader.read_all()
+        assert capture_unraisable.recorded[0] is ValueError
+        assert capture_unraisable.recorded[2] == \
+            "ValueError('uncaught generator')"
 
-        thread = threading.Thread(target=_reader, daemon=True)
-        thread.start()
-        with pytest.raises(flight.FlightCancelledError) as exc_info:
-            while True:
-                writer.write_metadata(b" ")
-        assert exc_info.value.extra_info == expected_info
-
-        with pytest.raises(flight.FlightCancelledError) as exc_info:
+        with pytest.raises(ValueError):
+            writer, _ = client.do_exchange(
+                flight.FlightDescriptor.for_path(""))
             writer.close()
-        assert exc_info.value.extra_info == expected_info
-        thread.join()
+        assert capture_unraisable.recorded == \
+            (ValueError, server.do_exchange, "ValueError('uncaught')")
 
+        with pytest.raises(ValueError):
+            list(client.do_action(("", b"")))
+        assert capture_unraisable.recorded == \
+            (ValueError, server.do_action, "ValueError('uncaught')")
 
-def test_interpreter_shutdown():
-    """
-    Ensure that the gRPC server is stopped at interpreter shutdown.
+        with pytest.raises(ValueError, match=".*uncaught action.*"):
+            list(client.do_action(("generator", b"")))
+        assert capture_unraisable.recorded[0] is ValueError
+        assert capture_unraisable.recorded[2] == \
+            "ValueError('uncaught action')"
 
-    See https://issues.apache.org/jira/browse/ARROW-16597.
-    """
-    util.invoke_script("arrow_16597.py")
+        with pytest.raises(ValueError):
+            list(client.list_actions())
+        assert capture_unraisable.recorded == \
+            (ValueError, server.list_actions, "ValueError('uncaught')")
