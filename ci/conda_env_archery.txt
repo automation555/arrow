@@ -18,6 +18,9 @@
 # cli
 click
 
+# integration
+pydantic
+
 # bot, crossbow
 github3.py
 jinja2
