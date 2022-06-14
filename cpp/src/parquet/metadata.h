@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "arrow/util/key_value_metadata.h"
 #include "parquet/platform.h"
 #include "parquet/properties.h"
 #include "parquet/schema.h"
@@ -57,6 +58,16 @@ class PARQUET_EXPORT ApplicationVersion {
   static const ApplicationVersion& PARQUET_816_FIXED_VERSION();
   static const ApplicationVersion& PARQUET_CPP_FIXED_STATS_VERSION();
   static const ApplicationVersion& PARQUET_MR_FIXED_STATS_VERSION();
+  // Regular expression for the version format
+  // major . minor . patch unknown - prerelease.x + build info
+  // Eg: 1.5.0ab-cdh5.5.0+cd
+  static constexpr char const* VERSION_FORMAT =
+      "^(\\d+)\\.(\\d+)\\.(\\d+)([^-+]*)?(?:-([^+]*))?(?:\\+(.*))?$";
+  // Regular expression for the application format
+  // application_name version VERSION_FORMAT (build build_name)
+  // Eg: parquet-cpp version 1.5.0ab-xyz5.5.0+cd (build abcd)
+  static constexpr char const* APPLICATION_FORMAT =
+      "(.*?)\\s*(?:(version\\s*(?:([^(]*?)\\s*(?:\\(\\s*build\\s*([^)]*?)\\s*\\))?)?)?)";
 
   // Application that wrote the file. e.g. "IMPALA"
   std::string application_;
@@ -66,8 +77,9 @@ class PARQUET_EXPORT ApplicationVersion {
   // Version of the application that wrote the file, expressed as
   // (<major>.<minor>.<patch>). Unmatched parts default to 0.
   // "1.2.3"    => {1, 2, 3}
-  // "1.2"      => {1, 2, 0}
-  // "1.2-cdh5" => {1, 2, 0}
+  // "1.2"      => {0, 0, 0}
+  // "1.2-cdh5" => {0, 0, 0}
+  // TODO (majetideepak): Implement support for pre_release
   struct {
     int major;
     int minor;
@@ -84,7 +96,7 @@ class PARQUET_EXPORT ApplicationVersion {
   // Returns true if version is strictly less than other_version
   bool VersionLt(const ApplicationVersion& other_version) const;
 
-  // Returns true if version is strictly equal with other_version
+  // Returns true if version is strictly less than other_version
   bool VersionEq(const ApplicationVersion& other_version) const;
 
   // Checks if the Version has the correct statistics for a given column
@@ -121,17 +133,8 @@ struct PageEncodingStats {
 class PARQUET_EXPORT ColumnChunkMetaData {
  public:
   // API convenience to get a MetaData accessor
-
-  ARROW_DEPRECATED("Use the ReaderProperties-taking overload")
   static std::unique_ptr<ColumnChunkMetaData> Make(
       const void* metadata, const ColumnDescriptor* descr,
-      const ApplicationVersion* writer_version, int16_t row_group_ordinal = -1,
-      int16_t column_ordinal = -1,
-      std::shared_ptr<InternalFileDecryptor> file_decryptor = NULLPTR);
-
-  static std::unique_ptr<ColumnChunkMetaData> Make(
-      const void* metadata, const ColumnDescriptor* descr,
-      const ReaderProperties& properties = default_reader_properties(),
       const ApplicationVersion* writer_version = NULLPTR, int16_t row_group_ordinal = -1,
       int16_t column_ordinal = -1,
       std::shared_ptr<InternalFileDecryptor> file_decryptor = NULLPTR);
@@ -173,8 +176,7 @@ class PARQUET_EXPORT ColumnChunkMetaData {
  private:
   explicit ColumnChunkMetaData(
       const void* metadata, const ColumnDescriptor* descr, int16_t row_group_ordinal,
-      int16_t column_ordinal, const ReaderProperties& properties,
-      const ApplicationVersion* writer_version = NULLPTR,
+      int16_t column_ordinal, const ApplicationVersion* writer_version = NULLPTR,
       std::shared_ptr<InternalFileDecryptor> file_decryptor = NULLPTR);
   // PIMPL Idiom
   class ColumnChunkMetaDataImpl;
@@ -184,16 +186,9 @@ class PARQUET_EXPORT ColumnChunkMetaData {
 /// \brief RowGroupMetaData is a proxy around format::RowGroupMetaData.
 class PARQUET_EXPORT RowGroupMetaData {
  public:
-  ARROW_DEPRECATED("Use the ReaderProperties-taking overload")
-  static std::unique_ptr<RowGroupMetaData> Make(
-      const void* metadata, const SchemaDescriptor* schema,
-      const ApplicationVersion* writer_version,
-      std::shared_ptr<InternalFileDecryptor> file_decryptor = NULLPTR);
-
   /// \brief Create a RowGroupMetaData from a serialized thrift message.
   static std::unique_ptr<RowGroupMetaData> Make(
       const void* metadata, const SchemaDescriptor* schema,
-      const ReaderProperties& properties = default_reader_properties(),
       const ApplicationVersion* writer_version = NULLPTR,
       std::shared_ptr<InternalFileDecryptor> file_decryptor = NULLPTR);
 
@@ -222,12 +217,6 @@ class PARQUET_EXPORT RowGroupMetaData {
   /// \brief Total byte size of all the uncompressed column data in this row group.
   int64_t total_byte_size() const;
 
-  /// \brief Total byte size of all the compressed (and potentially encrypted)
-  /// column data in this row group.
-  ///
-  /// This information is optional and may be 0 if omitted.
-  int64_t total_compressed_size() const;
-
   /// \brief Byte offset from beginning of file to first page (data or
   /// dictionary) in this row group
   ///
@@ -242,7 +231,6 @@ class PARQUET_EXPORT RowGroupMetaData {
  private:
   explicit RowGroupMetaData(
       const void* metadata, const SchemaDescriptor* schema,
-      const ReaderProperties& properties,
       const ApplicationVersion* writer_version = NULLPTR,
       std::shared_ptr<InternalFileDecryptor> file_decryptor = NULLPTR);
   // PIMPL Idiom
@@ -255,15 +243,9 @@ class FileMetaDataBuilder;
 /// \brief FileMetaData is a proxy around format::FileMetaData.
 class PARQUET_EXPORT FileMetaData {
  public:
-  ARROW_DEPRECATED("Use the ReaderProperties-taking overload")
-  static std::shared_ptr<FileMetaData> Make(
-      const void* serialized_metadata, uint32_t* inout_metadata_len,
-      std::shared_ptr<InternalFileDecryptor> file_decryptor);
-
   /// \brief Create a FileMetaData from a serialized thrift message.
   static std::shared_ptr<FileMetaData> Make(
       const void* serialized_metadata, uint32_t* inout_metadata_len,
-      const ReaderProperties& properties = default_reader_properties(),
       std::shared_ptr<InternalFileDecryptor> file_decryptor = NULLPTR);
 
   ~FileMetaData();
@@ -300,12 +282,7 @@ class PARQUET_EXPORT FileMetaData {
   /// \throws ParquetException if the index is out of bound.
   std::unique_ptr<RowGroupMetaData> RowGroup(int index) const;
 
-  /// \brief Return the "version" of the file
-  ///
-  /// WARNING: The value returned by this method is unreliable as 1) the Parquet
-  /// file metadata stores the version as a single integer and 2) some producers
-  /// are known to always write a hardcoded value.  Therefore, you cannot use
-  /// this value to know which features are used in the file.
+  /// \brief Return the version of the file.
   ParquetVersion::type version() const;
 
   /// \brief Return the application's user-agent string of the writer.
@@ -374,7 +351,6 @@ class PARQUET_EXPORT FileMetaData {
   friend class SerializedFile;
 
   explicit FileMetaData(const void* serialized_metadata, uint32_t* metadata_len,
-                        const ReaderProperties& properties,
                         std::shared_ptr<InternalFileDecryptor> file_decryptor = NULLPTR);
 
   void set_file_decryptor(std::shared_ptr<InternalFileDecryptor> file_decryptor);
@@ -388,9 +364,8 @@ class PARQUET_EXPORT FileMetaData {
 class PARQUET_EXPORT FileCryptoMetaData {
  public:
   // API convenience to get a MetaData accessor
-  static std::shared_ptr<FileCryptoMetaData> Make(
-      const uint8_t* serialized_metadata, uint32_t* metadata_len,
-      const ReaderProperties& properties = default_reader_properties());
+  static std::shared_ptr<FileCryptoMetaData> Make(const uint8_t* serialized_metadata,
+                                                  uint32_t* metadata_len);
   ~FileCryptoMetaData();
 
   EncryptionAlgorithm encryption_algorithm() const;
@@ -400,8 +375,7 @@ class PARQUET_EXPORT FileCryptoMetaData {
 
  private:
   friend FileMetaDataBuilder;
-  FileCryptoMetaData(const uint8_t* serialized_metadata, uint32_t* metadata_len,
-                     const ReaderProperties& properties);
+  FileCryptoMetaData(const uint8_t* serialized_metadata, uint32_t* metadata_len);
 
   // PIMPL Idiom
   FileCryptoMetaData();
@@ -498,6 +472,8 @@ class PARQUET_EXPORT FileMetaDataBuilder {
 
   // Complete the Thrift structure
   std::unique_ptr<FileMetaData> Finish();
+
+  std::unique_ptr<FileMetaData> ToFileMetadata(bool finish, const std::string data_path);
 
   // crypto metadata
   std::unique_ptr<FileCryptoMetaData> GetCryptoMetaData();
