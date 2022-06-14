@@ -40,8 +40,6 @@ endif()
 
 add_definitions(-DGANDIVA_LLVM_VERSION=${LLVM_VERSION_MAJOR})
 
-find_package(OpenSSLAlt REQUIRED)
-
 # Set the path where the bitcode file generated, see precompiled/CMakeLists.txt
 set(GANDIVA_PRECOMPILED_BC_PATH "${CMAKE_CURRENT_BINARY_DIR}/irhelpers.bc")
 set(GANDIVA_PRECOMPILED_CC_PATH "${CMAKE_CURRENT_BINARY_DIR}/precompiled_bitcode.cc")
@@ -63,59 +61,42 @@ set(SRC_FILES
     decimal_xlarge.cc
     engine.cc
     date_utils.cc
-    encrypt_utils.cc
     expr_decomposer.cc
     expr_validator.cc
     expression.cc
     expression_registry.cc
     exported_funcs_registry.cc
     filter.cc
+    array_ops.cc
     function_ir_builder.cc
     function_registry.cc
     function_registry_arithmetic.cc
+    function_registry_array.cc
     function_registry_datetime.cc
     function_registry_hash.cc
     function_registry_math_ops.cc
     function_registry_string.cc
     function_registry_timestamp_arithmetic.cc
     function_signature.cc
-    gandiva_object_cache.cc
     gdv_function_stubs.cc
-    gdv_string_function_stubs.cc
-    gdv_hash_function_stubs.cc
-    hash_utils.cc
-    interval_holder.cc
     llvm_generator.cc
     llvm_types.cc
+    like_holder.cc
     literal_holder.cc
     projector.cc
     regex_util.cc
-    regex_functions_holder.cc
     selection_vector.cc
     tree_expr_builder.cc
     to_date_holder.cc
     random_generator_holder.cc
     ${GANDIVA_PRECOMPILED_CC_PATH})
 
-set(GANDIVA_SHARED_PRIVATE_LINK_LIBS arrow_shared LLVM::LLVM_INTERFACE
-                                     ${GANDIVA_OPENSSL_LIBS} Boost::headers)
-set(GANDIVA_STATIC_LINK_LIBS arrow_static LLVM::LLVM_INTERFACE ${GANDIVA_OPENSSL_LIBS}
-                             Boost::headers)
-if(ARROW_WITH_RE2)
-  list(APPEND GANDIVA_SHARED_PRIVATE_LINK_LIBS re2::re2)
-  list(APPEND GANDIVA_STATIC_LINK_LIBS re2::re2)
-endif()
-if(ARROW_WITH_UTF8PROC)
-  list(APPEND GANDIVA_SHARED_PRIVATE_LINK_LIBS utf8proc::utf8proc)
-  list(APPEND GANDIVA_STATIC_LINK_LIBS utf8proc::utf8proc)
-endif()
-if(ARROW_USE_XSIMD)
-  list(APPEND GANDIVA_SHARED_PRIVATE_LINK_LIBS xsimd)
-  list(APPEND GANDIVA_STATIC_LINK_LIBS xsimd)
-endif()
+set(GANDIVA_SHARED_PRIVATE_LINK_LIBS arrow_shared LLVM::LLVM_INTERFACE)
 
-if(ARROW_GANDIVA_STATIC_LIBSTDCPP AND (CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUCXX
-                                      ))
+set(GANDIVA_STATIC_LINK_LIBS arrow_static LLVM::LLVM_INTERFACE)
+
+if(ARROW_GANDIVA_STATIC_LIBSTDCPP
+   AND (CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUCXX))
   set(GANDIVA_STATIC_LINK_LIBS ${GANDIVA_STATIC_LINK_LIBS} -static-libstdc++
                                -static-libgcc)
 endif()
@@ -128,7 +109,10 @@ endif()
 #     set(GANDIVA_SHARED_LINK_FLAGS "${GANDIVA_SHARED_LINK_FLAGS} /EXPORT:${SYMBOL}")
 #   endforeach()
 # endif()
-if(CXX_LINKER_SUPPORTS_VERSION_SCRIPT)
+if(NOT APPLE AND NOT MSVC_TOOLCHAIN)
+  # Localize thirdparty symbols using a linker version script. This hides them
+  # from the client application. The OS X linker does not support the
+  # version-script option.
   set(GANDIVA_VERSION_SCRIPT_FLAGS
       "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/symbols.map")
   set(GANDIVA_SHARED_LINK_FLAGS
@@ -151,8 +135,6 @@ add_arrow_lib(gandiva
               precompiled
               EXTRA_INCLUDES
               $<TARGET_PROPERTY:LLVM::LLVM_INTERFACE,INTERFACE_INCLUDE_DIRECTORIES>
-              ${GANDIVA_OPENSSL_INCLUDE_DIR}
-              ${UTF8PROC_INCLUDE_DIR}
               SHARED_LINK_FLAGS
               ${GANDIVA_SHARED_LINK_FLAGS}
               SHARED_LINK_LIBS
@@ -224,11 +206,7 @@ endfunction()
 
 set(GANDIVA_INTERNALS_TEST_ARGUMENTS)
 if(WIN32)
-  list(APPEND
-       GANDIVA_INTERNALS_TEST_ARGUMENTS
-       EXTRA_LINK_LIBS
-       LLVM::LLVM_INTERFACE
-       ${GANDIVA_OPENSSL_LIBS})
+  list(APPEND GANDIVA_INTERNALS_TEST_ARGUMENTS EXTRA_LINK_LIBS LLVM::LLVM_INTERFACE)
 endif()
 add_gandiva_test(internals-test
                  SOURCES
@@ -240,27 +218,22 @@ add_gandiva_test(internals-test
                  llvm_generator_test.cc
                  annotator_test.cc
                  tree_expr_test.cc
-                 encrypt_utils_test.cc
                  expr_decomposer_test.cc
                  expression_registry_test.cc
                  selection_vector_test.cc
                  lru_cache_test.cc
                  to_date_holder_test.cc
                  simple_arena_test.cc
-                 regex_functions_holder_test.cc
+                 like_holder_test.cc
                  decimal_type_util_test.cc
                  random_generator_holder_test.cc
-                 hash_utils_test.cc
                  gdv_function_stubs_test.cc
-                 interval_holder_test.cc
+                 array_ops_test.cc
                  EXTRA_DEPENDENCIES
                  LLVM::LLVM_INTERFACE
-                 ${GANDIVA_OPENSSL_LIBS}
                  EXTRA_INCLUDES
                  $<TARGET_PROPERTY:LLVM::LLVM_INTERFACE,INTERFACE_INCLUDE_DIRECTORIES>
-                 ${GANDIVA_INTERNALS_TEST_ARGUMENTS}
-                 ${GANDIVA_OPENSSL_INCLUDE_DIR}
-                 ${UTF8PROC_INCLUDE_DIR})
+                 ${GANDIVA_INTERNALS_TEST_ARGUMENTS})
 
 if(ARROW_GANDIVA_JAVA)
   add_subdirectory(jni)

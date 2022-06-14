@@ -17,18 +17,18 @@
 
 #pragma once
 
-#include <cmath>
 #include <string>
 
 #include "arrow/util/logging.h"
-#include "gandiva/decimal_scalar.h"
 #include "gandiva/visibility.h"
 
 namespace gandiva {
 
 class VectorReadValidityDex;
 class VectorReadFixedLenValueDex;
+class VectorReadFixedLenValueListDex;
 class VectorReadVarLenValueDex;
+class VectorReadVarLenValueListDex;
 class LocalBitMapValidityDex;
 class LiteralDex;
 class TrueDex;
@@ -49,7 +49,9 @@ class GANDIVA_EXPORT DexVisitor {
 
   virtual void Visit(const VectorReadValidityDex& dex) = 0;
   virtual void Visit(const VectorReadFixedLenValueDex& dex) = 0;
+  virtual void Visit(const VectorReadFixedLenValueListDex& dex) = 0;
   virtual void Visit(const VectorReadVarLenValueDex& dex) = 0;
+  virtual void Visit(const VectorReadVarLenValueListDex& dex) = 0;
   virtual void Visit(const LocalBitMapValidityDex& dex) = 0;
   virtual void Visit(const TrueDex& dex) = 0;
   virtual void Visit(const FalseDex& dex) = 0;
@@ -62,9 +64,6 @@ class GANDIVA_EXPORT DexVisitor {
   virtual void Visit(const BooleanOrDex& dex) = 0;
   virtual void Visit(const InExprDexBase<int32_t>& dex) = 0;
   virtual void Visit(const InExprDexBase<int64_t>& dex) = 0;
-  virtual void Visit(const InExprDexBase<float>& dex) = 0;
-  virtual void Visit(const InExprDexBase<double>& dex) = 0;
-  virtual void Visit(const InExprDexBase<gandiva::DecimalScalar128>& dex) = 0;
   virtual void Visit(const InExprDexBase<std::string>& dex) = 0;
 };
 
@@ -75,7 +74,9 @@ class GANDIVA_EXPORT DexVisitor {
 class GANDIVA_EXPORT DexDefaultVisitor : public DexVisitor {
   VISIT_DCHECK(VectorReadValidityDex)
   VISIT_DCHECK(VectorReadFixedLenValueDex)
+  VISIT_DCHECK(VectorReadFixedLenValueListDex)
   VISIT_DCHECK(VectorReadVarLenValueDex)
+  VISIT_DCHECK(VectorReadVarLenValueListDex)
   VISIT_DCHECK(LocalBitMapValidityDex)
   VISIT_DCHECK(TrueDex)
   VISIT_DCHECK(FalseDex)
@@ -88,9 +89,6 @@ class GANDIVA_EXPORT DexDefaultVisitor : public DexVisitor {
   VISIT_DCHECK(BooleanOrDex)
   VISIT_DCHECK(InExprDexBase<int32_t>)
   VISIT_DCHECK(InExprDexBase<int64_t>)
-  VISIT_DCHECK(InExprDexBase<float>)
-  VISIT_DCHECK(InExprDexBase<double>)
-  VISIT_DCHECK(InExprDexBase<gandiva::DecimalScalar128>)
   VISIT_DCHECK(InExprDexBase<std::string>)
 };
 

@@ -32,6 +32,12 @@ class ExportedFuncsBase {
   virtual void AddMappings(Engine* engine) const = 0;
 };
 
+// Class for exporting Array functions
+class ExportedArrayFunctions : public ExportedFuncsBase {
+  void AddMappings(Engine* engine) const override;
+};
+REGISTER_EXPORTED_FUNCS(ExportedArrayFunctions);
+
 // Class for exporting Stub functions
 class ExportedStubFunctions : public ExportedFuncsBase {
   void AddMappings(Engine* engine) const override;
@@ -55,17 +61,5 @@ class ExportedDecimalFunctions : public ExportedFuncsBase {
   void AddMappings(Engine* engine) const override;
 };
 REGISTER_EXPORTED_FUNCS(ExportedDecimalFunctions);
-
-// Class for exporting String functions
-class ExportedStringFunctions : public ExportedFuncsBase {
-  void AddMappings(Engine* engine) const override;
-};
-REGISTER_EXPORTED_FUNCS(ExportedStringFunctions);
-
-// Class for exporting Hash functions
-class ExportedHashFunctions : public ExportedFuncsBase {
-  void AddMappings(Engine* engine) const override;
-};
-REGISTER_EXPORTED_FUNCS(ExportedHashFunctions);
 
 }  // namespace gandiva
