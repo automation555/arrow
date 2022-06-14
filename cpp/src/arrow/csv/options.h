@@ -188,14 +188,17 @@ struct ARROW_EXPORT WriteOptions {
   /// Whether to write an initial header line with column names
   bool include_header = true;
 
+  /// Whether escaping is used
+  bool escaping = true;
+
+  /// Escaping character (if `escaping` is true)
+  char escape_char = '"';
+
   /// \brief Maximum number of rows processed at a time
   ///
   /// The CSV writer converts and writes data in batches of N rows.
   /// This number can impact performance.
   int32_t batch_size = 1024;
-
-  /// Field delimiter
-  char delimiter = ',';
 
   /// \brief The string to write for null values. Quotes are not allowed in this string.
   std::string null_string;
