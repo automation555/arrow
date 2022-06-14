@@ -245,7 +245,6 @@ class ARROW_EXPORT TableBatchReader : public RecordBatchReader {
  public:
   /// \brief Construct a TableBatchReader for the given table
   explicit TableBatchReader(const Table& table);
-  explicit TableBatchReader(std::shared_ptr<Table> table);
 
   std::shared_ptr<Schema> schema() const override;
 
@@ -258,7 +257,6 @@ class ARROW_EXPORT TableBatchReader : public RecordBatchReader {
   void set_chunksize(int64_t chunksize);
 
  private:
-  std::shared_ptr<Table> owned_table_;
   const Table& table_;
   std::vector<ChunkedArray*> column_data_;
   std::vector<int> chunk_numbers_;
@@ -295,14 +293,18 @@ Result<std::shared_ptr<Table>> ConcatenateTables(
 
 /// \brief Promotes a table to conform to the given schema.
 ///
-/// If a field in the schema does not have a corresponding column in the
-/// table, a column of nulls will be added to the resulting table.
-/// If the corresponding column is of type Null, it will be promoted to
-/// the type specified by schema, with null values filled.
+/// If a field in the schema does not have a corresponding column in
+/// the table, a column of nulls will be added to the resulting table.
+/// If the corresponding column is of type Null, it will be promoted
+/// to the type specified by schema, with null values filled. If Arrow
+/// was built with ARROW_COMPUTE, then the column will be casted to
+/// the type specified by the schema.
+///
 /// Returns an error:
 /// - if the corresponding column's type is not compatible with the
 ///   schema.
 /// - if there is a column in the table that does not exist in the schema.
+/// - if the cast fails or casting would be required but is not available.
 ///
 /// \param[in] table the input Table
 /// \param[in] schema the target schema to promote to

@@ -34,6 +34,7 @@
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/random.h"
 #include "arrow/type.h"
+#include "arrow/util/config.h"
 #include "arrow/util/key_value_metadata.h"
 
 namespace arrow {
@@ -417,8 +418,9 @@ TEST_F(TestPromoteTableToSchema, IncompatibleTypes) {
   // Invalid promotion: int32 to null.
   ASSERT_RAISES(Invalid, PromoteTableToSchema(table, schema({field("field", null())})));
 
-  // Invalid promotion: int32 to uint32.
-  ASSERT_RAISES(Invalid, PromoteTableToSchema(table, schema({field("field", uint32())})));
+  // Invalid promotion: int32 to list.
+  ASSERT_RAISES(Invalid,
+                PromoteTableToSchema(table, schema({field("field", list(int32()))})));
 }
 
 TEST_F(TestPromoteTableToSchema, IncompatibleNullity) {
@@ -515,6 +517,42 @@ TEST_F(ConcatenateTablesWithPromotionTest, Simple) {
   ASSERT_OK_AND_ASSIGN(result, ConcatenateTables({t2, t1}, GetOptions()));
   ASSERT_OK_AND_ASSIGN(expected, ConcatenateTables({t3, t1}));
   AssertTablesEqualUnorderedFields(*expected, *result);
+}
+
+TEST_F(ConcatenateTablesWithPromotionTest, Unify) {
+  auto t1 = TableFromJSON(schema({field("f0", int32())}), {"[[0], [1]]"});
+  auto t2 = TableFromJSON(schema({field("f0", int64())}), {"[[2], [3]]"});
+  auto t3 = TableFromJSON(schema({field("f0", null())}), {"[[null], [null]]"});
+
+  auto expected_int64 =
+      TableFromJSON(schema({field("f0", int64())}), {"[[0], [1], [2], [3]]"});
+  auto expected_null =
+      TableFromJSON(schema({field("f0", int32())}), {"[[0], [1], [null], [null]]"});
+
+  ConcatenateTablesOptions options;
+  EXPECT_RAISES_WITH_MESSAGE_THAT(Invalid,
+                                  ::testing::HasSubstr("Schema at index 1 was different"),
+                                  ConcatenateTables({t1, t2}, options));
+  EXPECT_RAISES_WITH_MESSAGE_THAT(Invalid,
+                                  ::testing::HasSubstr("Schema at index 1 was different"),
+                                  ConcatenateTables({t1, t3}, options));
+
+  options.unify_schemas = true;
+  EXPECT_RAISES_WITH_MESSAGE_THAT(Invalid,
+                                  ::testing::HasSubstr("Field f0 has incompatible types"),
+                                  ConcatenateTables({t1, t2}, options));
+  ASSERT_OK_AND_ASSIGN(auto actual, ConcatenateTables({t1, t3}, options));
+  AssertTablesEqual(*expected_null, *actual, /*same_chunk_layout=*/false);
+
+  options.field_merge_options.promote_numeric_width = true;
+#ifdef ARROW_COMPUTE
+  ASSERT_OK_AND_ASSIGN(actual, ConcatenateTables({t1, t2}, options));
+  AssertTablesEqual(*expected_int64, *actual, /*same_chunk_layout=*/false);
+#else
+  EXPECT_RAISES_WITH_MESSAGE_THAT(
+      Invalid, ::testing::HasSubstr("must be built with ARROW_COMPUTE"),
+      ConcatenateTables({t1, t2}, options));
+#endif
 }
 
 TEST_F(TestTable, Slice) {
@@ -767,45 +805,6 @@ TEST_F(TestTableBatchReader, Chunksize) {
   ASSERT_EQ(10, batch->num_rows());
 
   ASSERT_OK(i1.ReadNext(&batch));
-  ASSERT_EQ(nullptr, batch);
-}
-
-TEST_F(TestTableBatchReader, NoColumns) {
-  std::shared_ptr<Table> table =
-      Table::Make(schema({}), std::vector<std::shared_ptr<Array>>{}, 100);
-  TableBatchReader reader(*table);
-  reader.set_chunksize(60);
-
-  std::shared_ptr<RecordBatch> batch;
-  ASSERT_OK(reader.ReadNext(&batch));
-  ASSERT_OK(batch->ValidateFull());
-  ASSERT_EQ(60, batch->num_rows());
-
-  ASSERT_OK(reader.ReadNext(&batch));
-  ASSERT_OK(batch->ValidateFull());
-  ASSERT_EQ(40, batch->num_rows());
-
-  ASSERT_OK(reader.ReadNext(&batch));
-  ASSERT_EQ(nullptr, batch);
-}
-
-TEST_F(TestTableBatchReader, OwnedTableNoColumns) {
-  std::shared_ptr<Table> table =
-      Table::Make(schema({}), std::vector<std::shared_ptr<Array>>{}, 100);
-  TableBatchReader reader(table);
-  table.reset();
-  reader.set_chunksize(80);
-
-  std::shared_ptr<RecordBatch> batch;
-  ASSERT_OK(reader.ReadNext(&batch));
-  ASSERT_OK(batch->ValidateFull());
-  ASSERT_EQ(80, batch->num_rows());
-
-  ASSERT_OK(reader.ReadNext(&batch));
-  ASSERT_OK(batch->ValidateFull());
-  ASSERT_EQ(20, batch->num_rows());
-
-  ASSERT_OK(reader.ReadNext(&batch));
   ASSERT_EQ(nullptr, batch);
 }
 

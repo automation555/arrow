@@ -978,6 +978,114 @@ class TestUnifySchemas : public TestSchema {
           << lhs_field->ToString() << " vs " << rhs_field->ToString();
     }
   }
+
+  void CheckUnifyAsymmetric(
+      const std::shared_ptr<Field>& field1, const std::shared_ptr<Field>& field2,
+      const std::shared_ptr<Field>& expected,
+      const Field::MergeOptions& options = Field::MergeOptions::Defaults()) {
+    ARROW_SCOPED_TRACE("options: ", options);
+    ARROW_SCOPED_TRACE("field2: ", field2->ToString());
+    ARROW_SCOPED_TRACE("field1: ", field1->ToString());
+    ASSERT_OK_AND_ASSIGN(auto merged, field1->MergeWith(field2, options));
+    AssertFieldEqual(merged, expected);
+  }
+
+  void CheckUnify(const std::shared_ptr<Field>& field1,
+                  const std::shared_ptr<Field>& field2,
+                  const std::shared_ptr<Field>& expected,
+                  const Field::MergeOptions& options = Field::MergeOptions::Defaults()) {
+    CheckUnifyAsymmetric(field1, field2, expected, options);
+    CheckUnifyAsymmetric(field2, field1, expected, options);
+  }
+
+  void CheckUnifyFails(
+      const std::shared_ptr<Field>& field1, const std::shared_ptr<Field>& field2,
+      const Field::MergeOptions& options = Field::MergeOptions::Defaults()) {
+    ARROW_SCOPED_TRACE("options: ", options);
+    ARROW_SCOPED_TRACE("field2: ", field2->ToString());
+    ARROW_SCOPED_TRACE("field1: ", field1->ToString());
+    ASSERT_RAISES(Invalid, field1->MergeWith(field2, options));
+    ASSERT_RAISES(Invalid, field2->MergeWith(field1, options));
+  }
+
+  void CheckUnify(const std::shared_ptr<DataType>& left,
+                  const std::shared_ptr<DataType>& right,
+                  const std::shared_ptr<DataType>& expected,
+                  const Field::MergeOptions& options = Field::MergeOptions::Defaults()) {
+    auto field1 = field("a", left);
+    auto field2 = field("a", right);
+    CheckUnify(field1, field2, field("a", expected), options);
+
+    field1 = field("a", left, /*nullable=*/false);
+    field2 = field("a", right, /*nullable=*/false);
+    CheckUnify(field1, field2, field("a", expected, /*nullable=*/false), options);
+
+    field1 = field("a", left);
+    field2 = field("a", right, /*nullable=*/false);
+    CheckUnify(field1, field2, field("a", expected, /*nullable=*/true), options);
+
+    field1 = field("a", left, /*nullable=*/false);
+    field2 = field("a", right);
+    CheckUnify(field1, field2, field("a", expected, /*nullable=*/true), options);
+  }
+
+  void CheckUnifyAsymmetric(
+      const std::shared_ptr<DataType>& left, const std::shared_ptr<DataType>& right,
+      const std::shared_ptr<DataType>& expected,
+      const Field::MergeOptions& options = Field::MergeOptions::Defaults()) {
+    auto field1 = field("a", left);
+    auto field2 = field("a", right);
+    CheckUnifyAsymmetric(field1, field2, field("a", expected), options);
+
+    field1 = field("a", left, /*nullable=*/false);
+    field2 = field("a", right, /*nullable=*/false);
+    CheckUnifyAsymmetric(field1, field2, field("a", expected, /*nullable=*/false),
+                         options);
+
+    field1 = field("a", left);
+    field2 = field("a", right, /*nullable=*/false);
+    CheckUnifyAsymmetric(field1, field2, field("a", expected, /*nullable=*/true),
+                         options);
+
+    field1 = field("a", left, /*nullable=*/false);
+    field2 = field("a", right);
+    CheckUnifyAsymmetric(field1, field2, field("a", expected, /*nullable=*/true),
+                         options);
+  }
+
+  void CheckUnifyFails(
+      const std::shared_ptr<DataType>& left, const std::shared_ptr<DataType>& right,
+      const Field::MergeOptions& options = Field::MergeOptions::Defaults()) {
+    auto field1 = field("a", left);
+    auto field2 = field("a", right);
+    CheckUnifyFails(field1, field2, options);
+  }
+
+  void CheckUnify(const std::shared_ptr<DataType>& from,
+                  const std::vector<std::shared_ptr<DataType>>& to,
+                  const Field::MergeOptions& options = Field::MergeOptions::Defaults()) {
+    for (const auto& ty : to) {
+      CheckUnify(from, ty, ty, options);
+    }
+  }
+
+  void CheckUnifyFails(
+      const std::shared_ptr<DataType>& from,
+      const std::vector<std::shared_ptr<DataType>>& to,
+      const Field::MergeOptions& options = Field::MergeOptions::Defaults()) {
+    for (const auto& ty : to) {
+      CheckUnifyFails(from, ty, options);
+    }
+  }
+
+  void CheckUnifyFails(
+      const std::vector<std::shared_ptr<DataType>>& from,
+      const std::vector<std::shared_ptr<DataType>>& to,
+      const Field::MergeOptions& options = Field::MergeOptions::Defaults()) {
+    for (const auto& ty : from) {
+      CheckUnifyFails(ty, to, options);
+    }
+  }
 };
 
 TEST_F(TestUnifySchemas, EmptyInput) { ASSERT_RAISES(Invalid, UnifySchemas({})); }
@@ -1067,6 +1175,242 @@ TEST_F(TestUnifySchemas, MoreSchemas) {
   AssertSchemaEqualsUnorderedFields(
       *result, *schema({int32_field->WithNullable(true), uint8_field->WithNullable(false),
                         utf8_field->WithNullable(true)}));
+}
+
+TEST_F(TestUnifySchemas, Numeric) {
+  auto options = Field::MergeOptions::Defaults();
+  options.promote_numeric_width = true;
+  options.promote_integer_float = true;
+  options.promote_integer_sign = true;
+  CheckUnify(uint8(),
+             {int8(), uint16(), int16(), uint32(), int32(), uint64(), int64(), float32(),
+              float64()},
+             options);
+  CheckUnify(int8(), {int16(), int32(), int64(), float32(), float64()}, options);
+  CheckUnify(uint16(),
+             {int16(), uint32(), int32(), uint64(), int64(), float32(), float64()},
+             options);
+  CheckUnify(int16(), {int32(), int64(), float32(), float64()}, options);
+  CheckUnify(uint32(), {int32(), uint64(), int64(), float32(), float64()}, options);
+  CheckUnify(int32(), {int64(), float32(), float64()}, options);
+  CheckUnify(uint64(), {int64(), float64()}, options);
+  CheckUnify(int64(), {float64()}, options);
+  CheckUnify(float16(), {float32(), float64()}, options);
+  CheckUnify(float32(), {float64()}, options);
+  CheckUnify(uint64(), float32(), float64(), options);
+  CheckUnify(int64(), float32(), float64(), options);
+
+  options.promote_integer_sign = false;
+  CheckUnify(uint8(), {uint16(), uint32(), uint64()}, options);
+  CheckUnify(int8(), {int16(), int32(), int64()}, options);
+  CheckUnifyFails(uint8(), {int8(), int16(), int32(), int64()}, options);
+  CheckUnify(uint16(), {uint32(), uint64()}, options);
+  CheckUnify(int16(), {int32(), int64()}, options);
+  CheckUnifyFails(uint16(), {int16(), int32(), int64()}, options);
+  CheckUnify(uint32(), {uint64()}, options);
+  CheckUnify(int32(), {int64()}, options);
+  CheckUnifyFails(uint32(), {int32(), int64()}, options);
+  CheckUnifyFails(uint64(), {int64()}, options);
+
+  options.promote_integer_sign = true;
+  options.promote_integer_float = false;
+  CheckUnifyFails(IntTypes(), FloatingPointTypes(), options);
+
+  options.promote_integer_float = true;
+  options.promote_numeric_width = false;
+  CheckUnifyFails(int8(), {int16(), int32(), int64()}, options);
+  CheckUnifyFails(int16(), {int32(), int64()}, options);
+  CheckUnifyFails(int32(), {int64()}, options);
+}
+
+TEST_F(TestUnifySchemas, Decimal) {
+  auto options = Field::MergeOptions::Defaults();
+
+  options.promote_decimal_float = true;
+  CheckUnify(decimal128(3, 2), {float32(), float64()}, options);
+  CheckUnify(decimal256(3, 2), {float32(), float64()}, options);
+
+  options.promote_integer_decimal = true;
+  CheckUnify(int32(), decimal128(3, 2), decimal128(3, 2), options);
+  CheckUnify(int32(), decimal128(3, -2), decimal128(3, -2), options);
+
+  options.promote_decimal = true;
+  CheckUnify(decimal128(3, 2), decimal128(5, 2), decimal128(5, 2), options);
+  CheckUnify(decimal128(3, 2), decimal128(5, 3), decimal128(5, 3), options);
+  CheckUnify(decimal128(3, 2), decimal128(5, 1), decimal128(6, 2), options);
+  CheckUnify(decimal128(3, 2), decimal128(5, -2), decimal128(9, 2), options);
+  CheckUnify(decimal128(3, -2), decimal128(5, -2), decimal128(5, -2), options);
+
+  // int32() is essentially decimal128(10, 0)
+  CheckUnify(int32(), decimal128(3, 2), decimal128(12, 2), options);
+  CheckUnify(int32(), decimal128(3, -2), decimal128(10, 0), options);
+
+  CheckUnifyFails(decimal256(1, 0), decimal128(1, 0), options);
+  CheckUnifyFails(int64(), decimal128(38, 37), options);
+
+  options.promote_numeric_width = true;
+  CheckUnify(decimal128(3, 2), decimal256(5, 2), decimal256(5, 2), options);
+  CheckUnify(int32(), decimal128(38, 37), decimal256(47, 37), options);
+
+  CheckUnifyFails(int64(), decimal256(76, 75), options);
+}
+
+TEST_F(TestUnifySchemas, Temporal) {
+  auto options = Field::MergeOptions::Defaults();
+
+  options.promote_date = true;
+  CheckUnify(date32(), {date64()}, options);
+
+  options.promote_time = true;
+  CheckUnify(time32(TimeUnit::SECOND),
+             {time32(TimeUnit::MILLI), time64(TimeUnit::MICRO), time64(TimeUnit::NANO)},
+             options);
+  CheckUnify(time32(TimeUnit::MILLI), {time64(TimeUnit::MICRO), time64(TimeUnit::NANO)},
+             options);
+  CheckUnify(time64(TimeUnit::MICRO), {time64(TimeUnit::NANO)}, options);
+
+  options.promote_duration = true;
+  CheckUnify(
+      duration(TimeUnit::SECOND),
+      {duration(TimeUnit::MILLI), duration(TimeUnit::MICRO), duration(TimeUnit::NANO)},
+      options);
+  CheckUnify(duration(TimeUnit::MILLI),
+             {duration(TimeUnit::MICRO), duration(TimeUnit::NANO)}, options);
+  CheckUnify(duration(TimeUnit::MICRO), {duration(TimeUnit::NANO)}, options);
+
+  options.promote_timestamp = true;
+  CheckUnify(
+      timestamp(TimeUnit::SECOND),
+      {timestamp(TimeUnit::MILLI), timestamp(TimeUnit::MICRO), timestamp(TimeUnit::NANO)},
+      options);
+  CheckUnify(timestamp(TimeUnit::MILLI),
+             {timestamp(TimeUnit::MICRO), timestamp(TimeUnit::NANO)}, options);
+  CheckUnify(timestamp(TimeUnit::MICRO), {timestamp(TimeUnit::NANO)}, options);
+
+  CheckUnifyFails(timestamp(TimeUnit::SECOND), timestamp(TimeUnit::SECOND, "UTC"),
+                  options);
+  CheckUnifyFails(timestamp(TimeUnit::SECOND, "America/New_York"),
+                  timestamp(TimeUnit::SECOND, "UTC"), options);
+}
+
+TEST_F(TestUnifySchemas, Binary) {
+  auto options = Field::MergeOptions::Defaults();
+  options.promote_large = true;
+  options.promote_binary = true;
+  CheckUnify(utf8(), {large_utf8(), binary(), large_binary()}, options);
+  CheckUnify(binary(), {large_binary()}, options);
+  CheckUnify(fixed_size_binary(2), {fixed_size_binary(2), binary(), large_binary()},
+             options);
+  CheckUnify(fixed_size_binary(2), fixed_size_binary(4), binary(), options);
+
+  options.promote_large = false;
+  CheckUnifyFails({utf8(), binary()}, {large_utf8(), large_binary()});
+  CheckUnifyFails(fixed_size_binary(2), BaseBinaryTypes());
+
+  options.promote_binary = false;
+  CheckUnifyFails(utf8(), {binary(), large_binary(), fixed_size_binary(2)});
+}
+
+TEST_F(TestUnifySchemas, List) {
+  auto options = Field::MergeOptions::Defaults();
+  options.promote_numeric_width = true;
+  CheckUnifyFails(fixed_size_list(int8(), 2),
+                  {fixed_size_list(int8(), 3), list(int8()), large_list(int8())},
+                  options);
+
+  options.promote_large = true;
+  CheckUnify(list(int8()), {large_list(int8())}, options);
+  CheckUnify(fixed_size_list(int8(), 2), {list(int8()), large_list(int8())}, options);
+
+  options.promote_nested = true;
+  CheckUnify(list(int8()), {list(int16()), list(int32()), list(int64())}, options);
+  CheckUnify(fixed_size_list(int8(), 2),
+             {fixed_size_list(int16(), 2), list(int16()), list(int32()), list(int64())},
+             options);
+
+  auto ty = list(field("foo", int8(), /*nullable=*/false));
+  CheckUnifyAsymmetric(ty, list(int8()), list(field("foo", int8(), /*nullable=*/true)),
+                       options);
+  CheckUnifyAsymmetric(ty, list(field("bar", int16(), /*nullable=*/false)),
+                       list(field("foo", int16(), /*nullable=*/false)), options);
+}
+
+TEST_F(TestUnifySchemas, Map) {
+  auto options = Field::MergeOptions::Defaults();
+  options.promote_nested = true;
+  options.promote_numeric_width = true;
+
+  CheckUnify(map(int8(), int32()),
+             {map(int8(), int64()), map(int16(), int32()), map(int64(), int64())},
+             options);
+
+  // Do not test field names, since MapType intentionally ignores them in comparisons
+  // See ARROW-7173, ARROW-14999
+  auto ty = map(field("key", int8(), /*nullable=*/false),
+                field("value", int32(), /*nullable=*/false));
+  CheckUnify(ty, map(int8(), int32()),
+             map(field("key", int8(), /*nullable=*/true),
+                 field("value", int32(), /*nullable=*/true)),
+             options);
+  CheckUnify(ty,
+             map(field("key", int16(), /*nullable=*/false),
+                 field("value", int64(), /*nullable=*/false)),
+             map(field("key", int16(), /*nullable=*/false),
+                 field("value", int64(), /*nullable=*/false)),
+             options);
+}
+
+TEST_F(TestUnifySchemas, Struct) {
+  auto options = Field::MergeOptions::Defaults();
+  options.promote_nested = true;
+  options.promote_numeric_width = true;
+  options.promote_binary = true;
+
+  CheckUnify(struct_({}), struct_({field("a", int8())}), struct_({field("a", int8())}),
+             options);
+
+  CheckUnifyAsymmetric(struct_({field("b", utf8())}), struct_({field("a", int8())}),
+                       struct_({field("b", utf8()), field("a", int8())}), options);
+  CheckUnifyAsymmetric(struct_({field("a", int8())}), struct_({field("b", utf8())}),
+                       struct_({field("a", int8()), field("b", utf8())}), options);
+
+  CheckUnify(struct_({field("b", utf8())}), struct_({field("b", binary())}),
+             struct_({field("b", binary())}), options);
+
+  CheckUnifyAsymmetric(
+      struct_({field("a", int8()), field("b", utf8()), field("a", int64())}),
+      struct_({field("b", binary())}),
+      struct_({field("a", int8()), field("b", binary()), field("a", int64())}), options);
+
+  ASSERT_RAISES(
+      Invalid,
+      field("foo", struct_({field("a", int8()), field("b", utf8()), field("a", int64())}))
+          ->MergeWith(field("foo", struct_({field("a", int64())})), options));
+}
+
+TEST_F(TestUnifySchemas, Dictionary) {
+  auto options = Field::MergeOptions::Defaults();
+  options.promote_dictionary = true;
+  options.promote_large = true;
+
+  CheckUnify(dictionary(int8(), utf8()),
+             {
+                 dictionary(int64(), utf8()),
+                 dictionary(int8(), large_utf8()),
+             },
+             options);
+  CheckUnify(dictionary(int8(), utf8(), /*ordered=*/true),
+             {
+                 dictionary(int64(), utf8(), /*ordered=*/true),
+                 dictionary(int8(), large_utf8(), /*ordered=*/true),
+             },
+             options);
+  CheckUnifyFails(dictionary(int8(), utf8()),
+                  dictionary(int8(), utf8(), /*ordered=*/true), options);
+
+  options.promote_dictionary_ordered = true;
+  CheckUnify(dictionary(int8(), utf8()), dictionary(int8(), utf8(), /*ordered=*/true),
+             dictionary(int8(), utf8(), /*ordered=*/false), options);
 }
 
 TEST_F(TestUnifySchemas, IncompatibleTypes) {
