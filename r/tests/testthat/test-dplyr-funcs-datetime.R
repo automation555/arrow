@@ -16,8 +16,6 @@
 # under the License.
 
 skip_if(on_old_windows())
-# In 3.4 the lack of tzone attribute causes spurious failures
-skip_if_r_version("3.4.4")
 
 library(lubridate, warn.conflicts = FALSE)
 library(dplyr, warn.conflicts = FALSE)
@@ -46,85 +44,61 @@ test_df <- tibble::tibble(
   integer = 1:2
 )
 
+# a simplified test case using UTC timezone only
+test_df_v2 <- tibble::tibble(
+  datetime = c(as.POSIXct("2017-01-01 00:00:11.3456789", tz = "UTC"), NA) + 1,
+  date = c(as.Date("2021-09-09"), NA),
+  integer = 1:2
+)
+
+
 
 test_that("strptime", {
   t_string <- tibble(x = c("2018-10-07 19:04:05", NA))
-  # lubridate defaults to "UTC" as timezone => t_stamp is in "UTC"
-  t_stamp_with_utc_tz <- tibble(x = c(lubridate::ymd_hms("2018-10-07 19:04:05"), NA))
-  t_stamp_with_pm_tz <- tibble(
-    x = c(lubridate::ymd_hms("2018-10-07 19:04:05", tz = "Pacific/Marquesas"), NA)
-  )
+  t_stamp <- tibble(x = c(lubridate::ymd_hms("2018-10-07 19:04:05"), NA))
 
-  # base::strptime returns a POSIXlt (a list) => we cannot use compare_dplyr_binding
-  # => we use expect_equal for the tests below
-
-  withr::with_timezone("Pacific/Marquesas", {
-    # the default value for strptime's `tz` argument is "", which is interpreted
-    # as the current timezone. we test here if the strptime binding picks up
-    # correctly the current timezone (similarly to the base R version)
-    expect_equal(
-      t_string %>%
-        record_batch() %>%
-        mutate(
-          x = strptime(x, format = "%Y-%m-%d %H:%M:%S")
-        ) %>%
-        collect(),
-      t_stamp_with_pm_tz
-    )
-  })
-
-  # adding a timezone to a timezone-naive timestamp works
-  # and since our TZ when running the test is (typically) Pacific/Marquesas
-  # this also tests that assigning a TZ different from the current session one
-  # works as expected
   expect_equal(
     t_string %>%
-      arrow_table() %>%
+      Table$create() %>%
       mutate(
-        x = strptime(x, format = "%Y-%m-%d %H:%M:%S", tz = "Pacific/Marquesas")
+        x = strptime(x)
       ) %>%
       collect(),
-    t_stamp_with_pm_tz
+    t_stamp,
+    ignore_attr = "tzone"
   )
 
   expect_equal(
     t_string %>%
       Table$create() %>%
       mutate(
-        x = strptime(x, tz = "UTC")
+        x = strptime(x, format = "%Y-%m-%d %H:%M:%S")
       ) %>%
       collect(),
-    t_stamp_with_utc_tz
+    t_stamp,
+    ignore_attr = "tzone"
   )
 
   expect_equal(
     t_string %>%
       Table$create() %>%
       mutate(
-        x = strptime(x, format = "%Y-%m-%d %H:%M:%S", tz = "UTC")
+        x = strptime(x, format = "%Y-%m-%d %H:%M:%S", unit = "ns")
       ) %>%
       collect(),
-    t_stamp_with_utc_tz
+    t_stamp,
+    ignore_attr = "tzone"
   )
 
   expect_equal(
     t_string %>%
       Table$create() %>%
       mutate(
-        x = strptime(x, format = "%Y-%m-%d %H:%M:%S", unit = "ns", tz = "UTC")
+        x = strptime(x, format = "%Y-%m-%d %H:%M:%S", unit = "s")
       ) %>%
       collect(),
-    t_stamp_with_utc_tz
-  )
-
-  expect_equal(
-    t_string %>%
-      Table$create() %>%
-      mutate(
-        x = strptime(x, format = "%Y-%m-%d %H:%M:%S", unit = "s", tz = "UTC")
-      ) %>%
-      collect(),
-    t_stamp_with_utc_tz
+    t_stamp,
+    ignore_attr = "tzone"
   )
 
   tstring <- tibble(x = c("08-05-2008", NA))
@@ -143,47 +117,12 @@ test_that("strptime", {
   )
 })
 
-test_that("strptime returns NA when format doesn't match the data", {
-  df <- tibble(
-    str_date = c("2022-02-07", "2012/02-07", "1975/01-02", "1981/01-07", NA)
-  )
-
-  # base::strptime() returns a POSIXlt object (a list), while the Arrow binding
-  # returns a POSIXct (double) vector => we cannot use compare_dplyr_binding()
-  expect_equal(
-    df %>%
-      arrow_table() %>%
-      mutate(
-        r_obj_parsed_date = strptime("03-27/2022", format = "%m-%d/%Y"),
-        r_obj_parsed_na = strptime("03-27/2022", format = "Y%-%m-%d")
-      ) %>%
-      collect(),
-    df %>%
-      mutate(
-        r_obj_parsed_date = as.POSIXct(strptime("03-27/2022", format = "%m-%d/%Y")),
-        r_obj_parsed_na = as.POSIXct(strptime("03-27/2022", format = "Y%-%m-%d"))
-      ),
-    ignore_attr = "tzone"
-  )
-
-  expect_equal(
-    df %>%
-      record_batch() %>%
-      mutate(parsed_date = strptime(str_date, format = "%Y-%m-%d")) %>%
-      collect(),
-    df %>%
-      mutate(parsed_date = as.POSIXct(strptime(str_date, format = "%Y-%m-%d"))),
-    ignore_attr = "tzone"
-  )
-
-  expect_equal(
-    df %>%
-      arrow_table() %>%
-      mutate(parsed_date = strptime(str_date, format = "%Y/%m-%d")) %>%
-      collect(),
-    df %>%
-      mutate(parsed_date = as.POSIXct(strptime(str_date, format = "%Y/%m-%d"))),
-    ignore_attr = "tzone"
+test_that("errors in strptime", {
+  # Error when tz is passed
+  x <- Expression$field_ref("x")
+  expect_error(
+    call_binding("strptime", x, tz = "PDT"),
+    "Time zone argument not supported in Arrow"
   )
 })
 
@@ -719,7 +658,347 @@ test_that("extract yday from date", {
   )
 })
 
+test_that("round/floor/ceiling on datetime (to nearest second)", {
+
+  skip_on_os("windows") # https://issues.apache.org/jira/browse/ARROW-13168
+
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        out_1 = round_date(datetime),
+        out_2 = floor_date(datetime),
+        out_3 = ceiling_date(datetime, change_on_boundary = FALSE),
+      ) %>%
+      collect(),
+    test_df
+  )
+})
+
+test_that("period unit abbreviation", {
+
+  skip_on_os("windows") # https://issues.apache.org/jira/browse/ARROW-13168
+
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        out_1 = round_date(datetime, "minute"),
+        out_2 = round_date(datetime, "minutes"),
+        out_3 = round_date(datetime, "mins"),
+      ) %>%
+      collect(),
+    test_df
+  )
+})
+
+test_that("period unit extracts integer multiples", {
+
+  skip_on_os("windows") # https://issues.apache.org/jira/browse/ARROW-13168
+
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        out_1 = round_date(datetime, "1 minute"),
+        out_2 = round_date(datetime, "2 minutes"),
+        out_3 = round_date(datetime, "10 minutes")
+      ) %>%
+      collect(),
+    test_df
+  )
+})
+
+# lubridate errors when 60 sec/60 min/24 hour thresholds exceeded.
+# this test checks that arrow does too.
+test_that("period unit maxima are enforced", {
+
+  skip_on_os("windows") # https://issues.apache.org/jira/browse/ARROW-13168
+
+  expect_error(
+    call_binding("round_date", Expression$scalar(Sys.time()), "61 seconds"),
+    "Rounding with second > 60 is not supported"
+  )
+
+  expect_error(
+    call_binding("round_date", Expression$scalar(Sys.time()), "61 minutes"),
+    "Rounding with minute > 60 is not supported"
+  )
+
+  expect_error(
+    call_binding("round_date", Expression$scalar(Sys.time()), "25 hours"),
+    "Rounding with hour > 24 is not supported"
+  )
+
+})
+
+test_that("datetime rounding between 1sec and 1day", {
+
+  skip_on_os("windows") # https://issues.apache.org/jira/browse/ARROW-13168
+
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        out_1 = round_date(datetime, "second"),
+        out_2 = round_date(datetime, "minute"),
+        out_3 = round_date(datetime, "hour"),
+        out_4 = round_date(datetime, "day")
+      ) %>%
+      collect(),
+    test_df
+  )
+})
+
+# lubridate doesn't accept millisecond, microsecond or nanosecond descriptors:
+# instead it supports corresponding fractions of 1 second. these tests added to
+# that arrow verify that fractional second inputs to arrow mirror lubridate
+
+test_that("datetime rounding below 1sec", {
+
+  skip_on_os("windows") # https://issues.apache.org/jira/browse/ARROW-13168
+
+  expect_equal(
+    test_df %>%
+      arrow_table() %>%
+      mutate(out = round_date(datetime, ".001 second")) %>%
+      collect(),
+
+    test_df %>%
+      arrow_table() %>%
+      mutate(out = round_date(datetime, "1 millisecond")) %>%
+      collect()
+  )
+
+  expect_equal(
+    test_df %>%
+      arrow_table() %>%
+      mutate(out = round_date(datetime, ".000001 second")) %>%
+      collect(),
+
+    test_df %>%
+      arrow_table() %>%
+      mutate(out = round_date(datetime, "1 microsecond")) %>%
+      collect()
+  )
+
+  expect_equal(
+    test_df %>%
+      arrow_table() %>%
+      mutate(out = round_date(datetime, ".000000001 second")) %>%
+      collect(),
+
+    test_df %>%
+      arrow_table() %>%
+      mutate(out = round_date(datetime, "1 nanosecond")) %>%
+      collect()
+  )
+
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        out_1 = round_date(datetime, ".01 second"),
+        out_2 = round_date(datetime, ".001 second"),
+        out_3 = round_date(datetime, ".00001 second")
+      ) %>%
+      collect(),
+    test_df
+  )
+})
+
+test_that("datetime round/floor/ceil to month/quarter/year", {
+
+  skip_on_os("windows") # https://issues.apache.org/jira/browse/ARROW-13168
+
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        out_1 = round_date(datetime, "month"),
+        out_2 = round_date(datetime, "quarter"),
+        out_3 = round_date(datetime, "year"),
+      ) %>%
+      collect(),
+    test_df_v2
+  )
+
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        out_1 = floor_date(datetime, "month"),
+        out_2 = floor_date(datetime, "quarter"),
+        out_3 = floor_date(datetime, "year"),
+      ) %>%
+      collect(),
+    test_df_v2
+  )
+
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        out_1 = ceiling_date(datetime, "month", change_on_boundary = FALSE),
+        out_2 = ceiling_date(datetime, "quarter", change_on_boundary = FALSE),
+        out_3 = ceiling_date(datetime, "year", change_on_boundary = FALSE),
+      ) %>%
+      collect(),
+    test_df_v2
+  )
+})
+
+
+test_that("change_on_boundary is respected in ceiling_time", {
+
+  boundary_times <- tibble::tibble(
+    datetime = as.POSIXct(strptime(c(
+      "2022-05-10 00:00:00", # boundary for week (Sunday / week_start = 7)
+      "2022-03-10 00:00:00", # boundary for: day, hour, minute, second, millisecond
+      "2022-03-10 00:00:01", # boundary for: second, millisecond
+      "2022-03-10 00:01:00", # boundary for: second, millisecond, minute
+      "2022-03-10 01:00:00"  # boundary for: second, millisecond, minute, hour
+    ), tz="UTC", format = "%F %T"))
+  )
+
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        out_1 = ceiling_date(datetime, "day"),
+        out_2 = ceiling_date(datetime, "hour"),
+        out_3 = ceiling_date(datetime, "minute"),
+        out_4 = ceiling_date(datetime, "second"),
+        out_5 = ceiling_date(datetime, ".001 second")
+      ) %>%
+      collect(),
+    boundary_times
+  )
+
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        out_1 = ceiling_date(datetime, "day", change_on_boundary = FALSE),
+        out_2 = ceiling_date(datetime, "hour", change_on_boundary = FALSE),
+        out_3 = ceiling_date(datetime, "minute", change_on_boundary = FALSE),
+        out_4 = ceiling_date(datetime, "second", change_on_boundary = FALSE),
+        out_5 = ceiling_date(datetime, ".001 second", change_on_boundary = FALSE)
+      ) %>%
+      collect(),
+    boundary_times
+  )
+
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        out_1 = ceiling_date(datetime, "day", change_on_boundary = TRUE),
+        out_2 = ceiling_date(datetime, "hour", change_on_boundary = TRUE),
+        out_3 = ceiling_date(datetime, "minute", change_on_boundary = TRUE),
+        out_4 = ceiling_date(datetime, "second", change_on_boundary = TRUE),
+        out_5 = ceiling_date(datetime, ".001 second", change_on_boundary = TRUE)
+      ) %>%
+      collect(),
+    boundary_times
+  )
+
+  boundary_dates <- tibble::tibble(
+    date = as.Date(c(
+      "2001-05-10", # regular day
+      "2002-05-10", # regular day
+      "2003-05-10", # regular day
+      "2004-05-10", # regular day
+      "2005-05-10", # regular day
+      "2006-05-10", # regular day
+      "2007-05-10"  # regular day
+    ))
+  )
+
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        out_1 = ceiling_date(date, "day", change_on_boundary = FALSE),
+        out_2 = ceiling_date(date, "day", change_on_boundary = TRUE),
+        out_3 = ceiling_date(date, "day")
+      ) %>%
+      collect(),
+    boundary_dates
+  )
+
+})
+
+
+test_that("round to nearest week, adjusted for week_start", {
+
+  skip_on_os("windows") # https://issues.apache.org/jira/browse/ARROW-13168
+
+  one_week <- tibble::tibble(
+    date = as.Date(c(
+      "2022-04-04", # Monday
+      "2022-04-05", # Tuesday
+      "2022-04-06", # Wednesday
+      "2022-04-07", # Thursday
+      "2022-04-08", # Friday
+      "2022-04-09", # Saturday
+      "2022-04-10"  # Sunday
+    )),
+    datetime = as.POSIXct(date)
+  )
+
+  compare_dplyr_binding(
+    .input %>%
+      mutate(
+        out_1 = round_date(date, "week", week_start = 1),
+        #out_2 = round_date(date, "week", week_start = 2), # doesn't currently work
+        #out_3 = round_date(date, "week", week_start = 3),
+        #out_4 = round_date(date, "week", week_start = 4),
+        #out_5 = round_date(date, "week", week_start = 5),
+        #out_6 = round_date(date, "week", week_start = 6),
+        out_7 = round_date(date, "week", week_start = 7)
+      ) %>%
+      collect(),
+    one_week
+  )
+
+})
+
+# NOTE: lubridate::round_date() sometimes coerces output from Date to POSIXct.
+# this is not the default for the round_temporal() function in libarrow, which
+# is type stable: timestamps stay timestamps, and date32 stays date32. the
+# current implementation preserves the type stability property. consequently
+# there are edge cases where the arrow dplyr binding will not precisely mirror
+# the lubridate original. with that in mind, all tests for date32 rounding coerce
+# the lubridate equivalent back to Date
+
+test_that("round/floor/ceiling on dates (to nearest day)", {
+
+  skip_on_os("windows") # https://issues.apache.org/jira/browse/ARROW-13168
+
+  expect_equal(
+    test_df %>% arrow_table() %>% mutate(out = round_date(date, "1 day")) %>% collect(),
+    test_df %>% mutate(out = round_date(date, "1 day") %>% as.Date())
+  )
+  expect_equal(
+    test_df %>% arrow_table() %>% mutate(out = floor_date(date, "1 day")) %>% collect(),
+    test_df %>% mutate(out = floor_date(date, "1 day") %>% as.Date())
+  )
+  expect_equal(
+    test_df %>% arrow_table() %>% mutate(out = ceiling_date(date, "1 day", change_on_boundary = FALSE)) %>% collect(),
+    test_df %>% mutate(out = ceiling_date(date, "1 day", change_on_boundary = FALSE) %>% as.Date())
+  )
+})
+
+test_that("date rounding below 1 day", {
+
+  skip_on_os("windows") # https://issues.apache.org/jira/browse/ARROW-13168
+
+  expect_equal(
+    test_df_v2 %>% arrow_table() %>% mutate(out = round_date(date, "1 second")) %>% collect(),
+    test_df_v2 %>% mutate(out = round_date(date, "1 second") %>% as.Date())
+  )
+  expect_equal(
+    test_df_v2 %>% arrow_table() %>% mutate(out = round_date(date, "1 millisecond")) %>% collect(),
+    test_df_v2 %>% mutate(out = round_date(date, ".001 second") %>% as.Date())
+  )
+  expect_equal(
+    test_df_v2 %>% arrow_table() %>% mutate(out = round_date(date, "1 hour")) %>% collect(),
+    test_df_v2 %>% mutate(out = round_date(date, "1 hour") %>% as.Date())
+  )
+})
+
+
 test_that("leap_year mirror lubridate", {
+
   compare_dplyr_binding(
     .input %>%
       mutate(x = leap_year(date)) %>%
@@ -747,6 +1026,7 @@ test_that("leap_year mirror lubridate", {
       ))
     )
   )
+
 })
 
 test_that("am/pm mirror lubridate", {
@@ -766,8 +1046,10 @@ test_that("am/pm mirror lubridate", {
         ),
         format = "%Y-%m-%d %H:%M:%S"
       )
+
     )
   )
+
 })
 
 test_that("extract tz", {
@@ -796,16 +1078,16 @@ test_that("extract tz", {
     call_binding("tz", 1L),
     "timezone extraction for objects of class `int32` not supported in Arrow"
   )
-  expect_error(
+   expect_error(
     call_binding("tz", 1.1),
     "timezone extraction for objects of class `double` not supported in Arrow"
   )
 
   # Test one expression
-  expect_error(
-    call_binding("tz", Expression$scalar("2020-10-01")),
-    "timezone extraction for objects of class `string` not supported in Arrow"
-  )
+   expect_error(
+     call_binding("tz", Expression$scalar("2020-10-01")),
+     "timezone extraction for objects of class `string` not supported in Arrow"
+   )
 })
 
 test_that("semester works with temporal types and integers", {
@@ -817,13 +1099,11 @@ test_that("semester works with temporal types and integers", {
 
   # semester extraction from dates
   compare_dplyr_binding(
-    .input %>%
-      mutate(
-        sem_wo_year = semester(dates),
-        sem_w_year = semester(dates, with_year = TRUE)
-      ) %>%
+     .input %>%
+      mutate(sem_wo_year = semester(dates),
+             sem_w_year = semester(dates, with_year = TRUE)) %>%
       collect(),
-    test_df
+     test_df
   )
 
   compare_dplyr_binding(
@@ -857,39 +1137,41 @@ test_that("dst extracts daylight savings time correctly", {
 })
 
 test_that("month() supports integer input", {
-  test_df_month <- tibble(
-    month_as_int = c(1:12, NA)
-  )
+    test_df_month <- tibble(
+      month_as_int = c(1:12, NA)
+    )
 
-  compare_dplyr_binding(
-    .input %>%
-      mutate(month_int_input = month(month_as_int)) %>%
-      collect(),
-    test_df_month
-  )
+    compare_dplyr_binding(
+      .input %>%
+        mutate(month_int_input = month(month_as_int)) %>%
+        collect(),
+      test_df_month
+    )
 
-  compare_dplyr_binding(
-    .input %>%
-      # R returns ordered factor whereas Arrow returns character
-      mutate(
-        month_int_input = as.character(month(month_as_int, label = TRUE))
-      ) %>%
-      collect(),
-    test_df_month
-  )
+    skip_on_os("windows") # https://issues.apache.org/jira/browse/ARROW-13168
 
-  compare_dplyr_binding(
-    .input %>%
-      # R returns ordered factor whereas Arrow returns character
-      mutate(
-        month_int_input = as.character(
-          month(month_as_int, label = TRUE, abbr = FALSE)
-        )
-      ) %>%
-      collect(),
-    test_df_month
-  )
-})
+    compare_dplyr_binding(
+      .input %>%
+        # R returns ordered factor whereas Arrow returns character
+        mutate(
+          month_int_input = as.character(month(month_as_int, label = TRUE))
+        ) %>%
+        collect(),
+      test_df_month
+    )
+
+    compare_dplyr_binding(
+      .input %>%
+        # R returns ordered factor whereas Arrow returns character
+        mutate(
+          month_int_input = as.character(
+            month(month_as_int, label = TRUE, abbr = FALSE)
+          )
+        ) %>%
+        collect(),
+      test_df_month
+    )
+  })
 
 test_that("month() errors with double input and returns NA with int outside 1:12", {
   test_df_month <- tibble(
@@ -929,12 +1211,13 @@ test_that("month() errors with double input and returns NA with int outside 1:12
 })
 
 test_that("date works in arrow", {
+  # https://issues.apache.org/jira/browse/ARROW-13168
+  skip_on_os("windows")
   # this date is specific since lubridate::date() is different from base::as.Date()
   # since as.Date returns the UTC date and date() doesn't
   test_df <- tibble(
     posixct_date = as.POSIXct(c("2012-03-26 23:12:13", NA), tz = "America/New_York"),
-    integer_var = c(32L, NA)
-  )
+    integer_var = c(32L, NA))
 
   r_date_object <- lubridate::ymd_hms("2012-03-26 23:12:13")
 
@@ -981,10 +1264,8 @@ test_that("date works in arrow", {
       select(integer_var) %>%
       mutate(date_int = date(integer_var)) %>%
       collect(),
-    tibble(
-      integer_var = c(32L, NA),
-      date_int = as.Date(c("1970-02-02", NA))
-    )
+    tibble(integer_var = c(32L, NA),
+           date_int = as.Date(c("1970-02-02", NA)))
   )
 })
 
@@ -1052,8 +1333,7 @@ test_that("make_date & make_datetime", {
   compare_dplyr_binding(
     .input %>%
       mutate(
-        composed_datetime_r_obj = make_datetime(1999, 12, 31, 14, 15, 16)
-      ) %>%
+        composed_datetime_r_obj = make_datetime(1999, 12, 31, 14, 15, 16)) %>%
       collect(),
     test_df,
     # the make_datetime binding uses strptime which does not support tz, hence
@@ -1097,8 +1377,7 @@ test_that("ISO_datetime & ISOdate", {
   compare_dplyr_binding(
     .input %>%
       mutate(
-        composed_datetime = ISOdatetime(year, month, day, hour, min, sec, tz = "UTC")
-      ) %>%
+        composed_datetime = ISOdatetime(year, month, day, hour, min, sec, tz = "UTC")) %>%
       collect(),
     test_df,
     # the make_datetime binding uses strptime which does not support tz, hence
@@ -1109,8 +1388,7 @@ test_that("ISO_datetime & ISOdate", {
   compare_dplyr_binding(
     .input %>%
       mutate(
-        composed_datetime_r_obj = ISOdatetime(1999, 12, 31, 14, 15, 16)
-      ) %>%
+        composed_datetime_r_obj = ISOdatetime(1999, 12, 31, 14, 15, 16)) %>%
       collect(),
     test_df,
     # the make_datetime binding uses strptime which does not support tz, hence
@@ -1126,7 +1404,7 @@ test_that("difftime works correctly", {
     ),
     time2 = as.POSIXct(
       c("2021-02-20 00:02:01", "2021-07-31 00:03:54", "2021-10-30 00:05:45", "2021-01-31 00:07:36")
-    ),
+      ),
     secs = c(121L, 234L, 345L, 456L)
   )
 
@@ -1152,6 +1430,7 @@ test_that("difftime works correctly", {
     ignore_attr = TRUE
   )
 
+  skip_on_os("windows")
   test_df_with_tz <- tibble(
     time1 = as.POSIXct(
       c("2021-02-20", "2021-07-31", "2021-10-30", "2021-01-31"),
@@ -1175,7 +1454,7 @@ test_that("difftime works correctly", {
     .input %>%
       mutate(
         secs2 = difftime(
-          as.POSIXct("2022-03-07", tz = "Pacific/Marquesas"),
+          as.POSIXct("2022-03-07", tz = "Europe/Bucharest"),
           time1,
           units = "secs"
         )
@@ -1251,717 +1530,6 @@ test_that("as.difftime()", {
     test_df %>%
       arrow_table() %>%
       mutate(dbl_difftime = as.difftime(dbl, units = "secs")) %>%
-      collect()
-  )
-})
-
-test_that("`decimal_date()` and `date_decimal()`", {
-  test_df <- tibble(
-    a = c(
-      2007.38998954347, 1970.77732069883, 2020.96061799722,
-      2009.43465948477, 1975.71251467871, NA
-    ),
-    b = as.POSIXct(
-      c(
-        "2007-05-23 08:18:30", "1970-10-11 17:19:45", "2020-12-17 14:04:06",
-        "2009-06-08 15:37:01", "1975-09-18 01:37:42", NA
-      )
-    ),
-    c = as.Date(
-      c("2007-05-23", "1970-10-11", "2020-12-17", "2009-06-08", "1975-09-18", NA)
-    )
-  )
-
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        decimal_date_from_POSIXct = decimal_date(b),
-        decimal_date_from_r_POSIXct_obj = decimal_date(as.POSIXct("2022-03-25 15:37:01")),
-        decimal_date_from_r_date_obj = decimal_date(as.Date("2022-03-25")),
-        decimal_date_from_date = decimal_date(c),
-        date_from_decimal = date_decimal(a),
-        date_from_decimal_r_obj = date_decimal(2022.178)
-      ) %>%
-      collect(),
-    test_df,
-    ignore_attr = "tzone"
-  )
-})
-
-test_that("dminutes, dhours, ddays, dweeks, dmonths, dyears", {
-  example_d <- tibble(x = c(1:10, NA))
-  date_to_add <- ymd("2009-08-03", tz = "Pacific/Marquesas")
-
-  # When comparing results we use ignore_attr = TRUE because of the diff in:
-  # attribute 'package' (absent vs. 'lubridate')
-  # class (difftime vs Duration)
-  # attribute 'units' (character vector ('secs') vs. absent)
-
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        dminutes = dminutes(x),
-        dhours = dhours(x),
-        ddays = ddays(x),
-        dweeks = dweeks(x),
-        dmonths = dmonths(x),
-        dyears = dyears(x)
-      ) %>%
-      collect(),
-    example_d,
-    ignore_attr = TRUE
-  )
-
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        dhours = dhours(x),
-        ddays = ddays(x),
-        new_date_1 = date_to_add + ddays,
-        new_date_2 = date_to_add + ddays - dhours(3),
-        new_duration = dhours - ddays
-      ) %>%
-      collect(),
-    example_d,
-    ignore_attr = TRUE
-  )
-
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        r_obj_dminutes = dminutes(1),
-        r_obj_dhours = dhours(2),
-        r_obj_ddays = ddays(3),
-        r_obj_dweeks = dweeks(4),
-        r_obj_dmonths = dmonths(5),
-        r_obj_dyears = dyears(6)
-      ) %>%
-      collect(),
-    tibble(),
-    ignore_attr = TRUE
-  )
-
-  # double -> duration not supported in Arrow.
-  # Error is generated in the C++ code
-  expect_error(
-    test_df %>%
-      arrow_table() %>%
-      mutate(r_obj_dminutes = dminutes(1.12345)) %>%
-      collect()
-  )
-})
-
-test_that("dseconds, dmilliseconds, dmicroseconds, dnanoseconds, dpicoseconds", {
-  example_d <- tibble(x = c(1:10, NA))
-  date_to_add <- ymd("2009-08-03", tz = "Pacific/Marquesas")
-
-  # When comparing results we use ignore_attr = TRUE because of the diff in:
-  # attribute 'package' (absent vs. 'lubridate')
-  # class (difftime vs Duration)
-  # attribute 'units' (character vector ('secs') vs. absent)
-
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        dseconds = dseconds(x),
-        dmilliseconds = dmilliseconds(x),
-        dmicroseconds = dmicroseconds(x),
-        dnanoseconds = dnanoseconds(x),
-      ) %>%
-      collect(),
-    example_d,
-    ignore_attr = TRUE
-  )
-
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        dseconds = dseconds(x),
-        dmicroseconds = dmicroseconds(x),
-        new_date_1 = date_to_add + dseconds,
-        new_date_2 = date_to_add + dseconds - dmicroseconds,
-        new_duration = dseconds - dmicroseconds
-      ) %>%
-      collect(),
-    example_d,
-    ignore_attr = TRUE
-  )
-
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        r_obj_dseconds = dseconds(1),
-        r_obj_dmilliseconds = dmilliseconds(2),
-        r_obj_dmicroseconds = dmicroseconds(3),
-        r_obj_dnanoseconds = dnanoseconds(4)
-      ) %>%
-      collect(),
-    tibble(),
-    ignore_attr = TRUE
-  )
-
-  expect_error(
-    call_binding("dpicoseconds"),
-    "Duration in picoseconds not supported in Arrow"
-  )
-
-  # double -> duration not supported in Arrow.
-  # Error is generated in the C++ code
-  expect_error(
-    test_df %>%
-      arrow_table() %>%
-      mutate(r_obj_dseconds = dseconds(1.12345)) %>%
-      collect()
-  )
-})
-
-test_that("make_difftime()", {
-  test_df <- tibble(
-    seconds = c(3, 4, 5, 6),
-    minutes = c(1.5, 2.3, 4.5, 6.7),
-    hours = c(2, 3, 4, 5),
-    days = c(6, 7, 8, 9),
-    weeks = c(1, 3, 5, NA),
-    number = 10:13
-  )
-
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        duration_from_parts = make_difftime(
-          second = seconds,
-          minute = minutes,
-          hour = hours,
-          day = days,
-          week = weeks,
-          units = "secs"
-        ),
-        duration_from_num = make_difftime(
-          num = number,
-          units = "secs"
-        ),
-        duration_from_r_num = make_difftime(
-          num = 154,
-          units = "secs"
-        ),
-        duration_from_r_parts = make_difftime(
-          minute = 45,
-          day = 2,
-          week = 4,
-          units = "secs"
-        )
-      ) %>%
-      collect(),
-    test_df
-  )
-
-  # named difftime parts other than `second`, `minute`, `hour`, `day` and `week`
-  # are not supported
-  expect_error(
-    expect_warning(
-      test_df %>%
-        arrow_table() %>%
-        mutate(
-          err_difftime = make_difftime(month = 2)
-        ) %>%
-        collect(),
-      paste0(
-        "named `difftime` units other than: `second`, `minute`, `hour`,",
-        " `day`, and `week` not supported in Arrow."
-      )
-    )
-  )
-
-  # units other than "secs" not supported since they are the only ones in common
-  # between R and Arrow
-  compare_dplyr_binding(
-    .input %>%
-      mutate(error_difftime = make_difftime(num = number, units = "mins")) %>%
-      collect(),
-    test_df,
-    warning = TRUE
-  )
-
-  # constructing a difftime from both `num` and parts passed through `...` while
-  # possible with the lubridate function (resulting in a concatenation of the 2
-  # resulting objects), it errors in a dplyr context
-  expect_error(
-    expect_warning(
-      test_df %>%
-        arrow_table() %>%
-        mutate(
-          duration_from_num_and_parts = make_difftime(
-            num = number,
-            second = seconds,
-            minute = minutes,
-            hour = hours,
-            day = days,
-            week = weeks,
-            units = "secs"
-          )
-        ) %>%
-        collect(),
-      "with both `num` and `...` not supported in Arrow"
-    )
-  )
-})
-
-test_that("`as.Date()` and `as_date()`", {
-  test_df <- tibble::tibble(
-    posixct_var = as.POSIXct("2022-02-25 00:00:01", tz = "Pacific/Marquesas"),
-    dt_europe = ymd_hms("2010-08-03 00:50:50", tz = "Europe/London"),
-    dt_utc = ymd_hms("2010-08-03 00:50:50"),
-    date_var = as.Date("2022-02-25"),
-    difference_date = ymd_hms("2010-08-03 00:50:50", tz = "Pacific/Marquesas"),
-    character_ymd_var = "2022-02-25 00:00:01",
-    character_ydm_var = "2022/25/02 00:00:01",
-    integer_var = 32L,
-    integerish_var = 32,
-    double_var = 34.56
-  )
-
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        date_dv1 = as.Date(date_var),
-        date_pv1 = as.Date(posixct_var),
-        date_pv_tz1 = as.Date(posixct_var, tz = "Pacific/Marquesas"),
-        date_utc1 = as.Date(dt_utc),
-        date_europe1 = as.Date(dt_europe),
-        date_char_ymd1 = as.Date(character_ymd_var, format = "%Y-%m-%d %H:%M:%S"),
-        date_char_ydm1 = as.Date(character_ydm_var, format = "%Y/%d/%m %H:%M:%S"),
-        date_int1 = as.Date(integer_var, origin = "1970-01-01"),
-        date_int_origin1 = as.Date(integer_var, origin = "1970-01-03"),
-        date_integerish1 = as.Date(integerish_var, origin = "1970-01-01"),
-        date_dv2 = as_date(date_var),
-        date_pv2 = as_date(posixct_var),
-        date_pv_tz2 = as_date(posixct_var, tz = "Pacific/Marquesas"),
-        date_utc2 = as_date(dt_utc),
-        date_europe2 = as_date(dt_europe),
-        date_char_ymd2 = as_date(character_ymd_var, format = "%Y-%m-%d %H:%M:%S"),
-        date_char_ydm2 = as_date(character_ydm_var, format = "%Y/%d/%m %H:%M:%S"),
-        date_int2 = as_date(integer_var, origin = "1970-01-01"),
-        date_int_origin2 = as_date(integer_var, origin = "1970-01-03"),
-        date_integerish2 = as_date(integerish_var, origin = "1970-01-01")
-      ) %>%
-      collect(),
-    test_df
-  )
-
-  # we do not support multiple tryFormats
-  compare_dplyr_binding(
-    .input %>%
-      mutate(date_char_ymd = as.Date(character_ymd_var,
-        tryFormats = c("%Y-%m-%d", "%Y/%m/%d")
-      )) %>%
-      collect(),
-    test_df,
-    warning = TRUE
-  )
-
-  # strptime does not support a partial format - testing an error surfaced from
-  # C++ (hence not testing the content of the error message)
-  # TODO revisit once - https://issues.apache.org/jira/browse/ARROW-15813
-  expect_error(
-    test_df %>%
-      arrow_table() %>%
-      mutate(date_char_ymd = as_date(character_ymd_var)) %>%
-      collect()
-  )
-
-  expect_error(
-    test_df %>%
-      arrow_table() %>%
-      mutate(date_char_ymd = as.Date(character_ymd_var)) %>%
-      collect(),
-    regexp = "Failed to parse string: '2022-02-25 00:00:01' as a scalar of type timestamp[s]",
-    fixed = TRUE
-  )
-
-
-  # we do not support as.Date() with double/ float (error surfaced from C++)
-  # TODO revisit after https://issues.apache.org/jira/browse/ARROW-15798
-  expect_error(
-    test_df %>%
-      arrow_table() %>%
-      mutate(date_double = as.Date(double_var, origin = "1970-01-01")) %>%
-      collect()
-  )
-
-  # we do not support as_date with double/ float (error surfaced from C++)
-  # TODO: revisit after https://issues.apache.org/jira/browse/ARROW-15798
-  expect_error(
-    test_df %>%
-      arrow_table() %>%
-      mutate(date_double = as_date(double_var, origin = "1970-01-01")) %>%
-      collect()
-  )
-
-  # difference between as.Date() and as_date():
-  # `as.Date()` ignores the `tzone` attribute and uses the value of the `tz` arg
-  # to `as.Date()`
-  # `as_date()` does the opposite: uses the tzone attribute of the POSIXct object
-  # passsed if`tz` is NULL
-  compare_dplyr_binding(
-    .input %>%
-      transmute(
-        date_diff_lubridate = as_date(difference_date),
-        date_diff_base = as.Date(difference_date)
-      ) %>%
-      collect(),
-    test_df
-  )
-})
-
-test_that("`as_datetime()`", {
-  test_df <- tibble(
-    date = as.Date(c("2022-03-22", "2021-07-30", NA)),
-    char_date = c("2022-03-22", "2021-07-30 14:32:47", NA),
-    char_date_non_iso = c("2022-22-03 12:34:56", "2021-30-07 14:32:47", NA),
-    int_date = c(10L, 25L, NA),
-    integerish_date = c(10, 25, NA),
-    double_date = c(10.1, 25.2, NA)
-  )
-
-  test_df %>%
-    arrow_table() %>%
-    mutate(
-      ddate = as_datetime(date),
-      dchar_date_no_tz = as_datetime(char_date),
-      dchar_date_non_iso = as_datetime(char_date_non_iso, format = "%Y-%d-%m %H:%M:%S"),
-      dint_date = as_datetime(int_date, origin = "1970-01-02"),
-      dintegerish_date = as_datetime(integerish_date, origin = "1970-01-02"),
-      dintegerish_date2 = as_datetime(integerish_date, origin = "1970-01-01")
-    ) %>%
-    collect()
-
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        ddate = as_datetime(date),
-        dchar_date_no_tz = as_datetime(char_date),
-        dchar_date_with_tz = as_datetime(char_date, tz = "Pacific/Marquesas"),
-        dint_date = as_datetime(int_date, origin = "1970-01-02"),
-        dintegerish_date = as_datetime(integerish_date, origin = "1970-01-02"),
-        dintegerish_date2 = as_datetime(integerish_date, origin = "1970-01-01")
-      ) %>%
-      collect(),
-    test_df
-  )
-
-  # Arrow does not support conversion of double to date
-  # the below should error with an error message originating in the C++ code
-  expect_error(
-    test_df %>%
-      arrow_table() %>%
-      mutate(
-        ddouble_date = as_datetime(double_date)
-      ) %>%
-      collect(),
-    regexp = "Float value 10.1 was truncated converting to int64"
-  )
-})
-
-test_that("parse_date_time() works with year, month, and date components", {
-  # these functions' internals use some string processing which requires the
-  # RE2 library (not available on Windows with R 3.6)
-  skip_if_not_available("re2")
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        parsed_date_ymd = parse_date_time(string_ymd, orders = "ymd"),
-        parsed_date_dmy = parse_date_time(string_dmy, orders = "dmy"),
-        parsed_date_mdy = parse_date_time(string_mdy, orders = "mdy")
-      ) %>%
-      collect(),
-    tibble::tibble(
-      string_ymd = c(
-        "2021-09-1", "2021/09///2", "2021.09.03", "2021,09,4", "2021:09::5",
-        "2021 09   6", "21-09-07", "21/09/08", "21.09.9", "21,09,10", "21:09:11",
-        # not yet working for strings with no separators, like "20210917", "210918" or "2021Sep19
-        # no separators and %b or %B are even more complicated (and they work in
-        # lubridate). not to mention locale
-        NA
-      ),
-      string_dmy = c(
-        "1-09-2021", "2/09//2021", "03.09.2021", "04,09,2021", "5:::09:2021",
-        "6  09  2021", "07-09-21", "08/09/21", "9.09.21", "10,09,21", "11:09:21",
-        # not yet working for strings with no separators, like "10092021", "100921",
-        NA
-      ),
-      string_mdy = c(
-        "09-01-2021", "09/2/2021", "09.3.2021", "09,04,2021", "09:05:2021",
-        "09 6 2021", "09-7-21", "09/08/21", "09.9.21", "09,10,21", "09:11:21",
-        # not yet working for strings with no separators, like "09102021", "091021",
-        NA
-      )
-    )
-  )
-
-  # locale (affecting "%b% and "%B" formats) does not work properly on Windows
-  # TODO revisit once https://issues.apache.org/jira/browse/ARROW-16443 is done
-  skip_on_os("windows")
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        parsed_date_ymd = parse_date_time(string_ymd, orders = "ymd"),
-        parsed_date_dmy = parse_date_time(string_dmy, orders = "dmy"),
-        parsed_date_mdy = parse_date_time(string_mdy, orders = "mdy")
-      ) %>%
-      collect(),
-    tibble::tibble(
-      string_ymd = c(
-        "2021 Sep 12", "2021 September 13", "21 Sep 14", "21 September 15", NA
-      ),
-      string_dmy = c(
-        "12 Sep 2021", "13 September 2021", "14 Sep 21", "15 September 21", NA
-      ),
-      string_mdy = c(
-        "Sep 12 2021", "September 13 2021", "Sep 14 21", "September 15 21", NA
-      )
-    )
-  )
-})
-
-test_that("parse_date_time() works with a mix of formats and orders", {
-  # these functions' internals use some string processing which requires the
-  # RE2 library (not available on Windows with R 3.6)
-  skip_if_not_available("re2")
-  test_df <- tibble(
-    string_combi = c("2021-09-1", "2/09//2021", "09.3.2021")
-  )
-
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        date_from_string = parse_date_time(
-          string_combi,
-          orders = c("ymd", "%d/%m//%Y", "%m.%d.%Y")
-        )
-      ) %>%
-      collect(),
-    test_df
-  )
-})
-
-test_that("parse_date_time() doesn't work with hour, minutes, and second components", {
-  test_dates_times <- tibble(
-    date_times = c("09-01-17 12:34:56", NA)
-  )
-
-  expect_warning(
-    test_dates_times %>%
-      arrow_table() %>%
-      mutate(parsed_date_ymd = parse_date_time(date_times, orders = "ymd_HMS")) %>%
-      collect(),
-    '"ymd_HMS" `orders` not supported in Arrow'
-  )
-})
-
-test_that("year, month, day date/time parsers", {
-  test_df <- tibble::tibble(
-    ymd_string = c("2022-05-11", "2022/05/12", "22.05-13"),
-    ydm_string = c("2022-11-05", "2022/12/05", "22.13-05"),
-    mdy_string = c("05-11-2022", "05/12/2022", "05.13-22"),
-    myd_string = c("05-2022-11", "05/2022/12", "05.22-14"),
-    dmy_string = c("11-05-2022", "12/05/2022", "13.05-22"),
-    dym_string = c("11-2022-05", "12/2022/05", "13.22-05")
-  )
-
-  # these functions' internals use some string processing which requires the
-  # RE2 library (not available on Windows with R 3.6)
-  skip_if_not_available("re2")
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        ymd_date = ymd(ymd_string),
-        ydm_date = ydm(ydm_string),
-        mdy_date = mdy(mdy_string),
-        myd_date = myd(myd_string),
-        dmy_date = dmy(dmy_string),
-        dym_date = dym(dym_string)
-      ) %>%
-      collect(),
-    test_df
-  )
-
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        ymd_date = ymd(ymd_string, tz = "Pacific/Marquesas"),
-        ydm_date = ydm(ydm_string, tz = "Pacific/Marquesas"),
-        mdy_date = mdy(mdy_string, tz = "Pacific/Marquesas"),
-        myd_date = myd(myd_string, tz = "Pacific/Marquesas"),
-        dmy_date = dmy(dmy_string, tz = "Pacific/Marquesas"),
-        dym_date = dym(dym_string, tz = "Pacific/Marquesas")
-      ) %>%
-      collect(),
-    test_df
-  )
-})
-
-test_that("ym, my & yq parsers", {
-  test_df <- tibble::tibble(
-    ym_string = c("2022-05", "2022/02", "22.03", "1979//12", "88.09", NA),
-    my_string = c("05-2022", "02/2022", "03.22", "12//1979", "09.88", NA),
-    yq_string = c("2007.3", "1970.2", "2020.1", "2009.4", "1975.1", NA),
-    yq_numeric = c(2007.3, 1970.2, 2020.1, 2009.4, 1975.1, NA),
-    yq_space = c("2007 3", "1970 2", "2020 1", "2009 4", "1975 1", NA)
-  )
-
-  # these functions' internals use some string processing which requires the
-  # RE2 library (not available on Windows with R 3.6)
-  skip_if_not_available("re2")
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        ym_date = ym(ym_string),
-        ym_datetime = ym(ym_string, tz = "Pacific/Marquesas"),
-        my_date = my(my_string),
-        my_datetime = my(my_string, tz = "Pacific/Marquesas"),
-        yq_date_from_string = yq(yq_string),
-        yq_datetime_from_string = yq(yq_string, tz = "Pacific/Marquesas"),
-        yq_date_from_numeric = yq(yq_numeric),
-        yq_datetime_from_numeric = yq(yq_numeric, tz = "Pacific/Marquesas"),
-        yq_date_from_string_with_space = yq(yq_space),
-        yq_datetime_from_string_with_space = yq(yq_space, tz = "Pacific/Marquesas"),
-        ym_date2 = parse_date_time(ym_string, orders = c("ym", "ymd")),
-        my_date2 = parse_date_time(my_string, orders = c("my", "myd")),
-        yq_date_from_string2 = parse_date_time(yq_string, orders = "yq"),
-        yq_date_from_numeric2 = parse_date_time(yq_numeric, orders = "yq"),
-        yq_date_from_string_with_space2 = parse_date_time(yq_space, orders = "yq")
-      ) %>%
-      collect(),
-    test_df
-  )
-})
-
-test_that("lubridate's fast_strptime", {
-
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        y =
-          fast_strptime(
-            x,
-            format = "%Y-%m-%d %H:%M:%S",
-            lt = FALSE
-          )
-      ) %>%
-      collect(),
-    tibble(
-      x = c("2018-10-07 19:04:05", "2022-05-17 21:23:45", NA)
-    )#,
-    # arrow does not preserve the `tzone` attribute
-    # test ignore_attr = TRUE
-  )
-
-  # R object
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        y =
-          fast_strptime(
-            "68-10-07 19:04:05",
-            format = "%y-%m-%d %H:%M:%S",
-            lt = FALSE
-          )
-      ) %>%
-      collect(),
-    tibble(
-      x = c("2018-10-07 19:04:05", NA)
-    )#,
-    # test ignore_attr = TRUE
-  )
-
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        date_multi_formats =
-          fast_strptime(
-            x,
-            format = c("%Y-%m-%d %H:%M:%S", "%m-%d-%Y %H:%M:%S"),
-            lt = FALSE
-          )
-      ) %>%
-      collect(),
-    tibble(
-      x = c("2018-10-07 19:04:05", "10-07-1968 19:04:05")
-    )
-  )
-
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        dttm_with_tz = fast_strptime(
-          dttm_as_string,
-          format = "%Y-%m-%d %H:%M:%S",
-          tz = "Pacific/Marquesas",
-          lt = FALSE
-        )
-      ) %>%
-      collect(),
-    tibble(
-      dttm_as_string =
-        c("2018-10-07 19:04:05", "1969-10-07 19:04:05", NA)
-    )
-  )
-
-  # fast_strptime()'s `cutoff_2000` argument is not supported, but its value is
-  # implicitly set to 68L both in lubridate and in Arrow
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        date_short_year =
-          fast_strptime(
-            x,
-            format = "%y-%m-%d %H:%M:%S",
-            lt = FALSE
-          )
-      ) %>%
-      collect(),
-    tibble(
-      x =
-        c("68-10-07 19:04:05", "69-10-07 19:04:05", NA)
-    )#,
-    # arrow does not preserve the `tzone` attribute
-    # test ignore_attr = TRUE
-  )
-
-  # the arrow binding errors for a value different from 68L for `cutoff_2000`
-  compare_dplyr_binding(
-    .input %>%
-      mutate(
-        date_short_year =
-          fast_strptime(
-            x,
-            format = "%y-%m-%d %H:%M:%S",
-            lt = FALSE,
-            cutoff_2000 = 69L
-          )
-      ) %>%
-      collect(),
-    tibble(
-      x = c("68-10-07 19:04:05", "69-10-07 19:04:05", NA)
-    ),
-    warning = TRUE
-  )
-
-  # compare_dplyr_binding would not work here since lt = TRUE returns a list
-  # and it also errors in regular dplyr pipelines
-  expect_warning(
-    tibble(
-      x = c("68-10-07 19:04:05", "69-10-07 19:04:05", NA)
-    ) %>%
-      arrow_table() %>%
-      mutate(
-        date_short_year =
-          fast_strptime(
-            x,
-            format = "%y-%m-%d %H:%M:%S",
-            lt = TRUE
-          )
-      ) %>%
       collect()
   )
 })
