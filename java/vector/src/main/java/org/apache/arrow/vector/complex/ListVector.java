@@ -20,7 +20,6 @@ package org.apache.arrow.vector.complex;
 import static java.util.Collections.singletonList;
 import static org.apache.arrow.memory.util.LargeMemoryUtil.capAtMaxInt;
 import static org.apache.arrow.memory.util.LargeMemoryUtil.checkedCastToInt;
-import static org.apache.arrow.util.Preconditions.checkArgument;
 import static org.apache.arrow.util.Preconditions.checkNotNull;
 
 import java.util.ArrayList;
@@ -29,11 +28,11 @@ import java.util.Collections;
 import java.util.List;
 
 import org.apache.arrow.memory.ArrowBuf;
+import org.apache.arrow.memory.BaseAllocator;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.OutOfMemoryException;
 import org.apache.arrow.memory.util.ArrowBufPointer;
 import org.apache.arrow.memory.util.ByteFunctionHelpers;
-import org.apache.arrow.memory.util.CommonUtil;
 import org.apache.arrow.memory.util.hash.ArrowBufHasher;
 import org.apache.arrow.util.Preconditions;
 import org.apache.arrow.vector.AddOrGetResult;
@@ -51,6 +50,7 @@ import org.apache.arrow.vector.complex.writer.FieldWriter;
 import org.apache.arrow.vector.ipc.message.ArrowFieldNode;
 import org.apache.arrow.vector.types.Types.MinorType;
 import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.DictionaryEncoding;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.util.CallBack;
@@ -85,6 +85,26 @@ public class ListVector extends BaseRepeatedValueVector implements PromotableVec
   private int lastSet;
 
   /**
+   * Creates a ListVector.
+   *
+   * @deprecated Use FieldType or static constructor instead.
+   */
+  @Deprecated
+  public ListVector(String name, BufferAllocator allocator, CallBack callBack) {
+    this(name, allocator, FieldType.nullable(ArrowType.List.INSTANCE), callBack);
+  }
+
+  /**
+   * Creates a ListVector.
+   *
+   * @deprecated Use FieldType or static constructor instead.
+   */
+  @Deprecated
+  public ListVector(String name, BufferAllocator allocator, DictionaryEncoding dictionary, CallBack callBack) {
+    this(name, allocator, new FieldType(true, ArrowType.List.INSTANCE, dictionary, null), callBack);
+  }
+
+  /**
    * Constructs a new instance.
    *
    * @param name The name of the instance.
@@ -103,12 +123,14 @@ public class ListVector extends BaseRepeatedValueVector implements PromotableVec
 
   @Override
   public void initializeChildrenFromFields(List<Field> children) {
-    checkArgument(children.size() == 1,
-            "Lists have one child Field. Found: %s", children.isEmpty() ? "none" : children);
-
+    if (children.size() != 1) {
+      throw new IllegalArgumentException("Lists have only one child. Found: " + children);
+    }
     Field field = children.get(0);
     AddOrGetResult<FieldVector> addOrGetVector = addOrGetVector(field.getFieldType());
-    checkArgument(addOrGetVector.isCreated(), "Child vector already existed: %s", addOrGetVector.getVector());
+    if (!addOrGetVector.isCreated()) {
+      throw new IllegalArgumentException("Child vector already existed: " + addOrGetVector.getVector());
+    }
 
     addOrGetVector.getVector().initializeChildrenFromFields(field.getChildren());
   }
@@ -224,15 +246,8 @@ public class ListVector extends BaseRepeatedValueVector implements PromotableVec
     }
   }
 
-  /**
-   * Get the inner vectors.
-   *
-   * @deprecated This API will be removed as the current implementations no longer support inner vectors.
-   *
-   * @return the inner vectors for this field as defined by the TypeLayout
-   */
-  @Deprecated
   @Override
+  @Deprecated
   public List<BufferBacked> getFieldInnerVectors() {
     throw new UnsupportedOperationException("There are no inner vectors. Use getFieldBuffers");
   }
@@ -303,15 +318,14 @@ public class ListVector extends BaseRepeatedValueVector implements PromotableVec
 
   private void reallocValidityBuffer() {
     final int currentBufferCapacity = checkedCastToInt(validityBuffer.capacity());
-    long newAllocationSize = currentBufferCapacity * 2;
-    if (newAllocationSize == 0) {
-      if (validityAllocationSizeInBytes > 0) {
-        newAllocationSize = validityAllocationSizeInBytes;
-      } else {
-        newAllocationSize = getValidityBufferSizeFromCount(INITIAL_VALUE_ALLOCATION) * 2;
-      }
+    long baseSize = validityAllocationSizeInBytes;
+
+    if (baseSize < (long) currentBufferCapacity) {
+      baseSize = (long) currentBufferCapacity;
     }
-    newAllocationSize = CommonUtil.nextPowerOfTwo(newAllocationSize);
+
+    long newAllocationSize = baseSize * 2L;
+    newAllocationSize = BaseAllocator.nextPowerOfTwo(newAllocationSize);
     assert newAllocationSize >= 1;
 
     if (newAllocationSize > MAX_ALLOCATION_SIZE) {
@@ -665,7 +679,7 @@ public class ListVector extends BaseRepeatedValueVector implements PromotableVec
 
   @Override
   public UnionVector promoteToUnion() {
-    UnionVector vector = new UnionVector("$data$", allocator, /* field type*/ null, callBack);
+    UnionVector vector = new UnionVector("$data$", allocator, callBack);
     replaceDataVector(vector);
     invalidateReader();
     if (callBack != null) {
@@ -684,7 +698,7 @@ public class ListVector extends BaseRepeatedValueVector implements PromotableVec
    * @return Object at given position
    */
   @Override
-  public List<?> getObject(int index) {
+  public Object getObject(int index) {
     if (isSet(index) == 0) {
       return null;
     }
@@ -780,24 +794,6 @@ public class ListVector extends BaseRepeatedValueVector implements PromotableVec
   }
 
   /**
-   * Sets list at index to be null.
-   * @param index position in vector
-   */
-  public void setNull(int index) {
-    while (index >= getValidityAndOffsetValueCapacity()) {
-      reallocValidityAndOffsetBuffers();
-    }
-    if (lastSet >= index) {
-      lastSet = index - 1;
-    }
-    for (int i = lastSet + 1; i <= index; i++) {
-      final int currentOffset = offsetBuffer.getInt(i * OFFSET_WIDTH);
-      offsetBuffer.setInt((i + 1) * OFFSET_WIDTH, currentOffset);
-    }
-    BitVectorHelper.unsetBit(validityBuffer, index);
-  }
-
-  /**
    * Start a new value in the list vector.
    *
    * @param index index of the value to start
@@ -806,9 +802,6 @@ public class ListVector extends BaseRepeatedValueVector implements PromotableVec
   public int startNewValue(int index) {
     while (index >= getValidityAndOffsetValueCapacity()) {
       reallocValidityAndOffsetBuffers();
-    }
-    if (lastSet >= index) {
-      lastSet = index - 1;
     }
     for (int i = lastSet + 1; i <= index; i++) {
       final int currentOffset = offsetBuffer.getInt(i * OFFSET_WIDTH);
@@ -851,7 +844,7 @@ public class ListVector extends BaseRepeatedValueVector implements PromotableVec
     }
     /* valueCount for the data vector is the current end offset */
     final int childValueCount = (valueCount == 0) ? 0 :
-            offsetBuffer.getInt((lastSet + 1) * OFFSET_WIDTH);
+            offsetBuffer.getInt(valueCount * OFFSET_WIDTH);
     /* set the value count of data vector and this will take care of
      * checking whether data buffer needs to be reallocated.
      */
