@@ -16,6 +16,7 @@
 // under the License.
 
 #include "arrow/memory_pool.h"
+#include "arrow/util/atomic_shared_ptr.h"
 
 #include <algorithm>  // IWYU pragma: keep
 #include <atomic>
@@ -36,7 +37,7 @@
 #include "arrow/status.h"
 #include "arrow/util/bit_util.h"
 #include "arrow/util/debug.h"
-#include "arrow/util/int_util_overflow.h"
+#include "arrow/util/int_util_internal.h"
 #include "arrow/util/io_util.h"
 #include "arrow/util/logging.h"  // IWYU pragma: keep
 #include "arrow/util/optional.h"
@@ -536,6 +537,38 @@ int64_t MemoryPool::max_memory() const { return -1; }
 // MemoryPool implementation that delegates its core duty
 // to an Allocator class.
 
+class ImmutableZeros : public Buffer {
+ public:
+  explicit ImmutableZeros(uint8_t* data, int64_t size, MemoryPool* pool)
+      : Buffer(data, size, CPUDevice::memory_manager(pool)), pool_(pool) {}
+
+  ImmutableZeros() : Buffer(nullptr, 0), pool_(nullptr) {}
+
+  ~ImmutableZeros() override;
+
+  // Prevent copies and handle moves explicitly to avoid double free
+  ImmutableZeros(const ImmutableZeros&) = delete;
+  ImmutableZeros& operator=(const ImmutableZeros&) = delete;
+
+  ImmutableZeros(ImmutableZeros&& other) noexcept
+      : Buffer(other.data_, other.size_, other.memory_manager()), pool_(other.pool_) {
+    other.pool_ = nullptr;
+    other.data_ = nullptr;
+    other.size_ = 0;
+  }
+
+  ImmutableZeros& operator=(ImmutableZeros&& other) noexcept {
+    SetMemoryManager(other.memory_manager());
+    std::swap(pool_, other.pool_);
+    std::swap(data_, other.data_);
+    std::swap(size_, other.size_);
+    return *this;
+  }
+
+ private:
+  MemoryPool* pool_ = nullptr;
+};
+
 #ifndef NDEBUG
 static constexpr uint8_t kAllocPoison = 0xBC;
 static constexpr uint8_t kReallocPoison = 0xBD;
@@ -603,7 +636,98 @@ class BaseMemoryPoolImpl : public MemoryPool {
     stats_.UpdateAllocatedBytes(-size);
   }
 
-  void ReleaseUnused() override { Allocator::ReleaseUnused(); }
+ protected:
+  virtual Status AllocateImmutableZeros(int64_t size, uint8_t** out) {
+#ifdef ARROW_DISABLE_MMAP_FOR_IMMUTABLE_ZEROS
+    // TODO: jemalloc and mimalloc support zero-initialized allocations as
+    //  well, which might be faster than allocate + memset.
+    RETURN_NOT_OK(Allocate(size, out));
+    std::memset(*out, 0, size);
+    return Status::OK();
+#else
+    return internal::MemoryMapZeros(size, out);
+#endif
+  }
+
+  void FreeImmutableZeros(uint8_t* buffer, int64_t size) override {
+#ifdef ARROW_DISABLE_MMAP_FOR_IMMUTABLE_ZEROS
+    Free(buffer, size);
+#else
+    internal::MemoryUnmapZeros(buffer, size);
+#endif
+  }
+
+ public:
+  Result<std::shared_ptr<Buffer>> GetImmutableZeros(int64_t size) override {
+    // Thread-safely get the current largest buffer of zeros.
+    auto current_buffer = internal::atomic_load(&immutable_zeros_cache_);
+
+    // If this buffer satisfies the requirements, return it.
+    if (current_buffer && current_buffer->size() >= size) {
+      return std::move(current_buffer);
+    }
+
+    // Acquire the lock for allocating a new buffer.
+    std::lock_guard<std::mutex> gg(immutable_zeros_mutex_);
+
+    // Between our previous atomic load and acquisition of the lock, another
+    // thread may have allocated a buffer. So we need to check again.
+    current_buffer = internal::atomic_load(&immutable_zeros_cache_);
+    if (current_buffer && current_buffer->size() >= size) {
+      return std::move(current_buffer);
+    }
+
+    // Let's now figure out a good size to allocate. This is done
+    // heuristically, with the following rules:
+    //  - allocate at least the requested size (obviously);
+    //  - allocate at least 2x the previous size;
+    //  - allocate at least kMinAllocSize bytes (to avoid lots of small
+    //    allocations).
+    static const int64_t kMinAllocSize = 4096;
+    int64_t alloc_size =
+        std::max(size, current_buffer ? (current_buffer->size() * 2) : kMinAllocSize);
+
+    // Attempt to allocate the block.
+    uint8_t* data = nullptr;
+    auto result = AllocateImmutableZeros(alloc_size, &data);
+
+    // If we fail to do so, fall back to trying to allocate the requested size
+    // exactly as a last-ditch effort.
+    if (!result.ok()) {
+      alloc_size = size;
+      RETURN_NOT_OK(AllocateImmutableZeros(alloc_size, &data));
+    }
+    DCHECK_NE(data, nullptr);
+
+    // Move ownership of the data block into an ImmutableZeros object. It will
+    // free the block when destroyed, i.e. when all shared_ptr references to it
+    // are reset or go out of scope.
+    current_buffer = std::make_shared<ImmutableZeros>(data, alloc_size, this);
+
+    // Store a reference to the new block in the cache, so subsequent calls to
+    // this function (from this thread or from other threads) can use it, too.
+    internal::atomic_store(&immutable_zeros_cache_, current_buffer);
+
+    return std::move(current_buffer);
+  }
+
+  void ReleaseUnused() override {
+    // Get rid of the ImmutableZeros cache if we're the only one using it. If
+    // there are other pieces of code using it, getting rid of the cache won't
+    // deallocate it anyway, so it's better to hold onto it.
+    {
+      auto cache = internal::atomic_load(&immutable_zeros_cache_);
+
+      // Because we now have a copy in our thread, the use count will be 2 if
+      // nothing else is using it.
+      if (cache.use_count() <= 2) {
+        internal::atomic_store(&immutable_zeros_cache_,
+                               std::shared_ptr<ImmutableZeros>());
+      }
+    }
+
+    Allocator::ReleaseUnused();
+  }
 
   int64_t bytes_allocated() const override { return stats_.bytes_allocated(); }
 
@@ -611,6 +735,8 @@ class BaseMemoryPoolImpl : public MemoryPool {
 
  protected:
   internal::MemoryPoolStats stats_;
+  std::shared_ptr<ImmutableZeros> immutable_zeros_cache_;
+  std::mutex immutable_zeros_mutex_;
 };
 
 class SystemMemoryPool : public BaseMemoryPoolImpl<SystemAllocator> {
@@ -718,6 +844,27 @@ static struct GlobalState {
   MimallocDebugMemoryPool mimalloc_debug_pool_;
 #endif
 } global_state;
+
+ImmutableZeros::~ImmutableZeros() {
+  // Avoid calling pool_->FreeImmutableZeros if the global pools are destroyed
+  // (XXX this will not work with user-defined pools)
+
+  // This can happen if a Future is destructing on one thread while or
+  // after memory pools are destructed on the main thread (as there is
+  // no guarantee of destructor order between thread/memory pools)
+  if (data_ && !global_state.is_finalizing()) {
+    pool_->FreeImmutableZeros(const_cast<uint8_t*>(data_), size_);
+  }
+}
+
+Result<std::shared_ptr<Buffer>> MemoryPool::GetImmutableZeros(int64_t size) {
+  uint8_t* data;
+  RETURN_NOT_OK(Allocate(size, &data));
+  std::memset(data, 0, size);
+  return std::make_shared<ImmutableZeros>(data, size, this);
+}
+
+void MemoryPool::FreeImmutableZeros(uint8_t* buffer, int64_t size) { Free(buffer, size); }
 
 MemoryPool* system_memory_pool() { return global_state.system_memory_pool(); }
 
@@ -949,18 +1096,7 @@ class PoolBuffer final : public ResizableBuffer {
     return Status::OK();
   }
 
-  static std::shared_ptr<PoolBuffer> MakeShared(MemoryPool* pool) {
-    std::shared_ptr<MemoryManager> mm;
-    if (pool == nullptr) {
-      pool = default_memory_pool();
-      mm = default_cpu_memory_manager();
-    } else {
-      mm = CPUDevice::memory_manager(pool);
-    }
-    return std::make_shared<PoolBuffer>(std::move(mm), pool);
-  }
-
-  static std::unique_ptr<PoolBuffer> MakeUnique(MemoryPool* pool) {
+  static std::unique_ptr<PoolBuffer> Make(MemoryPool* pool) {
     std::shared_ptr<MemoryManager> mm;
     if (pool == nullptr) {
       pool = default_memory_pool();
@@ -973,6 +1109,34 @@ class PoolBuffer final : public ResizableBuffer {
 
  private:
   MemoryPool* pool_;
+};
+
+/// An immutable Buffer containing zeros, whose lifetime is tied to a particular
+/// MemoryPool
+class ImmutableZerosPoolBuffer final : public Buffer {
+ public:
+  explicit ImmutableZerosPoolBuffer(std::shared_ptr<Buffer>&& zeros, int64_t size,
+                                    std::shared_ptr<MemoryManager>&& mm)
+      : Buffer(zeros->data(), size, std::move(mm)), zeros_(std::move(zeros)) {}
+
+  static Result<std::unique_ptr<ImmutableZerosPoolBuffer>> Make(int64_t size,
+                                                                MemoryPool* pool) {
+    std::shared_ptr<MemoryManager> mm;
+    if (pool == nullptr) {
+      pool = default_memory_pool();
+      mm = default_cpu_memory_manager();
+    } else {
+      mm = CPUDevice::memory_manager(pool);
+    }
+    ARROW_ASSIGN_OR_RAISE(auto zeros, pool->GetImmutableZeros(size));
+    return std::unique_ptr<ImmutableZerosPoolBuffer>(
+        new ImmutableZerosPoolBuffer(std::move(zeros), size, std::move(mm)));
+  }
+
+ private:
+  // Note: we don't use this value directly; however, it needs to be here to keep a
+  // reference to the shared_ptr to keep the underlying zero buffer alive.
+  std::shared_ptr<Buffer> zeros_;
 };
 
 namespace {
@@ -989,13 +1153,16 @@ inline Result<BufferPtr> ResizePoolBuffer(PoolBufferPtr&& buffer, const int64_t 
 }  // namespace
 
 Result<std::unique_ptr<Buffer>> AllocateBuffer(const int64_t size, MemoryPool* pool) {
-  return ResizePoolBuffer<std::unique_ptr<Buffer>>(PoolBuffer::MakeUnique(pool), size);
+  return ResizePoolBuffer<std::unique_ptr<Buffer>>(PoolBuffer::Make(pool), size);
 }
 
 Result<std::unique_ptr<ResizableBuffer>> AllocateResizableBuffer(const int64_t size,
                                                                  MemoryPool* pool) {
-  return ResizePoolBuffer<std::unique_ptr<ResizableBuffer>>(PoolBuffer::MakeUnique(pool),
-                                                            size);
+  return ResizePoolBuffer<std::unique_ptr<ResizableBuffer>>(PoolBuffer::Make(pool), size);
+}
+
+Result<std::unique_ptr<Buffer>> MakeBufferOfZeros(const int64_t size, MemoryPool* pool) {
+  return ImmutableZerosPoolBuffer::Make(size, pool);
 }
 
 }  // namespace arrow

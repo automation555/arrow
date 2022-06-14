@@ -37,7 +37,20 @@ namespace arrow {
 ARROW_EXPORT
 std::shared_ptr<Array> MakeArray(const std::shared_ptr<ArrayData>& data);
 
-/// \brief Create a strongly-typed Array instance with all elements null
+/// \brief Create a strongly-typed mutable Array instance with all elements initially set
+/// to null
+/// \param[in] type the array type \param[in] length the array length
+/// \param[in] pool the memory pool to allocate memory from
+ARROW_EXPORT
+Result<std::shared_ptr<Array>> MakeMutableArrayOfNull(
+    const std::shared_ptr<DataType>& type, int64_t length,
+    MemoryPool* pool = default_memory_pool());
+
+/// \brief Create a strongly-typed immutable Array instance with all elements null
+///
+/// This function may reuse a single zero buffer, but may also defer to
+/// MakeMutableArrayOfNull().
+///
 /// \param[in] type the array type
 /// \param[in] length the array length
 /// \param[in] pool the memory pool to allocate memory from
@@ -46,7 +59,20 @@ Result<std::shared_ptr<Array>> MakeArrayOfNull(const std::shared_ptr<DataType>& 
                                                int64_t length,
                                                MemoryPool* pool = default_memory_pool());
 
-/// \brief Create an Array instance whose slots are the given scalar
+/// \brief Create a mutable Array instance whose slots are initialized with the given
+/// scalar
+/// \param[in] scalar the value with which to fill the array
+/// \param[in] length the array length
+/// \param[in] pool the memory pool to allocate memory from
+ARROW_EXPORT
+Result<std::shared_ptr<Array>> MakeMutableArrayFromScalar(
+    const Scalar& scalar, int64_t length, MemoryPool* pool = default_memory_pool());
+
+/// \brief Create an immutable Array instance whose slots are set to the given scalar
+///
+/// This function may reuse buffers if they contain the same (repeated) value to save
+/// memory, but may also defer to MakeMutableArrayFromScalar().
+///
 /// \param[in] scalar the value with which to fill the array
 /// \param[in] length the array length
 /// \param[in] pool the memory pool to allocate memory from

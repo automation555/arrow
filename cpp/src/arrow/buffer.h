@@ -255,13 +255,6 @@ class ARROW_EXPORT Buffer {
   static Result<std::shared_ptr<Buffer>> Copy(std::shared_ptr<Buffer> source,
                                               const std::shared_ptr<MemoryManager>& to);
 
-  /// \brief Copy a non-owned buffer
-  ///
-  /// This is useful for cases where the source memory area is externally managed
-  /// (its lifetime not tied to the source Buffer), otherwise please use Copy().
-  static Result<std::unique_ptr<Buffer>> CopyNonOwned(
-      const Buffer& source, const std::shared_ptr<MemoryManager>& to);
-
   /// \brief View buffer
   ///
   /// Return a Buffer that reflects this buffer, seen potentially from another
@@ -468,6 +461,13 @@ Result<std::unique_ptr<Buffer>> AllocateBuffer(const int64_t size,
 ARROW_EXPORT
 Result<std::unique_ptr<ResizableBuffer>> AllocateResizableBuffer(
     const int64_t size, MemoryPool* pool = NULLPTR);
+
+/// \brief Allocate or reuse an immutable buffer filled with zeros from a memory pool.
+///
+/// \param[in] size size of buffer to allocate
+/// \param[in] pool a memory pool
+ARROW_EXPORT
+Result<std::unique_ptr<Buffer>> MakeBufferOfZeros(int64_t size, MemoryPool* pool);
 
 /// \brief Allocate a bitmap buffer from a memory pool
 /// no guarantee on values is provided.
