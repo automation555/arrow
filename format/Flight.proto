@@ -259,15 +259,8 @@ message FlightInfo {
   FlightDescriptor flight_descriptor = 2;
 
   /*
-   * A list of endpoints associated with the flight. To consume the
-   * whole flight, all endpoints (and hence all Tickets) must be
-   * consumed. Endpoints can be consumed in any order.
-   *
-   * In other words, an application can use multiple endpoints to
-   * represent partitioned data.
-   *
-   * There is no ordering defined on endpoints. Hence, if the returned
-   * data has an ordering, it should be returned in a single endpoint.
+   * A list of endpoints associated with the flight. To consume the whole
+   * flight, all endpoints must be consumed.
    */
   repeated FlightEndpoint endpoint = 3;
 
@@ -287,20 +280,9 @@ message FlightEndpoint {
   Ticket ticket = 1;
 
   /*
-   * A list of URIs where this ticket can be redeemed via DoGet().
-   *
-   * If the list is empty, the expectation is that the ticket can only
-   * be redeemed on the current service where the ticket was
-   * generated.
-   *
-   * If the list is not empty, the expectation is that the ticket can
-   * be redeemed at any of the locations, and that the data returned
-   * will be equivalent. In this case, the ticket may only be redeemed
-   * at one of the given locations, and not (necessarily) on the
-   * current service.
-   *
-   * In other words, an application can use multiple locations to
-   * represent redundant and/or load balanced services.
+   * A list of URIs where this ticket can be redeemed. If the list is
+   * empty, the expectation is that the ticket can only be redeemed on the
+   * current service where the ticket was generated.
    */
   repeated Location location = 2;
 }
@@ -316,12 +298,47 @@ message Location {
 /*
  * An opaque identifier that the service can use to retrieve a particular
  * portion of a stream.
- *
- * Tickets are meant to be single use. It is an error/application-defined
- * behavior to reuse a ticket.
  */
 message Ticket {
   bytes ticket = 1;
+  
+  // Data representing some part of the data retrievable by the ticket.
+  //
+  // This is an optional optimization for applications that want to reduce latency,
+  // for previewing results or retrieving small data sets by providing data
+  // without requiring a DoGet call.  Applications built on top of Flight 
+  // are responsible for any negotiation necessary on whether
+  // inlining data is appropriate.
+  //
+  // The size of inlined_data is expected to be small (typically less then 1MB) 
+  // and inlining too much data across tickets can run into underlying transport 
+  // limitations.  Furthermore, since the data is expected to be small, implementations 
+  // are less likely to optimize for zero-copy in these cases. 
+  message InlinedData { 
+    // Arrow data for consumption.
+    //
+    // The data is not expected to contain the schema message. The schema
+    // should be identical to the schema provided on FlightInfo. 
+    repeated FlightData data = 1;
+    enum DataSubsetType {
+      // Indicates server is using a different version
+      // of the protos.
+      DATA_SUBSET_TYPE_UNDEFINED = 0;
+      // The data present in inlined_data represents all data
+      // present for the ticket.
+      COMPLETE_DATA = 1;
+      // The data present in inlined_data represents only a partial
+      // sample of the data available for the ticket. Applications
+      // may specify more requirements for partial data (e.g. always
+      // represents the leading n-rows of data) but are not required
+      // to do so.
+      PARTIAL_DATA = 2;
+    }
+    DataSubsetType inlined_completeness = 2;
+  }
+  InlinedData inlined_data = 2;
+  
+
 }
 
 /*
