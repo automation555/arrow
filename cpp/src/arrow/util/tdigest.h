@@ -23,6 +23,7 @@
 #pragma once
 
 #include <cmath>
+#include <complex>
 #include <memory>
 #include <vector>
 
@@ -47,10 +48,10 @@ class ARROW_EXPORT TDigest {
   void Reset();
 
   // validate data integrity
-  Status Validate() const;
+  Status Validate();
 
   // dump internal data, only for debug
-  void Dump() const;
+  void Dump();
 
   // buffer a single data point, consume internal buffer if full
   // this function is intensively called and performance critical
@@ -70,30 +71,39 @@ class ARROW_EXPORT TDigest {
   }
 
   template <typename T>
+  void NanAdd(const std::complex<T> & value) {
+      // NOTE(sjperkins)
+      // Adding magnitude of complex number to digest may be dubious
+      // double check this.
+      if (!std::isnan(value.real()) && !std::isnan(value.imag())) {
+        Add(std::abs(value));
+      }
+  }
+
+  template <typename T>
   typename std::enable_if<std::is_integral<T>::value>::type NanAdd(T value) {
     Add(static_cast<double>(value));
   }
 
   // merge with other t-digests, called infrequently
-  void Merge(const std::vector<TDigest>& others);
-  void Merge(const TDigest& other);
+  void Merge(std::vector<TDigest>* tdigests);
 
   // calculate quantile
-  double Quantile(double q) const;
+  double Quantile(double q);
 
-  double Min() const { return Quantile(0); }
-  double Max() const { return Quantile(1); }
-  double Mean() const;
+  double Min() { return Quantile(0); }
+  double Max() { return Quantile(1); }
+  double Mean();
 
   // check if this tdigest contains no valid data points
   bool is_empty() const;
 
  private:
   // merge input data with current tdigest
-  void MergeInput() const;
+  void MergeInput();
 
   // input buffer, size = buffer_size * sizeof(double)
-  mutable std::vector<double> input_;
+  std::vector<double> input_;
 
   // hide other members with pimpl
   class TDigestImpl;

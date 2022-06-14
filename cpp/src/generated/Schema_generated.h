@@ -38,6 +38,9 @@ struct IntBuilder;
 struct FloatingPoint;
 struct FloatingPointBuilder;
 
+struct Complex;
+struct ComplexBuilder;
+
 struct Utf8;
 struct Utf8Builder;
 
@@ -326,32 +329,29 @@ inline const char *EnumNameTimeUnit(TimeUnit e) {
 enum class IntervalUnit : int16_t {
   YEAR_MONTH = 0,
   DAY_TIME = 1,
-  MONTH_DAY_NANO = 2,
   MIN = YEAR_MONTH,
-  MAX = MONTH_DAY_NANO
+  MAX = DAY_TIME
 };
 
-inline const IntervalUnit (&EnumValuesIntervalUnit())[3] {
+inline const IntervalUnit (&EnumValuesIntervalUnit())[2] {
   static const IntervalUnit values[] = {
     IntervalUnit::YEAR_MONTH,
-    IntervalUnit::DAY_TIME,
-    IntervalUnit::MONTH_DAY_NANO
+    IntervalUnit::DAY_TIME
   };
   return values;
 }
 
 inline const char * const *EnumNamesIntervalUnit() {
-  static const char * const names[4] = {
+  static const char * const names[3] = {
     "YEAR_MONTH",
     "DAY_TIME",
-    "MONTH_DAY_NANO",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameIntervalUnit(IntervalUnit e) {
-  if (flatbuffers::IsOutRange(e, IntervalUnit::YEAR_MONTH, IntervalUnit::MONTH_DAY_NANO)) return "";
+  if (flatbuffers::IsOutRange(e, IntervalUnit::YEAR_MONTH, IntervalUnit::DAY_TIME)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesIntervalUnit()[index];
 }
@@ -382,11 +382,12 @@ enum class Type : uint8_t {
   LargeBinary = 19,
   LargeUtf8 = 20,
   LargeList = 21,
+  Complex = 22,
   MIN = NONE,
-  MAX = LargeList
+  MAX = Complex
 };
 
-inline const Type (&EnumValuesType())[22] {
+inline const Type (&EnumValuesType())[23] {
   static const Type values[] = {
     Type::NONE,
     Type::Null,
@@ -409,13 +410,14 @@ inline const Type (&EnumValuesType())[22] {
     Type::Duration,
     Type::LargeBinary,
     Type::LargeUtf8,
-    Type::LargeList
+    Type::LargeList,
+    Type::Complex
   };
   return values;
 }
 
 inline const char * const *EnumNamesType() {
-  static const char * const names[23] = {
+  static const char * const names[24] = {
     "NONE",
     "Null",
     "Int",
@@ -438,13 +440,14 @@ inline const char * const *EnumNamesType() {
     "LargeBinary",
     "LargeUtf8",
     "LargeList",
+    "Complex",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameType(Type e) {
-  if (flatbuffers::IsOutRange(e, Type::NONE, Type::LargeList)) return "";
+  if (flatbuffers::IsOutRange(e, Type::NONE, Type::Complex)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesType()[index];
 }
@@ -537,6 +540,10 @@ template<> struct TypeTraits<org::apache::arrow::flatbuf::LargeList> {
   static const Type enum_value = Type::LargeList;
 };
 
+template<> struct TypeTraits<org::apache::arrow::flatbuf::Complex> {
+  static const Type enum_value = Type::Complex;
+};
+
 bool VerifyType(flatbuffers::Verifier &verifier, const void *obj, Type type);
 bool VerifyTypeVector(flatbuffers::Verifier &verifier, const flatbuffers::Vector<flatbuffers::Offset<void>> *values, const flatbuffers::Vector<uint8_t> *types);
 
@@ -612,8 +619,9 @@ FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(8) Buffer FLATBUFFERS_FINAL_CLASS {
   int64_t length_;
 
  public:
-  Buffer() {
-    memset(static_cast<void *>(this), 0, sizeof(Buffer));
+  Buffer()
+      : offset_(0),
+        length_(0) {
   }
   Buffer(int64_t _offset, int64_t _length)
       : offset_(flatbuffers::EndianScalar(_offset)),
@@ -652,7 +660,6 @@ struct NullBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  NullBuilder &operator=(const NullBuilder &);
   flatbuffers::Offset<Null> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Null>(end);
@@ -685,7 +692,6 @@ struct Struct_Builder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  Struct_Builder &operator=(const Struct_Builder &);
   flatbuffers::Offset<Struct_> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Struct_>(end);
@@ -715,7 +721,6 @@ struct ListBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  ListBuilder &operator=(const ListBuilder &);
   flatbuffers::Offset<List> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<List>(end);
@@ -747,7 +752,6 @@ struct LargeListBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  LargeListBuilder &operator=(const LargeListBuilder &);
   flatbuffers::Offset<LargeList> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<LargeList>(end);
@@ -788,7 +792,6 @@ struct FixedSizeListBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  FixedSizeListBuilder &operator=(const FixedSizeListBuilder &);
   flatbuffers::Offset<FixedSizeList> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<FixedSizeList>(end);
@@ -856,7 +859,6 @@ struct MapBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  MapBuilder &operator=(const MapBuilder &);
   flatbuffers::Offset<Map> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Map>(end);
@@ -911,7 +913,6 @@ struct UnionBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  UnionBuilder &operator=(const UnionBuilder &);
   flatbuffers::Offset<Union> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Union>(end);
@@ -974,7 +975,6 @@ struct IntBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  IntBuilder &operator=(const IntBuilder &);
   flatbuffers::Offset<Int> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Int>(end);
@@ -1018,7 +1018,6 @@ struct FloatingPointBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  FloatingPointBuilder &operator=(const FloatingPointBuilder &);
   flatbuffers::Offset<FloatingPoint> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<FloatingPoint>(end);
@@ -1030,6 +1029,47 @@ inline flatbuffers::Offset<FloatingPoint> CreateFloatingPoint(
     flatbuffers::FlatBufferBuilder &_fbb,
     org::apache::arrow::flatbuf::Precision precision = org::apache::arrow::flatbuf::Precision::HALF) {
   FloatingPointBuilder builder_(_fbb);
+  builder_.add_precision(precision);
+  return builder_.Finish();
+}
+
+struct Complex FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
+  typedef ComplexBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_PRECISION = 4
+  };
+  org::apache::arrow::flatbuf::Precision precision() const {
+    return static_cast<org::apache::arrow::flatbuf::Precision>(GetField<int16_t>(VT_PRECISION, 0));
+  }
+  bool Verify(flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<int16_t>(verifier, VT_PRECISION) &&
+           verifier.EndTable();
+  }
+};
+
+struct ComplexBuilder {
+  typedef Complex Table;
+  flatbuffers::FlatBufferBuilder &fbb_;
+  flatbuffers::uoffset_t start_;
+  void add_precision(org::apache::arrow::flatbuf::Precision precision) {
+    fbb_.AddElement<int16_t>(Complex::VT_PRECISION, static_cast<int16_t>(precision), 0);
+  }
+  explicit ComplexBuilder(flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  flatbuffers::Offset<Complex> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = flatbuffers::Offset<Complex>(end);
+    return o;
+  }
+};
+
+inline flatbuffers::Offset<Complex> CreateComplex(
+    flatbuffers::FlatBufferBuilder &_fbb,
+    org::apache::arrow::flatbuf::Precision precision = org::apache::arrow::flatbuf::Precision::HALF) {
+  ComplexBuilder builder_(_fbb);
   builder_.add_precision(precision);
   return builder_.Finish();
 }
@@ -1051,7 +1091,6 @@ struct Utf8Builder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  Utf8Builder &operator=(const Utf8Builder &);
   flatbuffers::Offset<Utf8> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Utf8>(end);
@@ -1082,7 +1121,6 @@ struct BinaryBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  BinaryBuilder &operator=(const BinaryBuilder &);
   flatbuffers::Offset<Binary> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Binary>(end);
@@ -1114,7 +1152,6 @@ struct LargeUtf8Builder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  LargeUtf8Builder &operator=(const LargeUtf8Builder &);
   flatbuffers::Offset<LargeUtf8> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<LargeUtf8>(end);
@@ -1146,7 +1183,6 @@ struct LargeBinaryBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  LargeBinaryBuilder &operator=(const LargeBinaryBuilder &);
   flatbuffers::Offset<LargeBinary> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<LargeBinary>(end);
@@ -1187,7 +1223,6 @@ struct FixedSizeBinaryBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  FixedSizeBinaryBuilder &operator=(const FixedSizeBinaryBuilder &);
   flatbuffers::Offset<FixedSizeBinary> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<FixedSizeBinary>(end);
@@ -1219,7 +1254,6 @@ struct BoolBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  BoolBuilder &operator=(const BoolBuilder &);
   flatbuffers::Offset<Bool> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Bool>(end);
@@ -1283,7 +1317,6 @@ struct DecimalBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  DecimalBuilder &operator=(const DecimalBuilder &);
   flatbuffers::Offset<Decimal> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Decimal>(end);
@@ -1303,8 +1336,8 @@ inline flatbuffers::Offset<Decimal> CreateDecimal(
   return builder_.Finish();
 }
 
-/// Date is either a 32-bit or 64-bit signed integer type representing an
-/// elapsed time since UNIX epoch (1970-01-01), stored in either of two units:
+/// Date is either a 32-bit or 64-bit type representing elapsed time since UNIX
+/// epoch (1970-01-01), stored in either of two units:
 ///
 /// * Milliseconds (64 bits) indicating UNIX time elapsed since the epoch (no
 ///   leap seconds), where the values are evenly divisible by 86400000
@@ -1335,7 +1368,6 @@ struct DateBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  DateBuilder &operator=(const DateBuilder &);
   flatbuffers::Offset<Date> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Date>(end);
@@ -1351,20 +1383,9 @@ inline flatbuffers::Offset<Date> CreateDate(
   return builder_.Finish();
 }
 
-/// Time is either a 32-bit or 64-bit signed integer type representing an
-/// elapsed time since midnight, stored in either of four units: seconds,
-/// milliseconds, microseconds or nanoseconds.
-///
-/// The integer `bitWidth` depends on the `unit` and must be one of the following:
-/// * SECOND and MILLISECOND: 32 bits
-/// * MICROSECOND and NANOSECOND: 64 bits
-///
-/// The allowed values are between 0 (inclusive) and 86400 (=24*60*60) seconds
-/// (exclusive), adjusted for the time unit (for example, up to 86400000
-/// exclusive for the MILLISECOND unit).
-/// This definition doesn't allow for leap seconds. Time values from
-/// measurements with leap seconds will need to be corrected when ingesting
-/// into Arrow (for example by replacing the value 86400 with 86399).
+/// Time type. The physical storage type depends on the unit
+/// - SECOND and MILLISECOND: 32 bits
+/// - MICROSECOND and NANOSECOND: 64 bits
 struct Time FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   typedef TimeBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
@@ -1399,7 +1420,6 @@ struct TimeBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  TimeBuilder &operator=(const TimeBuilder &);
   flatbuffers::Offset<Time> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Time>(end);
@@ -1417,111 +1437,12 @@ inline flatbuffers::Offset<Time> CreateTime(
   return builder_.Finish();
 }
 
-/// Timestamp is a 64-bit signed integer representing an elapsed time since a
-/// fixed epoch, stored in either of four units: seconds, milliseconds,
-/// microseconds or nanoseconds, and is optionally annotated with a timezone.
+/// Time elapsed from the Unix epoch, 00:00:00.000 on 1 January 1970, excluding
+/// leap seconds, as a 64-bit integer. Note that UNIX time does not include
+/// leap seconds.
 ///
-/// Timestamp values do not include any leap seconds (in other words, all
-/// days are considered 86400 seconds long).
-///
-/// Timestamps with a non-empty timezone
-/// ------------------------------------
-///
-/// If a Timestamp column has a non-empty timezone value, its epoch is
-/// 1970-01-01 00:00:00 (January 1st 1970, midnight) in the *UTC* timezone
-/// (the Unix epoch), regardless of the Timestamp's own timezone.
-///
-/// Therefore, timestamp values with a non-empty timezone correspond to
-/// physical points in time together with some additional information about
-/// how the data was obtained and/or how to display it (the timezone).
-///
-///   For example, the timestamp value 0 with the timezone string "Europe/Paris"
-///   corresponds to "January 1st 1970, 00h00" in the UTC timezone, but the
-///   application may prefer to display it as "January 1st 1970, 01h00" in
-///   the Europe/Paris timezone (which is the same physical point in time).
-///
-/// One consequence is that timestamp values with a non-empty timezone
-/// can be compared and ordered directly, since they all share the same
-/// well-known point of reference (the Unix epoch).
-///
-/// Timestamps with an unset / empty timezone
-/// -----------------------------------------
-///
-/// If a Timestamp column has no timezone value, its epoch is
-/// 1970-01-01 00:00:00 (January 1st 1970, midnight) in an *unknown* timezone.
-///
-/// Therefore, timestamp values without a timezone cannot be meaningfully
-/// interpreted as physical points in time, but only as calendar / clock
-/// indications ("wall clock time") in an unspecified timezone.
-///
-///   For example, the timestamp value 0 with an empty timezone string
-///   corresponds to "January 1st 1970, 00h00" in an unknown timezone: there
-///   is not enough information to interpret it as a well-defined physical
-///   point in time.
-///
-/// One consequence is that timestamp values without a timezone cannot
-/// be reliably compared or ordered, since they may have different points of
-/// reference.  In particular, it is *not* possible to interpret an unset
-/// or empty timezone as the same as "UTC".
-///
-/// Conversion between timezones
-/// ----------------------------
-///
-/// If a Timestamp column has a non-empty timezone, changing the timezone
-/// to a different non-empty value is a metadata-only operation:
-/// the timestamp values need not change as their point of reference remains
-/// the same (the Unix epoch).
-///
-/// However, if a Timestamp column has no timezone value, changing it to a
-/// non-empty value requires to think about the desired semantics.
-/// One possibility is to assume that the original timestamp values are
-/// relative to the epoch of the timezone being set; timestamp values should
-/// then adjusted to the Unix epoch (for example, changing the timezone from
-/// empty to "Europe/Paris" would require converting the timestamp values
-/// from "Europe/Paris" to "UTC", which seems counter-intuitive but is
-/// nevertheless correct).
-///
-/// Guidelines for encoding data from external libraries
-/// ----------------------------------------------------
-///
-/// Date & time libraries often have multiple different data types for temporal
-/// data. In order to ease interoperability between different implementations the
-/// Arrow project has some recommendations for encoding these types into a Timestamp
-/// column.
-///
-/// An "instant" represents a physical point in time that has no relevant timezone
-/// (for example, astronomical data). To encode an instant, use a Timestamp with
-/// the timezone string set to "UTC", and make sure the Timestamp values
-/// are relative to the UTC epoch (January 1st 1970, midnight).
-///
-/// A "zoned date-time" represents a physical point in time annotated with an
-/// informative timezone (for example, the timezone in which the data was
-/// recorded).  To encode a zoned date-time, use a Timestamp with the timezone
-/// string set to the name of the timezone, and make sure the Timestamp values
-/// are relative to the UTC epoch (January 1st 1970, midnight).
-///
-///  (There is some ambiguity between an instant and a zoned date-time with the
-///   UTC timezone.  Both of these are stored the same in Arrow.  Typically,
-///   this distinction does not matter.  If it does, then an application should
-///   use custom metadata or an extension type to distinguish between the two cases.)
-///
-/// An "offset date-time" represents a physical point in time combined with an
-/// explicit offset from UTC.  To encode an offset date-time, use a Timestamp
-/// with the timezone string set to the numeric timezone offset string
-/// (e.g. "+03:00"), and make sure the Timestamp values are relative to
-/// the UTC epoch (January 1st 1970, midnight).
-///
-/// A "naive date-time" (also called "local date-time" in some libraries)
-/// represents a wall clock time combined with a calendar date, but with
-/// no indication of how to map this information to a physical point in time.
-/// Naive date-times must be handled with care because of this missing
-/// information, and also because daylight saving time (DST) may make
-/// some values ambiguous or non-existent. A naive date-time may be
-/// stored as a struct with Date and Time fields. However, it may also be
-/// encoded into a Timestamp column with an empty timezone. The timestamp
-/// values should be computed "as if" the timezone of the date-time values
-/// was UTC; for example, the naive date-time "January 1st 1970, 00h00" would
-/// be encoded as timestamp value 0.
+/// The Timestamp metadata supports both "time zone naive" and "time zone
+/// aware" timestamps. Read about the timezone attribute for more detail
 struct Timestamp FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   typedef TimestampBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
@@ -1531,16 +1452,26 @@ struct Timestamp FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   org::apache::arrow::flatbuf::TimeUnit unit() const {
     return static_cast<org::apache::arrow::flatbuf::TimeUnit>(GetField<int16_t>(VT_UNIT, 0));
   }
-  /// The timezone is an optional string indicating the name of a timezone,
-  /// one of:
+  /// The time zone is a string indicating the name of a time zone, one of:
   ///
-  /// * As used in the Olson timezone database (the "tz database" or
-  ///   "tzdata"), such as "America/New_York".
-  /// * An absolute timezone offset of the form "+XX:XX" or "-XX:XX",
-  ///   such as "+07:30".
+  /// * As used in the Olson time zone database (the "tz database" or
+  ///   "tzdata"), such as "America/New_York"
+  /// * An absolute time zone offset of the form +XX:XX or -XX:XX, such as +07:30
   ///
   /// Whether a timezone string is present indicates different semantics about
-  /// the data (see above).
+  /// the data:
+  ///
+  /// * If the time zone is null or equal to an empty string, the data is "time
+  ///   zone naive" and shall be displayed *as is* to the user, not localized
+  ///   to the locale of the user. This data can be though of as UTC but
+  ///   without having "UTC" as the time zone, it is not considered to be
+  ///   localized to any time zone
+  ///
+  /// * If the time zone is set to a valid value, values can be displayed as
+  ///   "localized" to that time zone, even though the underlying 64-bit
+  ///   integers are identical to the same data stored in UTC. Converting
+  ///   between time zones is a metadata-only operation and does not change the
+  ///   underlying values
   const flatbuffers::String *timezone() const {
     return GetPointer<const flatbuffers::String *>(VT_TIMEZONE);
   }
@@ -1567,7 +1498,6 @@ struct TimestampBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  TimestampBuilder &operator=(const TimestampBuilder &);
   flatbuffers::Offset<Timestamp> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Timestamp>(end);
@@ -1622,7 +1552,6 @@ struct IntervalBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  IntervalBuilder &operator=(const IntervalBuilder &);
   flatbuffers::Offset<Interval> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Interval>(end);
@@ -1664,7 +1593,6 @@ struct DurationBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  DurationBuilder &operator=(const DurationBuilder &);
   flatbuffers::Offset<Duration> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Duration>(end);
@@ -1719,7 +1647,6 @@ struct KeyValueBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  KeyValueBuilder &operator=(const KeyValueBuilder &);
   flatbuffers::Offset<KeyValue> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<KeyValue>(end);
@@ -1812,7 +1739,6 @@ struct DictionaryEncodingBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  DictionaryEncodingBuilder &operator=(const DictionaryEncodingBuilder &);
   flatbuffers::Offset<DictionaryEncoding> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<DictionaryEncoding>(end);
@@ -1926,6 +1852,9 @@ struct Field FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   }
   const org::apache::arrow::flatbuf::LargeList *type_as_LargeList() const {
     return type_type() == org::apache::arrow::flatbuf::Type::LargeList ? static_cast<const org::apache::arrow::flatbuf::LargeList *>(type()) : nullptr;
+  }
+  const org::apache::arrow::flatbuf::Complex *type_as_Complex() const {
+    return type_type() == org::apache::arrow::flatbuf::Type::Complex ? static_cast<const org::apache::arrow::flatbuf::Complex *>(type()) : nullptr;
   }
   /// Present only if the field is dictionary encoded.
   const org::apache::arrow::flatbuf::DictionaryEncoding *dictionary() const {
@@ -2044,6 +1973,10 @@ template<> inline const org::apache::arrow::flatbuf::LargeList *Field::type_as<o
   return type_as_LargeList();
 }
 
+template<> inline const org::apache::arrow::flatbuf::Complex *Field::type_as<org::apache::arrow::flatbuf::Complex>() const {
+  return type_as_Complex();
+}
+
 struct FieldBuilder {
   typedef Field Table;
   flatbuffers::FlatBufferBuilder &fbb_;
@@ -2073,7 +2006,6 @@ struct FieldBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  FieldBuilder &operator=(const FieldBuilder &);
   flatbuffers::Offset<Field> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Field>(end);
@@ -2185,7 +2117,6 @@ struct SchemaBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  SchemaBuilder &operator=(const SchemaBuilder &);
   flatbuffers::Offset<Schema> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Schema>(end);
@@ -2311,6 +2242,10 @@ inline bool VerifyType(flatbuffers::Verifier &verifier, const void *obj, Type ty
     }
     case Type::LargeList: {
       auto ptr = reinterpret_cast<const org::apache::arrow::flatbuf::LargeList *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case Type::Complex: {
+      auto ptr = reinterpret_cast<const org::apache::arrow::flatbuf::Complex *>(obj);
       return verifier.VerifyTable(ptr);
     }
     default: return true;

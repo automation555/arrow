@@ -53,10 +53,6 @@ class ARROW_EXPORT NullBuilder : public ArrayBuilder {
 
   Status Append(std::nullptr_t) { return AppendNull(); }
 
-  Status AppendArraySlice(const ArraySpan&, int64_t, int64_t length) override {
-    return AppendNulls(length);
-  }
-
   Status FinishInternal(std::shared_ptr<ArrayData>* out) override;
 
   /// \cond FALSE
@@ -67,10 +63,6 @@ class ARROW_EXPORT NullBuilder : public ArrayBuilder {
 
   Status Finish(std::shared_ptr<NullArray>* out) { return FinishTyped(out); }
 };
-
-/// \addtogroup numeric-builders
-///
-/// @{
 
 /// Base class for all Builders that emit an Array of a scalar numerical type.
 template <typename T>
@@ -158,21 +150,6 @@ class NumericBuilder : public ArrayBuilder {
     data_builder_.UnsafeAppend(values, length);
     // length_ is update by these
     ArrayBuilder::UnsafeAppendToBitmap(valid_bytes, length);
-    return Status::OK();
-  }
-
-  /// \brief Append a sequence of elements in one shot
-  /// \param[in] values a contiguous C array of values
-  /// \param[in] length the number of values to append
-  /// \param[in] bitmap a validity bitmap to copy (may be null)
-  /// \param[in] bitmap_offset an offset into the validity bitmap
-  /// \return Status
-  Status AppendValues(const value_type* values, int64_t length, const uint8_t* bitmap,
-                      int64_t bitmap_offset) {
-    ARROW_RETURN_NOT_OK(Reserve(length));
-    data_builder_.UnsafeAppend(values, length);
-    // length_ is update by these
-    ArrayBuilder::UnsafeAppendToBitmap(bitmap, bitmap_offset, length);
     return Status::OK();
   }
 
@@ -279,12 +256,6 @@ class NumericBuilder : public ArrayBuilder {
     return Status::OK();
   }
 
-  Status AppendArraySlice(const ArraySpan& array, int64_t offset,
-                          int64_t length) override {
-    return AppendValues(array.GetValues<value_type>(1) + offset, length,
-                        array.GetValues<uint8_t>(0, 0), array.offset + offset);
-  }
-
   /// Append a single scalar under the assumption that the underlying Buffer is
   /// large enough.
   ///
@@ -322,22 +293,9 @@ using Int64Builder = NumericBuilder<Int64Type>;
 using HalfFloatBuilder = NumericBuilder<HalfFloatType>;
 using FloatBuilder = NumericBuilder<FloatType>;
 using DoubleBuilder = NumericBuilder<DoubleType>;
+using ComplexFloatBuilder = NumericBuilder<ComplexFloatType>;
+using ComplexDoubleBuilder = NumericBuilder<ComplexDoubleType>;
 
-/// @}
-
-/// \addtogroup temporal-builders
-///
-/// @{
-
-using Date32Builder = NumericBuilder<Date32Type>;
-using Date64Builder = NumericBuilder<Date64Type>;
-using Time32Builder = NumericBuilder<Time32Type>;
-using Time64Builder = NumericBuilder<Time64Type>;
-using TimestampBuilder = NumericBuilder<TimestampType>;
-using MonthIntervalBuilder = NumericBuilder<MonthIntervalType>;
-using DurationBuilder = NumericBuilder<DurationType>;
-
-/// @}
 
 class ARROW_EXPORT BooleanBuilder : public ArrayBuilder {
  public:
@@ -407,15 +365,6 @@ class ARROW_EXPORT BooleanBuilder : public ArrayBuilder {
   /// \return Status
   Status AppendValues(const uint8_t* values, int64_t length,
                       const uint8_t* valid_bytes = NULLPTR);
-
-  /// \brief Append a sequence of elements in one shot
-  /// \param[in] values a bitmap of values
-  /// \param[in] length the number of values to append
-  /// \param[in] validity a validity bitmap to copy (may be null)
-  /// \param[in] offset an offset into the values and validity bitmaps
-  /// \return Status
-  Status AppendValues(const uint8_t* values, int64_t length, const uint8_t* validity,
-                      int64_t offset);
 
   /// \brief Append a sequence of elements in one shot
   /// \param[in] values a contiguous C array of values
@@ -512,12 +461,6 @@ class ARROW_EXPORT BooleanBuilder : public ArrayBuilder {
   }
 
   Status AppendValues(int64_t length, bool value);
-
-  Status AppendArraySlice(const ArraySpan& array, int64_t offset,
-                          int64_t length) override {
-    return AppendValues(array.GetValues<uint8_t>(1, 0), length,
-                        array.GetValues<uint8_t>(0, 0), array.offset + offset);
-  }
 
   Status FinishInternal(std::shared_ptr<ArrayData>* out) override;
 

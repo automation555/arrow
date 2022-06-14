@@ -17,16 +17,13 @@
 
 #pragma once
 
-#include "arrow/compute/kernels/util_internal.h"
 #include "arrow/type.h"
 #include "arrow/type_traits.h"
 #include "arrow/util/bit_run_reader.h"
-#include "arrow/util/int128_internal.h"
 #include "arrow/util/logging.h"
 
 namespace arrow {
 namespace compute {
-namespace internal {
 
 // Find the largest compatible primitive type for a primitive type.
 template <typename I, typename Enable = void>
@@ -53,42 +50,10 @@ struct FindAccumulatorType<I, enable_if_floating_point<I>> {
 };
 
 template <typename I>
-struct FindAccumulatorType<I, enable_if_decimal128<I>> {
-  using Type = Decimal128Type;
+struct FindAccumulatorType<I, enable_if_complex<I>> {
+  using Type = ComplexDoubleType;
 };
 
-template <typename I>
-struct FindAccumulatorType<I, enable_if_decimal256<I>> {
-  using Type = Decimal256Type;
-};
-
-// Helpers for implementing aggregations on decimals
-
-template <typename Type, typename Enable = void>
-struct MultiplyTraits {
-  using CType = typename TypeTraits<Type>::CType;
-
-  constexpr static CType one(const DataType&) { return static_cast<CType>(1); }
-
-  constexpr static CType Multiply(const DataType&, CType lhs, CType rhs) {
-    return static_cast<CType>(internal::to_unsigned(lhs) * internal::to_unsigned(rhs));
-  }
-};
-
-template <typename Type>
-struct MultiplyTraits<Type, enable_if_decimal<Type>> {
-  using CType = typename TypeTraits<Type>::CType;
-
-  constexpr static CType one(const DataType& ty) {
-    // Return 1 scaled to output type scale
-    return CType(1).IncreaseScaleBy(static_cast<const Type&>(ty).scale());
-  }
-
-  constexpr static CType Multiply(const DataType& ty, CType lhs, CType rhs) {
-    // Multiply then rescale down to output scale
-    return (lhs * rhs).ReduceScaleBy(static_cast<const Type&>(ty).scale());
-  }
-};
 
 struct ScalarAggregator : public KernelState {
   virtual Status Consume(KernelContext* ctx, const ExecBatch& batch) = 0;
@@ -96,55 +61,20 @@ struct ScalarAggregator : public KernelState {
   virtual Status Finalize(KernelContext* ctx, Datum* out) = 0;
 };
 
-// Helper to differentiate between var/std calculation so we can fold
-// kernel implementations together
-enum class VarOrStd : bool { Var, Std };
-
-// Helper to differentiate between min/max calculation so we can fold
-// kernel implementations together
-enum class MinOrMax : uint8_t { Min = 0, Max };
-
 void AddAggKernel(std::shared_ptr<KernelSignature> sig, KernelInit init,
                   ScalarAggregateFunction* func,
                   SimdLevel::type simd_level = SimdLevel::NONE);
 
-void AddAggKernel(std::shared_ptr<KernelSignature> sig, KernelInit init,
-                  ScalarAggregateFinalize finalize, ScalarAggregateFunction* func,
-                  SimdLevel::type simd_level = SimdLevel::NONE);
+namespace detail {
 
 using arrow::internal::VisitSetBitRunsVoid;
 
-template <typename T, typename Enable = void>
-struct GetSumType;
-
-template <typename T>
-struct GetSumType<T, enable_if_floating_point<T>> {
-  using SumType = double;
-};
-
-template <typename T>
-struct GetSumType<T, enable_if_integer<T>> {
-  using SumType = arrow::internal::int128_t;
-};
-
-template <typename T>
-struct GetSumType<T, enable_if_decimal<T>> {
-  using SumType = typename TypeTraits<T>::CType;
-};
-
-// SumArray must be parameterized with the SIMD level since it's called both from
-// translation units with and without vectorization. Normally it gets inlined but
-// if not, without the parameter, we'll have multiple definitions of the same
-// symbol and we'll get unexpected results.
-
 // non-recursive pairwise summation for floating points
 // https://en.wikipedia.org/wiki/Pairwise_summation
-template <typename ValueType, typename SumType, SimdLevel::type SimdLevel,
-          typename ValueFunc>
-enable_if_t<std::is_floating_point<SumType>::value, SumType> SumArray(
+template <typename ValueType, typename SumType, typename ValueFunc>
+enable_if_t<std::is_floating_point<SumType>::value ||
+            is_complex_type<SumType>::value, SumType> SumArray(
     const ArrayData& data, ValueFunc&& func) {
-  using arrow::internal::VisitSetBitRunsVoid;
-
   const int64_t data_size = data.length - data.GetNullCount();
   if (data_size == 0) {
     return 0;
@@ -153,7 +83,7 @@ enable_if_t<std::is_floating_point<SumType>::value, SumType> SumArray(
   // number of inputs to accumulate before merging with another block
   constexpr int kBlockSize = 16;  // same as numpy
   // levels (tree depth) = ceil(log2(len)) + 1, a bit larger than necessary
-  const int levels = bit_util::Log2(static_cast<uint64_t>(data_size)) + 1;
+  const int levels = BitUtil::Log2(static_cast<uint64_t>(data_size)) + 1;
   // temporary summation per level
   std::vector<SumType> sum(levels);
   // whether two summations are ready and should be reduced to upper level
@@ -215,13 +145,10 @@ enable_if_t<std::is_floating_point<SumType>::value, SumType> SumArray(
   return sum[root_level];
 }
 
-// naive summation for integers and decimals
-template <typename ValueType, typename SumType, SimdLevel::type SimdLevel,
-          typename ValueFunc>
+// naive summation for integers
+template <typename ValueType, typename SumType, typename ValueFunc>
 enable_if_t<!std::is_floating_point<SumType>::value, SumType> SumArray(
     const ArrayData& data, ValueFunc&& func) {
-  using arrow::internal::VisitSetBitRunsVoid;
-
   SumType sum = 0;
   const ValueType* values = data.GetValues<ValueType>(1);
   VisitSetBitRunsVoid(data.buffers[0], data.offset, data.length,
@@ -233,12 +160,13 @@ enable_if_t<!std::is_floating_point<SumType>::value, SumType> SumArray(
   return sum;
 }
 
-template <typename ValueType, typename SumType, SimdLevel::type SimdLevel>
+template <typename ValueType, typename SumType>
 SumType SumArray(const ArrayData& data) {
-  return SumArray<ValueType, SumType, SimdLevel>(
+  return SumArray<ValueType, SumType>(
       data, [](ValueType v) { return static_cast<SumType>(v); });
 }
 
-}  // namespace internal
+}  // namespace detail
+
 }  // namespace compute
 }  // namespace arrow

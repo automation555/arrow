@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include <complex>
+#include <complex>
 #include <memory>
 #include <string>
 #include <type_traits>
@@ -53,6 +55,8 @@ TYPE_ID_TRAIT(UINT64, UInt64Type)
 TYPE_ID_TRAIT(HALF_FLOAT, HalfFloatType)
 TYPE_ID_TRAIT(FLOAT, FloatType)
 TYPE_ID_TRAIT(DOUBLE, DoubleType)
+TYPE_ID_TRAIT(COMPLEX_FLOAT, ComplexFloatType)
+TYPE_ID_TRAIT(COMPLEX_DOUBLE, ComplexDoubleType)
 TYPE_ID_TRAIT(STRING, StringType)
 TYPE_ID_TRAIT(BINARY, BinaryType)
 TYPE_ID_TRAIT(LARGE_STRING, LargeStringType)
@@ -64,7 +68,6 @@ TYPE_ID_TRAIT(TIME32, Time32Type)
 TYPE_ID_TRAIT(TIME64, Time64Type)
 TYPE_ID_TRAIT(TIMESTAMP, TimestampType)
 TYPE_ID_TRAIT(INTERVAL_DAY_TIME, DayTimeIntervalType)
-TYPE_ID_TRAIT(INTERVAL_MONTH_DAY_NANO, MonthDayNanoIntervalType)
 TYPE_ID_TRAIT(INTERVAL_MONTHS, MonthIntervalType)
 TYPE_ID_TRAIT(DURATION, DurationType)
 TYPE_ID_TRAIT(DECIMAL128, Decimal128Type)
@@ -85,22 +88,12 @@ TYPE_ID_TRAIT(EXTENSION, ExtensionType)
 // Per-type type traits
 //
 
-/// \addtogroup type-traits
-/// \brief Base template for type traits of Arrow data types
-/// Type traits provide various information about a type at compile time, such
-/// as the associated ArrayType, BuilderType, and ScalarType. Not all types
-/// provide all information.
-/// \tparam T An Arrow data type
 template <typename T>
 struct TypeTraits {};
 
-/// \brief Base template for type traits of C++ types
-/// \tparam T A standard C++ type
 template <typename T>
 struct CTypeTraits {};
 
-/// \addtogroup type-traits
-/// @{
 template <>
 struct TypeTraits<NullType> {
   using ArrayType = NullArray;
@@ -120,14 +113,12 @@ struct TypeTraits<BooleanType> {
   using CType = bool;
 
   static constexpr int64_t bytes_required(int64_t elements) {
-    return bit_util::BytesForBits(elements);
+    return BitUtil::BytesForBits(elements);
   }
   constexpr static bool is_parameter_free = true;
   static inline std::shared_ptr<DataType> type_singleton() { return boolean(); }
 };
-/// @}
 
-/// \addtogroup c-type-traits
 template <>
 struct CTypeTraits<bool> : public TypeTraits<BooleanType> {
   using ArrowType = BooleanType;
@@ -170,12 +161,12 @@ PRIMITIVE_TYPE_TRAITS_DEF(uint64_t, UInt64, uint64)
 PRIMITIVE_TYPE_TRAITS_DEF(int64_t, Int64, int64)
 PRIMITIVE_TYPE_TRAITS_DEF(float, Float, float32)
 PRIMITIVE_TYPE_TRAITS_DEF(double, Double, float64)
+PRIMITIVE_TYPE_TRAITS_DEF(std::complex<float>, ComplexFloat, complex64)
+PRIMITIVE_TYPE_TRAITS_DEF(std::complex<double>, ComplexDouble, complex128)
 
 #undef PRIMITIVE_TYPE_TRAITS_DEF
 #undef PRIMITIVE_TYPE_TRAITS_DEF_
 
-/// \addtogroup type-traits
-/// @{
 template <>
 struct TypeTraits<Date64Type> {
   using ArrayType = Date64Array;
@@ -235,7 +226,6 @@ struct TypeTraits<DayTimeIntervalType> {
   using ArrayType = DayTimeIntervalArray;
   using BuilderType = DayTimeIntervalBuilder;
   using ScalarType = DayTimeIntervalScalar;
-  using CType = DayTimeIntervalType::c_type;
 
   static constexpr int64_t bytes_required(int64_t elements) {
     return elements * static_cast<int64_t>(sizeof(DayTimeIntervalType::DayMilliseconds));
@@ -245,26 +235,10 @@ struct TypeTraits<DayTimeIntervalType> {
 };
 
 template <>
-struct TypeTraits<MonthDayNanoIntervalType> {
-  using ArrayType = MonthDayNanoIntervalArray;
-  using BuilderType = MonthDayNanoIntervalBuilder;
-  using ScalarType = MonthDayNanoIntervalScalar;
-  using CType = MonthDayNanoIntervalType::c_type;
-
-  static constexpr int64_t bytes_required(int64_t elements) {
-    return elements *
-           static_cast<int64_t>(sizeof(MonthDayNanoIntervalType::MonthDayNanos));
-  }
-  constexpr static bool is_parameter_free = true;
-  static std::shared_ptr<DataType> type_singleton() { return month_day_nano_interval(); }
-};
-
-template <>
 struct TypeTraits<MonthIntervalType> {
   using ArrayType = MonthIntervalArray;
   using BuilderType = MonthIntervalBuilder;
   using ScalarType = MonthIntervalScalar;
-  using CType = MonthIntervalType::c_type;
 
   static constexpr int64_t bytes_required(int64_t elements) {
     return elements * static_cast<int64_t>(sizeof(int32_t));
@@ -318,7 +292,6 @@ struct TypeTraits<Decimal128Type> {
   using ArrayType = Decimal128Array;
   using BuilderType = Decimal128Builder;
   using ScalarType = Decimal128Scalar;
-  using CType = Decimal128;
   constexpr static bool is_parameter_free = false;
 };
 
@@ -327,7 +300,6 @@ struct TypeTraits<Decimal256Type> {
   using ArrayType = Decimal256Array;
   using BuilderType = Decimal256Builder;
   using ScalarType = Decimal256Scalar;
-  using CType = Decimal256;
   constexpr static bool is_parameter_free = false;
 };
 
@@ -356,8 +328,6 @@ struct TypeTraits<FixedSizeBinaryType> {
   using ArrayType = FixedSizeBinaryArray;
   using BuilderType = FixedSizeBinaryBuilder;
   using ScalarType = FixedSizeBinaryScalar;
-  // FixedSizeBinary doesn't have offsets per se, but string length is int32 sized
-  using OffsetType = Int32Type;
   constexpr static bool is_parameter_free = false;
 };
 
@@ -381,10 +351,6 @@ struct TypeTraits<LargeStringType> {
   static inline std::shared_ptr<DataType> type_singleton() { return large_utf8(); }
 };
 
-/// @}
-
-/// \addtogroup c-type-traits
-/// @{
 template <>
 struct CTypeTraits<std::string> : public TypeTraits<StringType> {
   using ArrowType = StringType;
@@ -401,10 +367,7 @@ struct CTypeTraits<DayTimeIntervalType::DayMilliseconds>
     : public TypeTraits<DayTimeIntervalType> {
   using ArrowType = DayTimeIntervalType;
 };
-/// @}
 
-/// \addtogroup type-traits
-/// @{
 template <>
 struct TypeTraits<ListType> {
   using ArrayType = ListArray;
@@ -447,9 +410,7 @@ struct TypeTraits<FixedSizeListType> {
   using ScalarType = FixedSizeListScalar;
   constexpr static bool is_parameter_free = false;
 };
-/// @}
 
-/// \addtogroup c-type-traits
 template <typename CType>
 struct CTypeTraits<std::vector<CType>> : public TypeTraits<ListType> {
   using ArrowType = ListType;
@@ -459,8 +420,6 @@ struct CTypeTraits<std::vector<CType>> : public TypeTraits<ListType> {
   }
 };
 
-/// \addtogroup type-traits
-/// @{
 template <>
 struct TypeTraits<StructType> {
   using ArrayType = StructArray;
@@ -498,7 +457,6 @@ struct TypeTraits<ExtensionType> {
   using ScalarType = ExtensionScalar;
   constexpr static bool is_parameter_free = false;
 };
-/// @}
 
 namespace internal {
 
@@ -515,9 +473,6 @@ using void_t = typename make_void<Ts...>::type;
 //
 // Useful type predicates
 //
-
-/// \addtogroup type-predicates
-/// @{
 
 // only in C++14
 template <bool B, typename T = void>
@@ -578,6 +533,12 @@ using is_half_float_type = std::is_same<HalfFloatType, T>;
 
 template <typename T, typename R = void>
 using enable_if_half_float = enable_if_t<is_half_float_type<T>::value, R>;
+
+template <typename T>
+using is_complex_type = std::is_base_of<ComplexType, T>;
+
+template <typename T, typename R = void>
+using enable_if_complex = enable_if_t<is_complex_type<T>::value, R>;
 
 // Binary Types
 
@@ -807,8 +768,7 @@ template <typename T>
 using is_physical_signed_integer_type =
     std::integral_constant<bool,
                            is_signed_integer_type<T>::value ||
-                               (is_temporal_type<T>::value && has_c_type<T>::value &&
-                                std::is_integral<typename T::c_type>::value)>;
+                               (is_temporal_type<T>::value && has_c_type<T>::value)>;
 
 template <typename T, typename R = void>
 using enable_if_physical_signed_integer =
@@ -842,10 +802,6 @@ template <typename T, typename R = void>
 using enable_if_physical_floating_point =
     enable_if_t<is_physical_floating_type<T>::value, R>;
 
-/// @}
-
-/// \addtogroup runtime-type-predicates
-/// @{
 static inline bool is_integer(Type::type type_id) {
   switch (type_id) {
     case Type::UINT8:
@@ -933,7 +889,6 @@ static inline bool is_primitive(Type::type type_id) {
     case Type::TIMESTAMP:
     case Type::DURATION:
     case Type::INTERVAL_MONTHS:
-    case Type::INTERVAL_MONTH_DAY_NANO:
     case Type::INTERVAL_DAY_TIME:
       return true;
     default:
@@ -1031,8 +986,6 @@ static inline int bit_width(Type::type type_id) {
       return 32;
     case Type::INTERVAL_DAY_TIME:
       return 64;
-    case Type::INTERVAL_MONTH_DAY_NANO:
-      return 128;
 
     case Type::DECIMAL128:
       return 128;
@@ -1061,17 +1014,6 @@ static inline bool is_nested(Type::type type_id) {
   return false;
 }
 
-static inline bool is_union(Type::type type_id) {
-  switch (type_id) {
-    case Type::SPARSE_UNION:
-    case Type::DENSE_UNION:
-      return true;
-    default:
-      break;
-  }
-  return false;
-}
-
 static inline int offset_bit_width(Type::type type_id) {
   switch (type_id) {
     case Type::STRING:
@@ -1089,7 +1031,5 @@ static inline int offset_bit_width(Type::type type_id) {
   }
   return 0;
 }
-
-/// @}
 
 }  // namespace arrow
