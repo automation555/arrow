@@ -61,14 +61,20 @@ using arrow_vendored::date::literals::sun;
 using arrow_vendored::date::literals::thu;
 using arrow_vendored::date::literals::wed;
 using internal::applicator::ScalarBinaryNotNullStatefulEqualTypes;
+using internal::applicator::SimpleBinary;
 
 using DayOfWeekState = OptionsWrapper<DayOfWeekOptions>;
 using WeekState = OptionsWrapper<WeekOptions>;
 
-Status CheckTimezones(const ExecSpan& batch) {
-  const auto& timezone = GetInputTimezone(*batch[0].type());
+const std::shared_ptr<DataType>& DayHoursType() {
+  static auto type = struct_({field("days", int32()), field("hours", int32())});
+  return type;
+}
+
+Status CheckTimezones(const ExecBatch& batch) {
+  const auto& timezone = GetInputTimezone(batch.values[0]);
   for (int i = 1; i < batch.num_values(); i++) {
-    const auto& other_timezone = GetInputTimezone(*batch[i].type());
+    const auto& other_timezone = GetInputTimezone(batch.values[i]);
     if (other_timezone != timezone) {
       return Status::TypeError("Got differing time zone '", other_timezone,
                                "' for argument ", i + 1, "; expected '", timezone, "'");
@@ -83,11 +89,11 @@ struct TemporalBinary {
   template <typename OptionsType, typename T = InType>
   static enable_if_timestamp<T, Status> ExecWithOptions(KernelContext* ctx,
                                                         const OptionsType* options,
-                                                        const ExecSpan& batch,
-                                                        ExecResult* out) {
+                                                        const ExecBatch& batch,
+                                                        Datum* out) {
     RETURN_NOT_OK(CheckTimezones(batch));
 
-    const auto& timezone = GetInputTimezone(*batch[0].type());
+    const auto& timezone = GetInputTimezone(batch.values[0]);
     if (timezone.empty()) {
       using ExecTemplate = Op<Duration, NonZonedLocalizer>;
       auto op = ExecTemplate(options, NonZonedLocalizer());
@@ -106,8 +112,8 @@ struct TemporalBinary {
 
   template <typename OptionsType, typename T = InType>
   static enable_if_t<!is_timestamp_type<T>::value, Status> ExecWithOptions(
-      KernelContext* ctx, const OptionsType* options, const ExecSpan& batch,
-      ExecResult* out) {
+      KernelContext* ctx, const OptionsType* options, const ExecBatch& batch,
+      Datum* out) {
     using ExecTemplate = Op<Duration, NonZonedLocalizer>;
     auto op = ExecTemplate(options, NonZonedLocalizer());
     applicator::ScalarBinaryNotNullStatefulEqualTypes<OutType, T, ExecTemplate> kernel{
@@ -115,7 +121,7 @@ struct TemporalBinary {
     return kernel.Exec(ctx, batch, out);
   }
 
-  static Status Exec(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) {
+  static Status Exec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
     const FunctionOptions* options = nullptr;
     return ExecWithOptions(ctx, options, batch, out);
   }
@@ -126,7 +132,7 @@ template <template <typename...> class Op, typename Duration, typename InType,
 struct TemporalDayOfWeekBinary : public TemporalBinary<Op, Duration, InType, OutType> {
   using Base = TemporalBinary<Op, Duration, InType, OutType>;
 
-  static Status Exec(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) {
+  static Status Exec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
     const DayOfWeekOptions& options = DayOfWeekState::Get(ctx);
     RETURN_NOT_OK(ValidateDayOfWeekOptions(options));
     return Base::ExecWithOptions(ctx, &options, batch, out);
@@ -275,6 +281,272 @@ struct DayTimeBetween {
   Localizer localizer_;
 };
 
+template <typename Duration, typename Localizer>
+std::array<int32_t, 2> GetDayHoursBetween(int64_t arg0, int64_t arg1,
+                                          Localizer&& localizer) {
+  auto from = localizer.template ConvertTimePoint<Duration>(arg0);
+  auto to = localizer.template ConvertTimePoint<Duration>(arg1);
+  const int32_t num_days =
+      static_cast<int32_t>((floor<days>(to) - floor<days>(from)).count());
+  auto from_time = static_cast<int32_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(from - floor<days>(from))
+          .count());
+  auto to_time = static_cast<int32_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(to - floor<days>(to))
+          .count());
+  const int32_t num_millis = to_time - from_time;
+  return {num_days, num_millis / 3600000};
+}
+
+template <typename Duration, typename InType>
+struct DayHoursBetweenWrapper {
+  static Result<std::array<int32_t, 2>> Get(const Scalar& arg0, const Scalar& arg1) {
+    const auto& arg0_val = internal::UnboxScalar<const InType>::Unbox(arg0);
+    const auto& arg1_val = internal::UnboxScalar<const InType>::Unbox(arg1);
+    return GetDayHoursBetween<Duration>(arg0_val, arg1_val, NonZonedLocalizer{});
+  }
+};
+
+template <typename Duration>
+struct DayHoursBetweenWrapper<Duration, TimestampType> {
+  static Result<std::array<int32_t, 2>> Get(const Scalar& arg0, const Scalar& arg1) {
+    const auto& arg0_val = internal::UnboxScalar<const TimestampType>::Unbox(arg0);
+    const auto& arg1_val = internal::UnboxScalar<const TimestampType>::Unbox(arg1);
+    const auto& timezone0 = GetInputTimezone(arg0);
+    const auto& timezone1 = GetInputTimezone(arg1);
+    if (timezone0 != timezone1) {
+      return Status::Invalid(timezone0, " != ", timezone1);
+    }
+    if (timezone0.empty()) {
+      return GetDayHoursBetween<Duration>(arg0_val, arg1_val, NonZonedLocalizer{});
+    } else {
+      ARROW_ASSIGN_OR_RAISE(auto tz, LocateZone(timezone0));
+      return GetDayHoursBetween<Duration>(arg0_val, arg1_val, ZonedLocalizer{tz});
+    }
+  }
+};
+
+template <typename Duration, typename InType, typename BuilderType>
+struct DayHoursBetweenVisitValueFunction {
+  static Result<std::function<void(typename InType::c_type, typename InType::c_type)>>
+  Get(const std::vector<BuilderType*>& field_builders, const ArrayData&, const ArrayData&,
+      StructBuilder* struct_builder) {
+    return [=](typename InType::c_type arg0, typename InType::c_type arg1) {
+      const auto day_hours_between =
+          GetDayHoursBetween<Duration>(arg0, arg1, NonZonedLocalizer{});
+      field_builders[0]->UnsafeAppend(day_hours_between[0]);
+      field_builders[1]->UnsafeAppend(day_hours_between[1]);
+      DCHECK_OK(struct_builder->Append());
+    };
+  }
+};
+
+template <typename Duration, typename BuilderType>
+struct DayHoursBetweenVisitValueFunction<Duration, TimestampType, BuilderType> {
+  static Result<
+      std::function<void(typename TimestampType::c_type, typename TimestampType::c_type)>>
+  Get(const std::vector<BuilderType*>& field_builders, const ArrayData& in0,
+      const ArrayData& in1, StructBuilder* struct_builder) {
+    const auto& timezone0 = GetInputTimezone(in0);
+    const auto& timezone1 = GetInputTimezone(in1);
+    if (timezone0 != timezone1) {
+      return Status::Invalid(timezone0, " != ", timezone1);
+    }
+    if (timezone0.empty()) {
+      return [=](TimestampType::c_type arg0, TimestampType::c_type arg1) {
+        const auto day_hours_between =
+            GetDayHoursBetween<Duration>(arg0, arg1, NonZonedLocalizer{});
+        field_builders[0]->UnsafeAppend(day_hours_between[0]);
+        field_builders[1]->UnsafeAppend(day_hours_between[1]);
+        DCHECK_OK(struct_builder->Append());
+      };
+    }
+    ARROW_ASSIGN_OR_RAISE(auto tz, LocateZone(timezone0));
+    return [=](TimestampType::c_type arg0, TimestampType::c_type arg1) {
+      const auto day_hours_between =
+          GetDayHoursBetween<Duration>(arg0, arg1, ZonedLocalizer{tz});
+      field_builders[0]->UnsafeAppend(day_hours_between[0]);
+      field_builders[1]->UnsafeAppend(day_hours_between[1]);
+      DCHECK_OK(struct_builder->Append());
+    };
+  }
+};
+
+template <typename Duration, typename InType, typename BuilderType>
+struct DayHoursBetweenVisitValueFunction2 {
+  static Result<std::function<Status(typename InType::c_type)>> Get(
+      const std::vector<BuilderType*>& field_builders, const Scalar& in0,
+      const ArrayData&, StructBuilder* struct_builder) {
+    const auto& in0_val = internal::UnboxScalar<const InType>::Unbox(in0);
+
+    return [=](typename InType::c_type arg1) {
+      const auto day_hours_between =
+          GetDayHoursBetween<Duration>(in0_val, arg1, NonZonedLocalizer{});
+      field_builders[0]->UnsafeAppend(day_hours_between[0]);
+      field_builders[1]->UnsafeAppend(day_hours_between[1]);
+      return struct_builder->Append();
+    };
+  }
+
+  static Result<std::function<Status(typename InType::c_type)>> Get(
+      const std::vector<BuilderType*>& field_builders, const ArrayData&,
+      const Scalar& in1, StructBuilder* struct_builder) {
+    const auto& in1_val = internal::UnboxScalar<const InType>::Unbox(in1);
+
+    return [=](typename InType::c_type arg0) {
+      const auto day_hours_between =
+          GetDayHoursBetween<Duration>(arg0, in1_val, NonZonedLocalizer{});
+      field_builders[0]->UnsafeAppend(day_hours_between[0]);
+      field_builders[1]->UnsafeAppend(day_hours_between[1]);
+      return struct_builder->Append();
+    };
+  }
+};
+
+template <typename Duration, typename BuilderType>
+struct DayHoursBetweenVisitValueFunction2<Duration, TimestampType, BuilderType> {
+  static Result<std::function<Status(typename TimestampType::c_type)>> Get(
+      const std::vector<BuilderType*>& field_builders, const Scalar& in0,
+      const ArrayData&, StructBuilder* struct_builder) {
+    const auto& in0_val = internal::UnboxScalar<const TimestampType>::Unbox(in0);
+
+    return [=](typename TimestampType::c_type arg1) {
+      const auto day_hours_between =
+          GetDayHoursBetween<Duration>(in0_val, arg1, NonZonedLocalizer{});
+      field_builders[0]->UnsafeAppend(day_hours_between[0]);
+      field_builders[1]->UnsafeAppend(day_hours_between[1]);
+      return struct_builder->Append();
+    };
+  }
+
+  static Result<std::function<Status(typename TimestampType::c_type)>> Get(
+      const std::vector<BuilderType*>& field_builders, const ArrayData&,
+      const Scalar& in1, StructBuilder* struct_builder) {
+    const auto& in1_val = internal::UnboxScalar<const TimestampType>::Unbox(in1);
+
+    return [=](typename TimestampType::c_type arg0) {
+      const auto day_hours_between =
+          GetDayHoursBetween<Duration>(arg0, in1_val, NonZonedLocalizer{});
+      field_builders[0]->UnsafeAppend(day_hours_between[0]);
+      field_builders[1]->UnsafeAppend(day_hours_between[1]);
+      return struct_builder->Append();
+    };
+  }
+};
+
+template <typename Duration, typename InType>
+struct DayHoursBetween {
+  static Status Call(KernelContext* ctx, const Scalar& arg0, const Scalar& arg1,
+                     Scalar* out) {
+    if (arg0.is_valid && arg1.is_valid) {
+      ARROW_ASSIGN_OR_RAISE(auto day_hours_between,
+                            (DayHoursBetweenWrapper<Duration, InType>::Get(arg0, arg1)));
+      ScalarVector values = {std::make_shared<Int64Scalar>(day_hours_between[0]),
+                             std::make_shared<Int64Scalar>(day_hours_between[1])};
+      *checked_cast<StructScalar*>(out) = StructScalar(std::move(values), DayHoursType());
+    } else {
+      out->is_valid = false;
+    }
+    return Status::OK();
+  }
+
+  static Status Call(KernelContext* ctx, const ArrayData& arg0, const ArrayData& arg1,
+                     ArrayData* out) {
+    using BuilderType = typename TypeTraits<Int64Type>::BuilderType;
+
+    std::unique_ptr<ArrayBuilder> array_builder;
+    RETURN_NOT_OK(MakeBuilder(ctx->memory_pool(), DayHoursType(), &array_builder));
+    StructBuilder* struct_builder = checked_cast<StructBuilder*>(array_builder.get());
+
+    if (arg0.length != arg1.length) {
+      return Status::Invalid(arg0.length, " != ", arg1.length);
+    }
+    RETURN_NOT_OK(struct_builder->Reserve(arg0.length));
+
+    std::vector<BuilderType*> field_builders;
+    field_builders.reserve(2);
+    for (int i = 0; i < 2; i++) {
+      field_builders.push_back(
+          checked_cast<BuilderType*>(struct_builder->field_builder(i)));
+      RETURN_NOT_OK(field_builders[i]->Reserve(1));
+    }
+
+    auto visit_null = [=]() { DCHECK_OK(struct_builder->AppendNull()); };
+    std::function<void(typename InType::c_type, typename InType::c_type)> visit_value;
+    ARROW_ASSIGN_OR_RAISE(
+        visit_value,
+        (DayHoursBetweenVisitValueFunction<Duration, InType, BuilderType>::Get(
+            field_builders, arg0, arg1, struct_builder)));
+
+    VisitTwoArrayValuesInline<typename InType::PhysicalType,
+                              typename InType::PhysicalType>(arg0, arg1, visit_value,
+                                                             visit_null);
+    std::shared_ptr<Array> out_array;
+    RETURN_NOT_OK(struct_builder->Finish(&out_array));
+    *out = *std::move(out_array->data());
+
+    return Status::OK();
+  }
+
+  static Status Call(KernelContext* ctx, const ArrayData& arg0, const Scalar& arg1,
+                     ArrayData* out) {
+    using BuilderType = typename TypeTraits<Int64Type>::BuilderType;
+    std::unique_ptr<ArrayBuilder> array_builder;
+    RETURN_NOT_OK(MakeBuilder(ctx->memory_pool(), DayHoursType(), &array_builder));
+    StructBuilder* struct_builder = checked_cast<StructBuilder*>(array_builder.get());
+    RETURN_NOT_OK(struct_builder->Reserve(arg0.length));
+
+    std::vector<BuilderType*> field_builders;
+    field_builders.reserve(2);
+    for (int i = 0; i < 2; i++) {
+      field_builders.push_back(
+          checked_cast<BuilderType*>(struct_builder->field_builder(i)));
+      RETURN_NOT_OK(field_builders[i]->Reserve(1));
+    }
+    auto visit_null = [=]() { return struct_builder->AppendNull(); };
+    std::function<Status(typename InType::c_type arg)> visit_value;
+    ARROW_ASSIGN_OR_RAISE(
+        visit_value,
+        (DayHoursBetweenVisitValueFunction2<Duration, InType, BuilderType>::Get(
+            field_builders, arg0, arg1, struct_builder)));
+    RETURN_NOT_OK(VisitArrayDataInline<typename InType::PhysicalType>(arg0, visit_value,
+                                                                      visit_null));
+    std::shared_ptr<Array> out_array;
+    RETURN_NOT_OK(struct_builder->Finish(&out_array));
+    *out = *std::move(out_array->data());
+    return Status::OK();
+  }
+
+  static Status Call(KernelContext* ctx, const Scalar& arg0, const ArrayData& arg1,
+                     ArrayData* out) {
+    using BuilderType = typename TypeTraits<Int64Type>::BuilderType;
+    std::unique_ptr<ArrayBuilder> array_builder;
+    RETURN_NOT_OK(MakeBuilder(ctx->memory_pool(), DayHoursType(), &array_builder));
+    StructBuilder* struct_builder = checked_cast<StructBuilder*>(array_builder.get());
+    RETURN_NOT_OK(struct_builder->Reserve(arg1.length));
+
+    std::vector<BuilderType*> field_builders;
+    field_builders.reserve(2);
+    for (int i = 0; i < 2; i++) {
+      field_builders.push_back(
+          checked_cast<BuilderType*>(struct_builder->field_builder(i)));
+      RETURN_NOT_OK(field_builders[i]->Reserve(1));
+    }
+    auto visit_null = [=]() { return struct_builder->AppendNull(); };
+    std::function<Status(typename InType::c_type arg)> visit_value;
+    ARROW_ASSIGN_OR_RAISE(
+        visit_value,
+        (DayHoursBetweenVisitValueFunction2<Duration, InType, BuilderType>::Get(
+            field_builders, arg0, arg1, struct_builder)));
+    RETURN_NOT_OK(VisitArrayDataInline<typename InType::PhysicalType>(arg1, visit_value,
+                                                                      visit_null));
+    std::shared_ptr<Array> out_array;
+    RETURN_NOT_OK(struct_builder->Finish(&out_array));
+    *out = *std::move(out_array->data());
+    return Status::OK();
+  }
+};
+
 template <typename Unit, typename Duration, typename Localizer>
 struct UnitsBetween {
   UnitsBetween(const FunctionOptions* options, Localizer&& localizer)
@@ -326,13 +598,12 @@ struct BinaryTemporalFactory {
 
   template <typename... WithTypes>
   static std::shared_ptr<ScalarFunction> Make(
-      std::string name, OutputType out_type, FunctionDoc doc,
+      std::string name, OutputType out_type, const FunctionDoc* doc,
       const FunctionOptions* default_options = NULLPTR, KernelInit init = NULLPTR) {
     DCHECK_NE(sizeof...(WithTypes), 0);
     BinaryTemporalFactory self{
         out_type, init,
-        std::make_shared<ScalarFunction>(name, Arity::Binary(), std::move(doc),
-                                         default_options)};
+        std::make_shared<ScalarFunction>(name, Arity::Binary(), doc, default_options)};
     AddTemporalKernels(&self, WithTypes{}...);
     return self.func;
   }
@@ -340,6 +611,31 @@ struct BinaryTemporalFactory {
   template <typename Duration, typename InType>
   void AddKernel(InputType in_type) {
     auto exec = ExecTemplate<Op, Duration, InType, OutType>::Exec;
+    DCHECK_OK(func->AddKernel({in_type, in_type}, out_type, std::move(exec), init));
+  }
+};
+
+template <template <typename...> class Op>
+struct SimpleBinaryTemporalFactory {
+  OutputType out_type;
+  KernelInit init;
+  std::shared_ptr<ScalarFunction> func;
+
+  template <typename... WithTypes>
+  static std::shared_ptr<ScalarFunction> Make(
+      std::string name, OutputType out_type, const FunctionDoc* doc,
+      const FunctionOptions* default_options = NULLPTR, KernelInit init = NULLPTR) {
+    DCHECK_NE(sizeof...(WithTypes), 0);
+    SimpleBinaryTemporalFactory self{
+        out_type, init,
+        std::make_shared<ScalarFunction>(name, Arity::Binary(), doc, default_options)};
+    AddTemporalKernels(&self, WithTypes{}...);
+    return self.func;
+  }
+
+  template <typename Duration, typename InType>
+  void AddKernel(InputType in_type) {
+    auto exec = SimpleBinary<Op<Duration, InType>>;
     DCHECK_OK(func->AddKernel({in_type, in_type}, out_type, std::move(exec), init));
   }
 };
@@ -453,24 +749,26 @@ const FunctionDoc nanoseconds_between_doc{
      "Null values emit null."),
     {"start", "end"}};
 
+const FunctionDoc dayhours_between_doc{"TODO", ("TODO"), {"start", "end"}};
+
 }  // namespace
 
 void RegisterScalarTemporalBinary(FunctionRegistry* registry) {
   // Temporal difference functions
   auto years_between =
       BinaryTemporalFactory<YearsBetween, TemporalBinary, Int64Type>::Make<
-          WithDates, WithTimestamps>("years_between", int64(), years_between_doc);
+          WithDates, WithTimestamps>("years_between", int64(), &years_between_doc);
   DCHECK_OK(registry->AddFunction(std::move(years_between)));
 
   auto quarters_between =
       BinaryTemporalFactory<QuartersBetween, TemporalBinary, Int64Type>::Make<
-          WithDates, WithTimestamps>("quarters_between", int64(), quarters_between_doc);
+          WithDates, WithTimestamps>("quarters_between", int64(), &quarters_between_doc);
   DCHECK_OK(registry->AddFunction(std::move(quarters_between)));
 
   auto month_interval_between =
       BinaryTemporalFactory<MonthsBetween, TemporalBinary, MonthIntervalType>::Make<
           WithDates, WithTimestamps>("month_interval_between", month_interval(),
-                                     months_between_doc);
+                                     &months_between_doc);
   DCHECK_OK(registry->AddFunction(std::move(month_interval_between)));
 
   auto month_day_nano_interval_between =
@@ -478,13 +776,13 @@ void RegisterScalarTemporalBinary(FunctionRegistry* registry) {
                             MonthDayNanoIntervalType>::Make<WithDates, WithTimes,
                                                             WithTimestamps>(
           "month_day_nano_interval_between", month_day_nano_interval(),
-          month_day_nano_interval_between_doc);
+          &month_day_nano_interval_between_doc);
   DCHECK_OK(registry->AddFunction(std::move(month_day_nano_interval_between)));
 
   static const auto default_day_of_week_options = DayOfWeekOptions::Defaults();
   auto weeks_between =
       BinaryTemporalFactory<WeeksBetween, TemporalDayOfWeekBinary, Int64Type>::Make<
-          WithDates, WithTimestamps>("weeks_between", int64(), weeks_between_doc,
+          WithDates, WithTimestamps>("weeks_between", int64(), &weeks_between_doc,
                                      &default_day_of_week_options, DayOfWeekState::Init);
   DCHECK_OK(registry->AddFunction(std::move(weeks_between)));
 
@@ -492,49 +790,55 @@ void RegisterScalarTemporalBinary(FunctionRegistry* registry) {
       BinaryTemporalFactory<DayTimeBetween, TemporalBinary, DayTimeIntervalType>::Make<
           WithDates, WithTimes, WithTimestamps>("day_time_interval_between",
                                                 day_time_interval(),
-                                                day_time_interval_between_doc);
+                                                &day_time_interval_between_doc);
   DCHECK_OK(registry->AddFunction(std::move(day_time_interval_between)));
+
+  auto dayhours_between =
+      SimpleBinaryTemporalFactory<DayHoursBetween>::Make<WithDates, WithTimes,
+                                                         WithTimestamps>(
+          "dayhours_between", DayHoursType(), &dayhours_between_doc);
+  DCHECK_OK(registry->AddFunction(std::move(dayhours_between)));
 
   auto days_between =
       BinaryTemporalFactory<DaysBetween, TemporalBinary, Int64Type>::Make<WithDates,
                                                                           WithTimestamps>(
-          "days_between", int64(), days_between_doc);
+          "days_between", int64(), &days_between_doc);
   DCHECK_OK(registry->AddFunction(std::move(days_between)));
 
   auto hours_between =
       BinaryTemporalFactory<HoursBetween, TemporalBinary, Int64Type>::Make<
           WithDates, WithTimes, WithTimestamps>("hours_between", int64(),
-                                                hours_between_doc);
+                                                &hours_between_doc);
   DCHECK_OK(registry->AddFunction(std::move(hours_between)));
 
   auto minutes_between =
       BinaryTemporalFactory<MinutesBetween, TemporalBinary, Int64Type>::Make<
           WithDates, WithTimes, WithTimestamps>("minutes_between", int64(),
-                                                minutes_between_doc);
+                                                &minutes_between_doc);
   DCHECK_OK(registry->AddFunction(std::move(minutes_between)));
 
   auto seconds_between =
       BinaryTemporalFactory<SecondsBetween, TemporalBinary, Int64Type>::Make<
           WithDates, WithTimes, WithTimestamps>("seconds_between", int64(),
-                                                seconds_between_doc);
+                                                &seconds_between_doc);
   DCHECK_OK(registry->AddFunction(std::move(seconds_between)));
 
   auto milliseconds_between =
       BinaryTemporalFactory<MillisecondsBetween, TemporalBinary, Int64Type>::Make<
           WithDates, WithTimes, WithTimestamps>("milliseconds_between", int64(),
-                                                milliseconds_between_doc);
+                                                &milliseconds_between_doc);
   DCHECK_OK(registry->AddFunction(std::move(milliseconds_between)));
 
   auto microseconds_between =
       BinaryTemporalFactory<MicrosecondsBetween, TemporalBinary, Int64Type>::Make<
           WithDates, WithTimes, WithTimestamps>("microseconds_between", int64(),
-                                                microseconds_between_doc);
+                                                &microseconds_between_doc);
   DCHECK_OK(registry->AddFunction(std::move(microseconds_between)));
 
   auto nanoseconds_between =
       BinaryTemporalFactory<NanosecondsBetween, TemporalBinary, Int64Type>::Make<
           WithDates, WithTimes, WithTimestamps>("nanoseconds_between", int64(),
-                                                nanoseconds_between_doc);
+                                                &nanoseconds_between_doc);
   DCHECK_OK(registry->AddFunction(std::move(nanoseconds_between)));
 }
 
