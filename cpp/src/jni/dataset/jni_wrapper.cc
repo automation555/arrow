@@ -18,13 +18,15 @@
 #include <mutex>
 
 #include "arrow/array.h"
-#include "arrow/array/concatenate.h"
 #include "arrow/dataset/api.h"
+#include "arrow/dataset/dataset_internal.h"
 #include "arrow/dataset/file_base.h"
 #include "arrow/filesystem/localfs.h"
 #include "arrow/ipc/api.h"
 #include "arrow/util/iterator.h"
+
 #include "jni/dataset/jni_util.h"
+
 #include "org_apache_arrow_dataset_file_JniWrapper.h"
 #include "org_apache_arrow_dataset_jni_JniWrapper.h"
 #include "org_apache_arrow_dataset_jni_NativeMemoryPool.h"
@@ -34,11 +36,17 @@ namespace {
 jclass illegal_access_exception_class;
 jclass illegal_argument_exception_class;
 jclass runtime_exception_class;
+jclass throwable_class;
 
+jclass serialized_record_batch_iterator_class;
 jclass java_reservation_listener_class;
 
+jmethodID serialized_record_batch_iterator_hasNext;
+jmethodID serialized_record_batch_iterator_next;
 jmethodID reserve_memory_method;
 jmethodID unreserve_memory_method;
+jmethodID throwable_getMessage;
+jmethodID throwable_toString;
 
 jlong default_memory_pool_id = -1L;
 
@@ -69,6 +77,17 @@ void JniAssertOkOrThrow(arrow::Status status) {
 
 void JniThrow(std::string message) { ThrowPendingException(message); }
 
+arrow::Status CheckException(JNIEnv* env) {
+  if (env->ExceptionCheck()) {
+    jthrowable t = env->ExceptionOccurred();
+    env->ExceptionClear();
+    auto jdescribe = (jstring)env->CallObjectMethod(t, throwable_toString);
+    std::string describe = arrow::dataset::jni::JStringToCString(env, jdescribe);
+    return arrow::dataset::jni::JNIError(t, describe);
+  }
+  return arrow::Status::OK();
+}
+
 arrow::Result<std::shared_ptr<arrow::dataset::FileFormat>> GetFileFormat(
     jint file_format_id) {
   switch (file_format_id) {
@@ -92,7 +111,7 @@ class ReserveFromJava : public arrow::dataset::jni::ReservationListener {
       return arrow::Status::Invalid("JNIEnv was not attached to current thread");
     }
     env->CallObjectMethod(java_reservation_listener_, reserve_memory_method, size);
-    RETURN_NOT_OK(arrow::dataset::jni::CheckException(env));
+    RETURN_NOT_OK(CheckException(env));
     return arrow::Status::OK();
   }
 
@@ -102,7 +121,7 @@ class ReserveFromJava : public arrow::dataset::jni::ReservationListener {
       return arrow::Status::Invalid("JNIEnv was not attached to current thread");
     }
     env->CallObjectMethod(java_reservation_listener_, unreserve_memory_method, size);
-    RETURN_NOT_OK(arrow::dataset::jni::CheckException(env));
+    RETURN_NOT_OK(CheckException(env));
     return arrow::Status::OK();
   }
 
@@ -130,7 +149,7 @@ class DisposableScannerAdaptor {
 
   static arrow::Result<std::shared_ptr<DisposableScannerAdaptor>> Create(
       std::shared_ptr<arrow::dataset::Scanner> scanner) {
-    ARROW_ASSIGN_OR_RAISE(auto batch_itr, scanner->ScanBatches());
+    ARROW_ASSIGN_OR_RAISE(auto batch_itr, scanner->ScanBatches())
     return std::make_shared<DisposableScannerAdaptor>(scanner, std::move(batch_itr));
   }
 
@@ -150,6 +169,50 @@ class DisposableScannerAdaptor {
     return batch.record_batch;
   }
 };
+
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> FromBytes(
+    JNIEnv* env, std::shared_ptr<arrow::Schema> schema, jbyteArray bytes) {
+  ARROW_ASSIGN_OR_RAISE(
+      std::shared_ptr<arrow::RecordBatch> batch,
+      arrow::dataset::jni::DeserializeUnsafeFromJava(env, schema, bytes))
+  return batch;
+}
+
+/// \brief Create scanner that scans over Java dataset API's components.
+///
+/// Currently, we use a NativeSerializedRecordBatchIterator as the underlying
+/// Java object to do scanning. Which means, only one single task will
+/// be produced from C++ code.
+arrow::Result<std::shared_ptr<arrow::dataset::Scanner>> MakeJavaDatasetScanner(
+    JavaVM* vm, jobject java_serialized_record_batch_iterator,
+    std::shared_ptr<arrow::Schema> schema) {
+  arrow::RecordBatchIterator itr = arrow::MakeFunctionIterator(
+      [vm, java_serialized_record_batch_iterator,
+       schema]() -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
+        JNIEnv* env;
+        if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION) != JNI_OK) {
+          return arrow::Status::Invalid("JNIEnv was not attached to current thread");
+        }
+        if (!env->CallBooleanMethod(java_serialized_record_batch_iterator,
+                                    serialized_record_batch_iterator_hasNext)) {
+          return nullptr;  // stream ended
+        }
+        auto bytes = (jbyteArray)env->CallObjectMethod(
+            java_serialized_record_batch_iterator, serialized_record_batch_iterator_next);
+        RETURN_NOT_OK(CheckException(env));
+        ARROW_ASSIGN_OR_RAISE(auto batch, FromBytes(env, schema, bytes));
+        return batch;
+      });
+
+  ARROW_ASSIGN_OR_RAISE(std::shared_ptr<arrow::RecordBatchReader> reader,
+                        arrow::RecordBatchReader::Make(std::move(itr), schema))
+  std::shared_ptr<arrow::dataset::ScannerBuilder> scanner_builder =
+      arrow::dataset::ScannerBuilder::FromRecordBatchReader(reader);
+  // Use default memory pool is enough as native allocation is ideally
+  // not being called during scanning Java-based fragments.
+  RETURN_NOT_OK(scanner_builder->Pool(arrow::default_memory_pool()));
+  return scanner_builder->Finish();
+}
 
 }  // namespace
 
@@ -189,15 +252,29 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
       CreateGlobalClassReference(env, "Ljava/lang/IllegalArgumentException;");
   runtime_exception_class =
       CreateGlobalClassReference(env, "Ljava/lang/RuntimeException;");
+  throwable_class = CreateGlobalClassReference(env, "Ljava/lang/Throwable;");
 
+  serialized_record_batch_iterator_class =
+      CreateGlobalClassReference(env,
+                                 "Lorg/apache/arrow/"
+                                 "dataset/jni/NativeSerializedRecordBatchIterator;");
   java_reservation_listener_class =
       CreateGlobalClassReference(env,
                                  "Lorg/apache/arrow/"
                                  "dataset/jni/ReservationListener;");
+
+  serialized_record_batch_iterator_hasNext = JniGetOrThrow(
+      GetMethodID(env, serialized_record_batch_iterator_class, "hasNext", "()Z"));
+  serialized_record_batch_iterator_next = JniGetOrThrow(
+      GetMethodID(env, serialized_record_batch_iterator_class, "next", "()[B"));
   reserve_memory_method =
       JniGetOrThrow(GetMethodID(env, java_reservation_listener_class, "reserve", "(J)V"));
   unreserve_memory_method = JniGetOrThrow(
       GetMethodID(env, java_reservation_listener_class, "unreserve", "(J)V"));
+  throwable_getMessage = JniGetOrThrow(
+      GetMethodID(env, throwable_class, "getMessage", "()Ljava/lang/String;"));
+  throwable_toString = JniGetOrThrow(
+      GetMethodID(env, throwable_class, "toString", "()Ljava/lang/String;"));
 
   default_memory_pool_id = reinterpret_cast<jlong>(arrow::default_memory_pool());
 
@@ -211,6 +288,8 @@ void JNI_OnUnload(JavaVM* vm, void* reserved) {
   env->DeleteGlobalRef(illegal_access_exception_class);
   env->DeleteGlobalRef(illegal_argument_exception_class);
   env->DeleteGlobalRef(runtime_exception_class);
+  env->DeleteGlobalRef(throwable_class);
+  env->DeleteGlobalRef(serialized_record_batch_iterator_class);
   env->DeleteGlobalRef(java_reservation_listener_class);
 
   default_memory_pool_id = -1L;
@@ -369,8 +448,9 @@ JNIEXPORT jlong JNICALL Java_org_apache_arrow_dataset_jni_JniWrapper_createScann
   std::shared_ptr<arrow::dataset::ScannerBuilder> scanner_builder =
       JniGetOrThrow(dataset->NewScan());
   JniAssertOkOrThrow(scanner_builder->Pool(pool));
-  if (columns != nullptr) {
-    std::vector<std::string> column_vector = ToStringVector(env, columns);
+
+  std::vector<std::string> column_vector = ToStringVector(env, columns);
+  if (!column_vector.empty()) {
     JniAssertOkOrThrow(scanner_builder->Project(column_vector));
   }
   JniAssertOkOrThrow(scanner_builder->BatchSize(batch_size));
@@ -416,10 +496,10 @@ Java_org_apache_arrow_dataset_jni_JniWrapper_getSchemaFromScanner(JNIEnv* env, j
 /*
  * Class:     org_apache_arrow_dataset_jni_JniWrapper
  * Method:    nextRecordBatch
- * Signature: (JJ)Z
+ * Signature: (J)[B
  */
-JNIEXPORT jboolean JNICALL Java_org_apache_arrow_dataset_jni_JniWrapper_nextRecordBatch(
-    JNIEnv* env, jobject, jlong scanner_id, jlong struct_array) {
+JNIEXPORT jbyteArray JNICALL Java_org_apache_arrow_dataset_jni_JniWrapper_nextRecordBatch(
+    JNIEnv* env, jobject, jlong scanner_id) {
   JNI_METHOD_START
   std::shared_ptr<DisposableScannerAdaptor> scanner_adaptor =
       RetrieveNativeInstance<DisposableScannerAdaptor>(scanner_id);
@@ -427,34 +507,10 @@ JNIEXPORT jboolean JNICALL Java_org_apache_arrow_dataset_jni_JniWrapper_nextReco
   std::shared_ptr<arrow::RecordBatch> record_batch =
       JniGetOrThrow(scanner_adaptor->Next());
   if (record_batch == nullptr) {
-    return false;  // stream ended
+    return nullptr;  // stream ended
   }
-  std::vector<std::shared_ptr<arrow::Array>> offset_zeroed_arrays;
-  for (int i = 0; i < record_batch->num_columns(); ++i) {
-    // TODO: If the array has an offset then we need to de-offset the array
-    // in order for it to be properly consumed on the Java end.
-    // This forces a copy, it would be nice to avoid this if Java
-    // could consume offset-arrays.  Perhaps at some point in the future
-    // using the C data interface.  See ARROW-15275
-    //
-    // Generally a non-zero offset will occur whenever the scanner batch
-    // size is smaller than the batch size of the underlying files.
-    std::shared_ptr<arrow::Array> array = record_batch->column(i);
-    if (array->offset() == 0) {
-      offset_zeroed_arrays.push_back(array);
-      continue;
-    }
-    std::shared_ptr<arrow::Array> offset_zeroed =
-        JniGetOrThrow(arrow::Concatenate({array}));
-    offset_zeroed_arrays.push_back(offset_zeroed);
-  }
-
-  std::shared_ptr<arrow::RecordBatch> offset_zeroed_batch = arrow::RecordBatch::Make(
-      record_batch->schema(), record_batch->num_rows(), offset_zeroed_arrays);
-  JniAssertOkOrThrow(
-      arrow::dataset::jni::ExportRecordBatch(env, offset_zeroed_batch, struct_array));
-  return true;
-  JNI_METHOD_END(false)
+  return JniGetOrThrow(arrow::dataset::jni::SerializeUnsafeFromNative(env, record_batch));
+  JNI_METHOD_END(nullptr)
 }
 
 /*
@@ -467,6 +523,38 @@ JNIEXPORT void JNICALL Java_org_apache_arrow_dataset_jni_JniWrapper_releaseBuffe
   JNI_METHOD_START
   ReleaseNativeRef<arrow::Buffer>(id);
   JNI_METHOD_END()
+}
+
+/*
+ * Class:     org_apache_arrow_dataset_file_JniWrapper
+ * Method:    newJniGlobalReference
+ * Signature: (Ljava/lang/Object;)J
+ */
+JNIEXPORT jlong JNICALL
+Java_org_apache_arrow_dataset_file_JniWrapper_newJniGlobalReference(JNIEnv* env, jobject,
+                                                                    jobject referent) {
+  JNI_METHOD_START
+  return reinterpret_cast<jlong>(env->NewGlobalRef(referent));
+  JNI_METHOD_END(-1L)
+}
+
+/*
+ * Class:     org_apache_arrow_dataset_file_JniWrapper
+ * Method:    newJniMethodReference
+ * Signature: (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)J
+ */
+JNIEXPORT jlong JNICALL
+Java_org_apache_arrow_dataset_file_JniWrapper_newJniMethodReference(JNIEnv* env, jobject,
+                                                                    jstring class_sig,
+                                                                    jstring method_name,
+                                                                    jstring method_sig) {
+  JNI_METHOD_START
+  jclass clazz = env->FindClass(JStringToCString(env, class_sig).data());
+  jmethodID jmethod_id =
+      env->GetMethodID(clazz, JStringToCString(env, method_name).data(),
+                       JStringToCString(env, method_sig).data());
+  return reinterpret_cast<jlong>(jmethod_id);
+  JNI_METHOD_END(-1L)
 }
 
 /*
@@ -486,4 +574,57 @@ Java_org_apache_arrow_dataset_file_JniWrapper_makeFileSystemDatasetFactory(
           JStringToCString(env, uri), file_format, options));
   return CreateNativeRef(d);
   JNI_METHOD_END(-1L)
+}
+
+/*
+ * Class:     org_apache_arrow_dataset_jni_JniWrapper
+ * Method:    reexportUnsafeSerializedBatch
+ * Signature: ([B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL
+Java_org_apache_arrow_dataset_jni_JniWrapper_reexportUnsafeSerializedBatch(
+    JNIEnv* env, jobject, jbyteArray schema_bytes, jbyteArray batch_bytes) {
+  JNI_METHOD_START
+  auto schema = JniGetOrThrow(FromSchemaByteArray(env, schema_bytes));
+  auto batch = JniGetOrThrow(
+      arrow::dataset::jni::DeserializeUnsafeFromJava(env, schema, batch_bytes));
+  return JniGetOrThrow(arrow::dataset::jni::SerializeUnsafeFromNative(env, batch));
+  JNI_METHOD_END(nullptr)
+}
+
+/*
+ * Class:     org_apache_arrow_dataset_file_JniWrapper
+ * Method:    writeFromScannerToFile
+ * Signature:
+ * (Lorg/apache/arrow/dataset/jni/NativeSerializedRecordBatchIterator;[BILjava/lang/String;[Ljava/lang/String;ILjava/lang/String;)V
+ */
+JNIEXPORT void JNICALL
+Java_org_apache_arrow_dataset_file_JniWrapper_writeFromScannerToFile(
+    JNIEnv* env, jobject, jobject itr, jbyteArray schema_bytes, jint file_format_id,
+    jstring uri, jobjectArray partition_columns, jint max_partitions,
+    jstring base_name_template) {
+  JNI_METHOD_START
+  JavaVM* vm;
+  if (env->GetJavaVM(&vm) != JNI_OK) {
+    JniThrow("Unable to get JavaVM instance");
+  }
+  auto schema = JniGetOrThrow(FromSchemaByteArray(env, schema_bytes));
+  auto scanner = JniGetOrThrow(MakeJavaDatasetScanner(vm, itr, schema));
+  std::shared_ptr<arrow::dataset::FileFormat> file_format =
+      JniGetOrThrow(GetFileFormat(file_format_id));
+  arrow::dataset::FileSystemDatasetWriteOptions options;
+  std::string output_path;
+  auto filesystem = JniGetOrThrow(
+      arrow::fs::FileSystemFromUri(JStringToCString(env, uri), &output_path));
+  std::vector<std::string> partition_column_vector =
+      ToStringVector(env, partition_columns);
+  options.file_write_options = file_format->DefaultWriteOptions();
+  options.filesystem = filesystem;
+  options.base_dir = output_path;
+  options.basename_template = JStringToCString(env, base_name_template);
+  options.partitioning = std::make_shared<arrow::dataset::HivePartitioning>(
+      arrow::dataset::SchemaFromColumnNames(schema, partition_column_vector));
+  options.max_partitions = max_partitions;
+  JniAssertOkOrThrow(arrow::dataset::FileSystemDataset::Write(options, scanner));
+  JNI_METHOD_END()
 }
