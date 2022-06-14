@@ -320,9 +320,6 @@ class ARROW_DS_EXPORT FileWriter {
   const std::shared_ptr<FileWriteOptions>& options() const { return options_; }
   const fs::FileLocator& destination() const { return destination_locator_; }
 
-  /// \brief After Finish() is called, provides number of bytes written to file.
-  Result<int64_t> GetBytesWritten() const;
-
  protected:
   FileWriter(std::shared_ptr<Schema> schema, std::shared_ptr<FileWriteOptions> options,
              std::shared_ptr<io::OutputStream> destination,
@@ -338,7 +335,6 @@ class ARROW_DS_EXPORT FileWriter {
   std::shared_ptr<FileWriteOptions> options_;
   std::shared_ptr<io::OutputStream> destination_;
   fs::FileLocator destination_locator_;
-  util::optional<int64_t> bytes_written_;
 };
 
 /// \brief Options for writing a dataset.
@@ -391,10 +387,6 @@ struct ARROW_DS_EXPORT FileSystemDatasetWriteOptions {
   /// Controls what happens if an output directory already exists.
   ExistingDataBehavior existing_data_behavior = ExistingDataBehavior::kError;
 
-  /// \brief If false the dataset writer will not create directories
-  /// This is mainly intended for filesystems that do not require directories such as S3.
-  bool create_dir = true;
-
   /// Callback to be invoked against all FileWriters before
   /// they are finalized with FileWriter::Finish().
   std::function<Status(FileWriter*)> writer_pre_finish = [](FileWriter*) {
@@ -417,13 +409,12 @@ class ARROW_DS_EXPORT WriteNodeOptions : public compute::ExecNodeOptions {
  public:
   explicit WriteNodeOptions(
       FileSystemDatasetWriteOptions options,
-      std::shared_ptr<const KeyValueMetadata> custom_metadata = NULLPTR)
-      : write_options(std::move(options)), custom_metadata(std::move(custom_metadata)) {}
+      std::shared_ptr<util::AsyncToggle> backpressure_toggle = NULLPTR)
+      : write_options(std::move(options)),
+        backpressure_toggle(std::move(backpressure_toggle)) {}
 
-  /// \brief Options to control how to write the dataset
   FileSystemDatasetWriteOptions write_options;
-  /// \brief Optional metadata to attach to written batches
-  std::shared_ptr<const KeyValueMetadata> custom_metadata;
+  std::shared_ptr<util::AsyncToggle> backpressure_toggle;
 };
 
 /// @}
