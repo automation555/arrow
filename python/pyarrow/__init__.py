@@ -30,11 +30,8 @@ For more information see the official page at https://arrow.apache.org
 """
 
 import gc as _gc
-import importlib as _importlib
 import os as _os
-import platform as _platform
 import sys as _sys
-import warnings as _warnings
 
 try:
     from ._generated_version import version as __version__
@@ -66,116 +63,46 @@ import pyarrow.lib as _lib
 if _gc_enabled:
     _gc.enable()
 
-from pyarrow.lib import (BuildInfo, RuntimeInfo, MonthDayNano,
-                         VersionInfo, cpp_build_info, cpp_version,
-                         cpp_version_info, runtime_info, cpu_count,
-                         set_cpu_count, enable_signal_handlers,
-                         io_thread_count, set_io_thread_count)
+from pyarrow.lib import (BuildInfo, VersionInfo,
+                         cpp_build_info, cpp_version, cpp_version_info,
+                         cpu_count, set_cpu_count)
 
 
 def show_versions():
     """
     Print various version information, to help with error reporting.
     """
-    def print_entry(label, value):
-        print(f"{label: <26}: {value: <8}")
-
+    # TODO: CPU information and flags
     print("pyarrow version info\n--------------------")
-    print_entry("Package kind", cpp_build_info.package_kind
-                if len(cpp_build_info.package_kind) > 0
-                else "not indicated")
-    print_entry("Arrow C++ library version", cpp_build_info.version)
-    print_entry("Arrow C++ compiler",
-                f"{cpp_build_info.compiler_id} {cpp_build_info.compiler_version}")
-    print_entry("Arrow C++ compiler flags", cpp_build_info.compiler_flags)
-    print_entry("Arrow C++ git revision", cpp_build_info.git_id)
-    print_entry("Arrow C++ git description", cpp_build_info.git_description)
-    print_entry("Arrow C++ build type", cpp_build_info.build_type)
-
-
-def _module_is_available(module):
-    try:
-        _importlib.import_module(f'pyarrow.{module}')
-    except ImportError:
-        return False
-    else:
-        return True
-
-
-def _filesystem_is_available(fs):
-    try:
-        import pyarrow.fs
-    except ImportError:
-        return False
-
-    try:
-        getattr(pyarrow.fs, fs)
-    except (ImportError, AttributeError):
-        return False
-    else:
-        return True
-
-
-def show_info():
-    """
-    Print detailed version and platform information, for error reporting
-    """
-    show_versions()
-
-    def print_entry(label, value):
-        print(f"  {label: <20}: {value: <8}")
-
-    print("\nPlatform:")
-    print_entry("OS / Arch", f"{_platform.system()} {_platform.machine()}")
-    print_entry("SIMD Level", runtime_info().simd_level)
-    print_entry("Detected SIMD Level", runtime_info().detected_simd_level)
-
-    pool = default_memory_pool()
-    print("\nMemory:")
-    print_entry("Default backend", pool.backend_name)
-    print_entry("Bytes allocated", f"{pool.bytes_allocated()} bytes")
-    print_entry("Max memory", f"{pool.max_memory()} bytes")
-    print_entry("Supported Backends", ', '.join(supported_memory_backends()))
-
-    print("\nOptional modules:")
-    modules = ["csv", "cuda", "dataset", "feather", "flight", "fs", "gandiva", "json",
-               "orc", "parquet", "plasma"]
-    for module in modules:
-        status = "Enabled" if _module_is_available(module) else "-"
-        print(f"  {module: <20}: {status: <8}")
-
-    print("\nFilesystems:")
-    filesystems = ["GcsFileSystem", "HadoopFileSystem", "S3FileSystem"]
-    for fs in filesystems:
-        status = "Enabled" if _filesystem_is_available(fs) else "-"
-        print(f"  {fs: <20}: {status: <8}")
-
-    print("\nCompression Codecs:")
-    codecs = ["brotli", "bz2", "gzip", "lz4_frame", "lz4", "snappy", "zstd"]
-    for codec in codecs:
-        status = "Enabled" if Codec.is_available(codec) else "-"
-        print(f"  {codec: <20}: {status: <8}")
+    print("Package kind: {}".format(cpp_build_info.package_kind
+                                    if len(cpp_build_info.package_kind) > 0
+                                    else "not indicated"))
+    print("Arrow C++ library version: {0}".format(cpp_build_info.version))
+    print("Arrow C++ compiler: {0} {1}"
+          .format(cpp_build_info.compiler_id, cpp_build_info.compiler_version))
+    print("Arrow C++ compiler flags: {0}"
+          .format(cpp_build_info.compiler_flags))
+    print("Arrow C++ git revision: {0}".format(cpp_build_info.git_id))
+    print("Arrow C++ git description: {0}"
+          .format(cpp_build_info.git_description))
 
 
 from pyarrow.lib import (null, bool_,
                          int8, int16, int32, int64,
                          uint8, uint16, uint32, uint64,
                          time32, time64, timestamp, date32, date64, duration,
-                         month_day_nano_interval,
                          float16, float32, float64,
                          binary, string, utf8,
                          large_binary, large_string, large_utf8,
-                         decimal128, decimal256,
-                         list_, large_list, map_, struct,
-                         union, sparse_union, dense_union,
-                         dictionary,
+                         decimal128,
+                         list_, large_list, map_, struct, union, dictionary,
                          field,
                          type_for_alias,
                          DataType, DictionaryType, StructType,
                          ListType, LargeListType, MapType, FixedSizeListType,
-                         UnionType, SparseUnionType, DenseUnionType,
+                         UnionType,
                          TimestampType, Time32Type, Time64Type, DurationType,
-                         FixedSizeBinaryType, Decimal128Type, Decimal256Type,
+                         FixedSizeBinaryType, Decimal128Type,
                          BaseExtensionType, ExtensionType,
                          PyExtensionType, UnknownExtensionType,
                          register_extension_type, unregister_extension_type,
@@ -187,8 +114,8 @@ from pyarrow.lib import (null, bool_,
                          unify_schemas,
                          Array, Tensor,
                          array, chunked_array, record_batch, nulls, repeat,
-                         SparseCOOTensor, SparseCSRMatrix, SparseCSCMatrix,
-                         SparseCSFTensor,
+                         SparseCOOTensor, SparseSplitCOOTensor, SparseCSRMatrix,
+                         SparseCSCMatrix, SparseCSFTensor,
                          infer_type, from_numpy_dtype,
                          NullArray,
                          NumericArray, IntegerArray, FloatingPointArray,
@@ -205,24 +132,21 @@ from pyarrow.lib import (null, bool_,
                          DictionaryArray,
                          Date32Array, Date64Array, TimestampArray,
                          Time32Array, Time64Array, DurationArray,
-                         MonthDayNanoIntervalArray,
-                         Decimal128Array, Decimal256Array, StructArray, ExtensionArray,
+                         Decimal128Array, StructArray, ExtensionArray,
                          scalar, NA, _NULL as NULL, Scalar,
                          NullScalar, BooleanScalar,
                          Int8Scalar, Int16Scalar, Int32Scalar, Int64Scalar,
                          UInt8Scalar, UInt16Scalar, UInt32Scalar, UInt64Scalar,
                          HalfFloatScalar, FloatScalar, DoubleScalar,
-                         Decimal128Scalar, Decimal256Scalar,
+                         Decimal128Scalar,
                          ListScalar, LargeListScalar, FixedSizeListScalar,
                          Date32Scalar, Date64Scalar,
                          Time32Scalar, Time64Scalar,
-                         TimestampScalar, DurationScalar,
-                         MonthDayNanoIntervalScalar,
                          BinaryScalar, LargeBinaryScalar,
                          StringScalar, LargeStringScalar,
                          FixedSizeBinaryScalar, DictionaryScalar,
-                         MapScalar, StructScalar, UnionScalar,
-                         ExtensionScalar)
+                         MapScalar, UnionScalar, StructScalar,
+                         TimestampScalar, DurationScalar)
 
 # Buffers, allocation
 from pyarrow.lib import (Buffer, ResizableBuffer, foreign_buffer, py_buffer,
@@ -230,35 +154,27 @@ from pyarrow.lib import (Buffer, ResizableBuffer, foreign_buffer, py_buffer,
 
 from pyarrow.lib import (MemoryPool, LoggingMemoryPool, ProxyMemoryPool,
                          total_allocated_bytes, set_memory_pool,
-                         default_memory_pool, system_memory_pool,
-                         jemalloc_memory_pool, mimalloc_memory_pool,
-                         logging_memory_pool, proxy_memory_pool,
-                         log_memory_allocations, jemalloc_set_decay_ms,
-                         supported_memory_backends)
+                         default_memory_pool, logging_memory_pool,
+                         proxy_memory_pool, log_memory_allocations,
+                         jemalloc_set_decay_ms)
 
 # I/O
-from pyarrow.lib import (NativeFile, PythonFile,
+from pyarrow.lib import (HdfsFile, NativeFile, PythonFile,
                          BufferedInputStream, BufferedOutputStream,
                          CompressedInputStream, CompressedOutputStream,
                          TransformInputStream, transcoding_input_stream,
                          FixedSizeBufferWriter,
                          BufferReader, BufferOutputStream,
                          OSFile, MemoryMappedFile, memory_map,
-                         create_memory_map, MockOutputStream,
-                         input_stream, output_stream)
-
-from pyarrow._hdfsio import HdfsFile, have_libhdfs
+                         create_memory_map, have_libhdfs,
+                         MockOutputStream, input_stream, output_stream)
 
 from pyarrow.lib import (ChunkedArray, RecordBatch, Table, table,
-                         concat_arrays, concat_tables, TableGroupBy,
-                         RecordBatchReader)
+                         concat_arrays, concat_tables)
 
 # Exceptions
-from pyarrow.lib import (ArrowCancelled,
-                         ArrowCapacityError,
-                         ArrowException,
+from pyarrow.lib import (ArrowException,
                          ArrowKeyError,
-                         ArrowIndexError,
                          ArrowInvalid,
                          ArrowIOError,
                          ArrowMemoryError,
@@ -270,72 +186,26 @@ from pyarrow.lib import (ArrowCancelled,
 from pyarrow.lib import (deserialize_from, deserialize,
                          deserialize_components,
                          serialize, serialize_to, read_serialized,
+                         SerializedPyObject, SerializationContext,
                          SerializationCallbackError,
                          DeserializationCallbackError)
 
+from pyarrow.filesystem import FileSystem, LocalFileSystem
+
+from pyarrow.hdfs import HadoopFileSystem
 import pyarrow.hdfs as hdfs
 
 from pyarrow.ipc import serialize_pandas, deserialize_pandas
 import pyarrow.ipc as ipc
+
+
+localfs = LocalFileSystem.get_instance()
 
 from pyarrow.serialization import (default_serialization_context,
                                    register_default_serialization_handlers,
                                    register_torch_serialization_handlers)
 
 import pyarrow.types as types
-
-
-# deprecated top-level access
-
-
-from pyarrow.filesystem import FileSystem as _FileSystem
-from pyarrow.filesystem import LocalFileSystem as _LocalFileSystem
-from pyarrow.hdfs import HadoopFileSystem as _HadoopFileSystem
-
-from pyarrow.lib import SerializationContext as _SerializationContext
-from pyarrow.lib import SerializedPyObject as _SerializedPyObject
-
-
-_localfs = _LocalFileSystem._get_instance()
-
-
-_msg = (
-    "pyarrow.{0} is deprecated as of 2.0.0, please use pyarrow.fs.{1} instead."
-)
-
-_serialization_msg = (
-    "'pyarrow.{0}' is deprecated and will be removed in a future version. "
-    "Use pickle or the pyarrow IPC functionality instead."
-)
-
-_deprecated = {
-    "localfs": (_localfs, "LocalFileSystem"),
-    "FileSystem": (_FileSystem, "FileSystem"),
-    "LocalFileSystem": (_LocalFileSystem, "LocalFileSystem"),
-    "HadoopFileSystem": (_HadoopFileSystem, "HadoopFileSystem"),
-}
-
-_serialization_deprecatd = {
-    "SerializationContext": _SerializationContext,
-    "SerializedPyObject": _SerializedPyObject,
-}
-
-
-def __getattr__(name):
-    if name in _deprecated:
-        obj, new_name = _deprecated[name]
-        _warnings.warn(_msg.format(name, new_name),
-                       FutureWarning, stacklevel=2)
-        return obj
-    elif name in _serialization_deprecatd:
-        _warnings.warn(_serialization_msg.format(name),
-                       FutureWarning, stacklevel=2)
-        return _serialization_deprecatd[name]
-
-    raise AttributeError(
-        "module 'pyarrow' has no attribute '{0}'".format(name)
-    )
-
 
 # Entry point for starting the plasma store
 
@@ -420,7 +290,6 @@ LargeStringValue = _deprecate_scalar("LargeString", LargeStringScalar)
 FixedSizeBinaryValue = _deprecate_scalar("FixedSizeBinary",
                                          FixedSizeBinaryScalar)
 Decimal128Value = _deprecate_scalar("Decimal128", Decimal128Scalar)
-Decimal256Value = _deprecate_scalar("Decimal256", Decimal256Scalar)
 UnionValue = _deprecate_scalar("Union", UnionScalar)
 StructValue = _deprecate_scalar("Struct", StructScalar)
 DictionaryValue = _deprecate_scalar("Dictionary", DictionaryScalar)
@@ -522,7 +391,7 @@ def create_library_symlinks():
         except PermissionError:
             print("Tried creating symlink {}. If you need to link to "
                   "bundled shared libraries, run "
-                  "pyarrow.create_library_symlinks() as root")
+                  "pyarrow._setup_bundled_symlinks() as root")
 
 
 def get_library_dirs():

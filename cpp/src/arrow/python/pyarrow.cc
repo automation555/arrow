@@ -57,6 +57,9 @@ int import_pyarrow() {
     } else {                                                                            \
       return UnwrapError(obj, #TYPE_NAME);                                              \
     }                                                                                   \
+  }                                                                                     \
+  Status unwrap_##FUNC_SUFFIX(PyObject* obj, std::shared_ptr<TYPE_NAME>* out) {         \
+    return unwrap_##FUNC_SUFFIX(obj).Value(out);                                        \
   }
 
 DEFINE_WRAP_FUNCTIONS(buffer, Buffer)
@@ -65,12 +68,11 @@ DEFINE_WRAP_FUNCTIONS(data_type, DataType)
 DEFINE_WRAP_FUNCTIONS(field, Field)
 DEFINE_WRAP_FUNCTIONS(schema, Schema)
 
-DEFINE_WRAP_FUNCTIONS(scalar, Scalar)
-
 DEFINE_WRAP_FUNCTIONS(array, Array)
 DEFINE_WRAP_FUNCTIONS(chunked_array, ChunkedArray)
 
 DEFINE_WRAP_FUNCTIONS(sparse_coo_tensor, SparseCOOTensor)
+DEFINE_WRAP_FUNCTIONS(sparse_split_coo_tensor, SparseSplitCOOTensor)
 DEFINE_WRAP_FUNCTIONS(sparse_csc_matrix, SparseCSCMatrix)
 DEFINE_WRAP_FUNCTIONS(sparse_csf_tensor, SparseCSFTensor)
 DEFINE_WRAP_FUNCTIONS(sparse_csr_matrix, SparseCSRMatrix)

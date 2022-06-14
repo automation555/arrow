@@ -119,22 +119,6 @@ function(ADD_ARROW_BENCHMARK REL_TEST_NAME)
                 ${ARG_UNPARSED_ARGUMENTS})
 endfunction()
 
-macro(append_avx2_src SRC)
-  if(ARROW_HAVE_RUNTIME_AVX2)
-    list(APPEND ARROW_SRCS ${SRC})
-    set_source_files_properties(${SRC} PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
-    set_source_files_properties(${SRC} PROPERTIES COMPILE_FLAGS ${ARROW_AVX2_FLAG})
-  endif()
-endmacro()
-
-macro(append_avx512_src SRC)
-  if(ARROW_HAVE_RUNTIME_AVX512)
-    list(APPEND ARROW_SRCS ${SRC})
-    set_source_files_properties(${SRC} PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
-    set_source_files_properties(${SRC} PROPERTIES COMPILE_FLAGS ${ARROW_AVX512_FLAG})
-  endif()
-endmacro()
-
 set(ARROW_SRCS
     array/array_base.cc
     array/array_binary.cc
@@ -158,7 +142,6 @@ set(ARROW_SRCS
     builder.cc
     buffer.cc
     chunked_array.cc
-    chunk_resolver.cc
     compare.cc
     config.cc
     datum.cc
@@ -177,6 +160,7 @@ set(ARROW_SRCS
     tensor/coo_converter.cc
     tensor/csf_converter.cc
     tensor/csx_converter.cc
+    tensor/split_coo_converter.cc
     type.cc
     visitor.cc
     c/bridge.cc
@@ -189,9 +173,7 @@ set(ARROW_SRCS
     io/interfaces.cc
     io/memory.cc
     io/slow.cc
-    io/stdio.cc
     io/transform.cc
-    util/async_util.cc
     util/basic_decimal.cc
     util/bit_block_counter.cc
     util/bit_run_reader.cc
@@ -200,18 +182,15 @@ set(ARROW_SRCS
     util/bitmap_builders.cc
     util/bitmap_ops.cc
     util/bpacking.cc
-    util/byte_size.cc
-    util/cancel.cc
     util/compression.cc
-    util/counting_semaphore.cc
     util/cpu_info.cc
-    util/debug.cc
     util/decimal.cc
     util/delimiting.cc
     util/formatting.cc
     util/future.cc
     util/int_util.cc
     util/io_util.cc
+    util/iterator.cc
     util/logging.cc
     util/key_value_metadata.cc
     util/memory.cc
@@ -219,12 +198,9 @@ set(ARROW_SRCS
     util/string.cc
     util/string_builder.cc
     util/task_group.cc
-    util/tdigest.cc
     util/thread_pool.cc
     util/time.cc
-    util/tracing.cc
     util/trie.cc
-    util/unreachable.cc
     util/uri.cc
     util/utf8.cc
     util/value_parsing.cc
@@ -239,11 +215,18 @@ set(ARROW_SRCS
     vendored/double-conversion/diy-fp.cc
     vendored/double-conversion/strtod.cc)
 
-append_avx2_src(util/bpacking_avx2.cc)
-append_avx512_src(util/bpacking_avx512.cc)
-
-if(ARROW_HAVE_NEON)
-  list(APPEND ARROW_SRCS util/bpacking_neon.cc)
+if(CXX_SUPPORTS_AVX2)
+  list(APPEND ARROW_SRCS util/bpacking_avx2.cc)
+  set_source_files_properties(util/bpacking_avx2.cc PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+  set_source_files_properties(util/bpacking_avx2.cc PROPERTIES COMPILE_FLAGS
+                              ${ARROW_AVX2_FLAG})
+endif()
+if(CXX_SUPPORTS_AVX512)
+  list(APPEND ARROW_SRCS util/bpacking_avx512.cc)
+  set_source_files_properties(util/bpacking_avx512.cc PROPERTIES SKIP_PRECOMPILE_HEADERS
+                              ON)
+  set_source_files_properties(util/bpacking_avx512.cc PROPERTIES COMPILE_FLAGS
+                              ${ARROW_AVX512_FLAG})
 endif()
 
 if(APPLE)
@@ -269,8 +252,11 @@ set(ARROW_C_SRCS
     vendored/uriparser/UriShorten.c)
 
 set_source_files_properties(vendored/datetime/tz.cpp
-                            PROPERTIES SKIP_PRECOMPILE_HEADERS ON
-                                       SKIP_UNITY_BUILD_INCLUSION ON)
+                            PROPERTIES
+                            SKIP_PRECOMPILE_HEADERS
+                            ON
+                            SKIP_UNITY_BUILD_INCLUSION
+                            ON)
 
 # Disable DLL exports in vendored uriparser library
 add_definitions(-DURI_STATIC_BUILD)
@@ -288,10 +274,6 @@ endif()
 if(ARROW_WITH_LZ4)
   add_definitions(-DARROW_WITH_LZ4)
   list(APPEND ARROW_SRCS util/compression_lz4.cc)
-endif()
-
-if(ARROW_WITH_OPENTELEMETRY)
-  list(APPEND ARROW_SRCS util/tracing_internal.cc)
 endif()
 
 if(ARROW_WITH_SNAPPY)
@@ -335,12 +317,16 @@ endif()
 if(_allocator_dependencies)
   if("${CMAKE_GENERATOR}" STREQUAL "Ninja")
     set_source_files_properties(memory_pool.cc PROPERTIES OBJECT_DEPENDS
-                                                          "${_allocator_dependencies}")
+                                "${_allocator_dependencies}")
   else()
     add_dependencies(arrow_dependencies ${_allocator_dependencies})
   endif()
-  set_source_files_properties(memory_pool.cc PROPERTIES SKIP_PRECOMPILE_HEADERS ON
-                                                        SKIP_UNITY_BUILD_INCLUSION ON)
+  set_source_files_properties(memory_pool.cc
+                              PROPERTIES
+                              SKIP_PRECOMPILE_HEADERS
+                              ON
+                              SKIP_UNITY_BUILD_INCLUSION
+                              ON)
 endif()
 
 unset(_allocator_dependencies)
@@ -356,149 +342,109 @@ endif()
 #
 
 if(ARROW_CSV)
-  list(APPEND
-       ARROW_SRCS
-       csv/converter.cc
-       csv/chunker.cc
-       csv/column_builder.cc
-       csv/column_decoder.cc
-       csv/options.cc
-       csv/parser.cc
-       csv/reader.cc)
-  if(ARROW_COMPUTE)
-    list(APPEND ARROW_SRCS csv/writer.cc)
-  endif()
+  list(APPEND ARROW_SRCS
+              csv/converter.cc
+              csv/chunker.cc
+              csv/column_builder.cc
+              csv/column_decoder.cc
+              csv/options.cc
+              csv/parser.cc
+              csv/reader.cc)
 
   list(APPEND ARROW_TESTING_SRCS csv/test_common.cc)
 endif()
 
 if(ARROW_COMPUTE)
-  list(APPEND
-       ARROW_SRCS
-       compute/api_aggregate.cc
-       compute/api_scalar.cc
-       compute/api_vector.cc
-       compute/cast.cc
-       compute/exec.cc
-       compute/exec/aggregate_node.cc
-       compute/exec/bloom_filter.cc
-       compute/exec/exec_plan.cc
-       compute/exec/expression.cc
-       compute/exec/filter_node.cc
-       compute/exec/hash_join.cc
-       compute/exec/hash_join_dict.cc
-       compute/exec/hash_join_node.cc
-       compute/exec/ir_consumer.cc
-       compute/exec/key_compare.cc
-       compute/exec/key_encode.cc
-       compute/exec/key_hash.cc
-       compute/exec/key_map.cc
-       compute/exec/order_by_impl.cc
-       compute/exec/partition_util.cc
-       compute/exec/options.cc
-       compute/exec/project_node.cc
-       compute/exec/sink_node.cc
-       compute/exec/source_node.cc
-       compute/exec/task_util.cc
-       compute/exec/tpch_node.cc
-       compute/exec/union_node.cc
-       compute/exec/util.cc
-       compute/function.cc
-       compute/function_internal.cc
-       compute/kernel.cc
-       compute/light_array.cc
-       compute/registry.cc
-       compute/kernels/aggregate_basic.cc
-       compute/kernels/aggregate_mode.cc
-       compute/kernels/aggregate_quantile.cc
-       compute/kernels/aggregate_tdigest.cc
-       compute/kernels/aggregate_var_std.cc
-       compute/kernels/codegen_internal.cc
-       compute/kernels/hash_aggregate.cc
-       compute/kernels/row_encoder.cc
-       compute/kernels/scalar_arithmetic.cc
-       compute/kernels/scalar_boolean.cc
-       compute/kernels/scalar_cast_boolean.cc
-       compute/kernels/scalar_cast_dictionary.cc
-       compute/kernels/scalar_cast_internal.cc
-       compute/kernels/scalar_cast_nested.cc
-       compute/kernels/scalar_cast_numeric.cc
-       compute/kernels/scalar_cast_string.cc
-       compute/kernels/scalar_cast_temporal.cc
-       compute/kernels/scalar_compare.cc
-       compute/kernels/scalar_if_else.cc
-       compute/kernels/scalar_nested.cc
-       compute/kernels/scalar_random.cc
-       compute/kernels/scalar_set_lookup.cc
-       compute/kernels/scalar_string_ascii.cc
-       compute/kernels/scalar_string_utf8.cc
-       compute/kernels/scalar_temporal_binary.cc
-       compute/kernels/scalar_temporal_unary.cc
-       compute/kernels/scalar_validity.cc
-       compute/kernels/util_internal.cc
-       compute/kernels/vector_array_sort.cc
-       compute/kernels/vector_cumulative_ops.cc
-       compute/kernels/vector_hash.cc
-       compute/kernels/vector_nested.cc
-       compute/kernels/vector_replace.cc
-       compute/kernels/vector_selection.cc
-       compute/kernels/vector_sort.cc)
+  list(APPEND ARROW_SRCS
+              compute/api_aggregate.cc
+              compute/api_scalar.cc
+              compute/api_vector.cc
+              compute/cast.cc
+              compute/exec.cc
+              compute/function.cc
+              compute/kernel.cc
+              compute/registry.cc
+              compute/kernels/aggregate_basic.cc
+              compute/kernels/aggregate_mode.cc
+              compute/kernels/aggregate_var_std.cc
+              compute/kernels/codegen_internal.cc
+              compute/kernels/scalar_arithmetic.cc
+              compute/kernels/scalar_boolean.cc
+              compute/kernels/scalar_cast_boolean.cc
+              compute/kernels/scalar_cast_internal.cc
+              compute/kernels/scalar_cast_nested.cc
+              compute/kernels/scalar_cast_numeric.cc
+              compute/kernels/scalar_cast_string.cc
+              compute/kernels/scalar_cast_temporal.cc
+              compute/kernels/scalar_compare.cc
+              compute/kernels/scalar_nested.cc
+              compute/kernels/scalar_set_lookup.cc
+              compute/kernels/scalar_string.cc
+              compute/kernels/scalar_validity.cc
+              compute/kernels/scalar_fill_null.cc
+              compute/kernels/util_internal.cc
+              compute/kernels/vector_hash.cc
+              compute/kernels/vector_nested.cc
+              compute/kernels/vector_selection.cc
+              compute/kernels/vector_sort.cc)
 
-  append_avx2_src(compute/kernels/aggregate_basic_avx2.cc)
-  append_avx512_src(compute/kernels/aggregate_basic_avx512.cc)
-
-  append_avx2_src(compute/exec/bloom_filter_avx2.cc)
-  append_avx2_src(compute/exec/key_compare_avx2.cc)
-  append_avx2_src(compute/exec/key_encode_avx2.cc)
-  append_avx2_src(compute/exec/key_hash_avx2.cc)
-  append_avx2_src(compute/exec/key_map_avx2.cc)
-  append_avx2_src(compute/exec/util_avx2.cc)
-
-  list(APPEND ARROW_TESTING_SRCS compute/exec/test_util.cc)
+  if(CXX_SUPPORTS_AVX2)
+    list(APPEND ARROW_SRCS compute/kernels/aggregate_basic_avx2.cc)
+    set_source_files_properties(compute/kernels/aggregate_basic_avx2.cc PROPERTIES
+                                SKIP_PRECOMPILE_HEADERS ON)
+    set_source_files_properties(compute/kernels/aggregate_basic_avx2.cc PROPERTIES
+                                COMPILE_FLAGS ${ARROW_AVX2_FLAG})
+  endif()
+  if(CXX_SUPPORTS_AVX512)
+    list(APPEND ARROW_SRCS compute/kernels/aggregate_basic_avx512.cc)
+    set_source_files_properties(compute/kernels/aggregate_basic_avx512.cc PROPERTIES
+                                SKIP_PRECOMPILE_HEADERS ON)
+    set_source_files_properties(compute/kernels/aggregate_basic_avx512.cc PROPERTIES
+                                COMPILE_FLAGS ${ARROW_AVX512_FLAG})
+  endif()
 endif()
 
 if(ARROW_FILESYSTEM)
   if(ARROW_HDFS)
     add_definitions(-DARROW_HDFS)
   endif()
-
-  list(APPEND
-       ARROW_SRCS
-       filesystem/filesystem.cc
-       filesystem/localfs.cc
-       filesystem/mockfs.cc
-       filesystem/path_util.cc
-       filesystem/util_internal.cc)
-
-  if(ARROW_GCS)
-    list(APPEND ARROW_SRCS filesystem/gcsfs.cc filesystem/gcsfs_internal.cc)
-    set_source_files_properties(filesystem/gcsfs.cc filesystem/gcsfs_internal.cc
-                                PROPERTIES SKIP_PRECOMPILE_HEADERS ON
-                                           SKIP_UNITY_BUILD_INCLUSION ON)
+  if(ARROW_S3)
+    add_definitions(-DARROW_S3)
   endif()
+
+  list(APPEND ARROW_SRCS
+              filesystem/filesystem.cc
+              filesystem/localfs.cc
+              filesystem/mockfs.cc
+              filesystem/path_forest.cc
+              filesystem/path_util.cc
+              filesystem/util_internal.cc)
+
   if(ARROW_HDFS)
     list(APPEND ARROW_SRCS filesystem/hdfs.cc)
   endif()
   if(ARROW_S3)
     list(APPEND ARROW_SRCS filesystem/s3fs.cc)
     set_source_files_properties(filesystem/s3fs.cc
-                                PROPERTIES SKIP_PRECOMPILE_HEADERS ON
-                                           SKIP_UNITY_BUILD_INCLUSION ON)
+                                PROPERTIES
+                                SKIP_PRECOMPILE_HEADERS
+                                ON
+                                SKIP_UNITY_BUILD_INCLUSION
+                                ON)
   endif()
 
   list(APPEND ARROW_TESTING_SRCS filesystem/test_util.cc)
 endif()
 
 if(ARROW_IPC)
-  list(APPEND
-       ARROW_SRCS
-       ipc/dictionary.cc
-       ipc/feather.cc
-       ipc/message.cc
-       ipc/metadata_internal.cc
-       ipc/options.cc
-       ipc/reader.cc
-       ipc/writer.cc)
+  list(APPEND ARROW_SRCS
+              ipc/dictionary.cc
+              ipc/feather.cc
+              ipc/message.cc
+              ipc/metadata_internal.cc
+              ipc/options.cc
+              ipc/reader.cc
+              ipc/writer.cc)
 
   if(ARROW_JSON)
     list(APPEND ARROW_SRCS ipc/json_simple.cc)
@@ -506,48 +452,29 @@ if(ARROW_IPC)
 endif()
 
 if(ARROW_JSON)
-  list(APPEND
-       ARROW_SRCS
-       json/options.cc
-       json/chunked_builder.cc
-       json/chunker.cc
-       json/converter.cc
-       json/object_parser.cc
-       json/object_writer.cc
-       json/parser.cc
-       json/reader.cc)
+  list(APPEND ARROW_SRCS
+              json/options.cc
+              json/chunked_builder.cc
+              json/chunker.cc
+              json/converter.cc
+              json/parser.cc
+              json/reader.cc)
 endif()
 
 if(ARROW_ORC)
-  list(APPEND
-       ARROW_SRCS
-       adapters/orc/adapter.cc
-       adapters/orc/options.cc
-       adapters/orc/util.cc)
+  list(APPEND ARROW_SRCS adapters/orc/adapter.cc adapters/orc/adapter_util.cc)
 endif()
 
-if(CXX_LINKER_SUPPORTS_VERSION_SCRIPT)
+if(NOT APPLE AND NOT MSVC_TOOLCHAIN)
+  # Localize thirdparty symbols using a linker version script. This hides them
+  # from the client application. The OS X linker does not support the
+  # version-script option.
   set(ARROW_VERSION_SCRIPT_FLAGS
       "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/symbols.map")
   set(ARROW_SHARED_LINK_FLAGS ${ARROW_VERSION_SCRIPT_FLAGS})
 endif()
 
 set(ARROW_ALL_SRCS ${ARROW_SRCS} ${ARROW_C_SRCS})
-
-if(ARROW_BUILD_STATIC AND ARROW_BUNDLED_STATIC_LIBS)
-  set(ARROW_BUILD_BUNDLED_DEPENDENCIES TRUE)
-else()
-  set(ARROW_BUILD_BUNDLED_DEPENDENCIES FALSE)
-endif()
-
-if(ARROW_BUILD_BUNDLED_DEPENDENCIES)
-  string(APPEND ARROW_PC_LIBS_PRIVATE " -larrow_bundled_dependencies")
-endif()
-# Need -latomic on Raspbian.
-# See also: https://issues.apache.org/jira/browse/ARROW-12860
-if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux" AND ${CMAKE_SYSTEM_PROCESSOR} MATCHES "armv7")
-  string(APPEND ARROW_PC_LIBS_PRIVATE " -latomic")
-endif()
 
 add_arrow_lib(arrow
               CMAKE_PACKAGE_NAME
@@ -570,9 +497,10 @@ add_arrow_lib(arrow
               ${ARROW_SHARED_PRIVATE_LINK_LIBS}
               STATIC_LINK_LIBS
               ${ARROW_STATIC_LINK_LIBS}
-              ${ARROW_STATIC_INSTALL_INTERFACE_LIBS}
               SHARED_INSTALL_INTERFACE_LIBS
-              ${ARROW_SHARED_INSTALL_INTERFACE_LIBS})
+              ${ARROW_SHARED_INSTALL_INTERFACE_LIBS}
+              STATIC_INSTALL_INTERFACE_LIBS
+              ${ARROW_STATIC_INSTALL_INTERFACE_LIBS})
 
 add_dependencies(arrow ${ARROW_LIBRARIES})
 
@@ -580,21 +508,18 @@ if(ARROW_BUILD_STATIC AND WIN32)
   target_compile_definitions(arrow_static PUBLIC ARROW_STATIC)
 endif()
 
-foreach(LIB_TARGET ${ARROW_LIBRARIES})
-  target_compile_definitions(${LIB_TARGET} PRIVATE ARROW_EXPORTING)
-endforeach()
-
 if(ARROW_WITH_BACKTRACE)
   find_package(Backtrace)
 
   foreach(LIB_TARGET ${ARROW_LIBRARIES})
+    target_compile_definitions(${LIB_TARGET} PRIVATE ARROW_EXPORTING)
     if(Backtrace_FOUND AND ARROW_WITH_BACKTRACE)
       target_compile_definitions(${LIB_TARGET} PRIVATE ARROW_WITH_BACKTRACE)
     endif()
   endforeach()
 endif()
 
-if(ARROW_BUILD_BUNDLED_DEPENDENCIES)
+if(ARROW_BUILD_STATIC AND ARROW_BUNDLED_STATIC_LIBS)
   arrow_car(_FIRST_LIB ${ARROW_BUNDLED_STATIC_LIBS})
   arrow_cdr(_OTHER_LIBS ${ARROW_BUNDLED_STATIC_LIBS})
   create_merged_static_lib(arrow_bundled_dependencies
@@ -606,7 +531,11 @@ if(ARROW_BUILD_BUNDLED_DEPENDENCIES)
                            ${_OTHER_LIBS})
 endif()
 
-if(ARROW_TESTING)
+if(ARROW_BUILD_TESTS
+   OR ARROW_BUILD_BENCHMARKS
+   OR ARROW_BUILD_INTEGRATION
+   OR ARROW_FUZZING)
+
   # that depend on gtest
   add_arrow_lib(arrow_testing
                 CMAKE_PACKAGE_NAME
@@ -622,15 +551,10 @@ if(ARROW_TESTING)
                 DEPENDENCIES
                 arrow_test_dependencies
                 SHARED_LINK_LIBS
-                arrow::flatbuffers
-                rapidjson::rapidjson
                 arrow_shared
                 GTest::gtest
                 STATIC_LINK_LIBS
-                arrow::flatbuffers
-                rapidjson::rapidjson
-                arrow_static
-                GTest::gtest)
+                arrow_static)
 
   add_custom_target(arrow_testing)
   add_dependencies(arrow_testing ${ARROW_TESTING_LIBRARIES})
@@ -686,8 +610,12 @@ add_arrow_test(misc_test
 
 add_arrow_test(public_api_test)
 
-set_source_files_properties(public_api_test.cc PROPERTIES SKIP_PRECOMPILE_HEADERS ON
-                                                          SKIP_UNITY_BUILD_INCLUSION ON)
+set_source_files_properties(public_api_test.cc
+                            PROPERTIES
+                            SKIP_PRECOMPILE_HEADERS
+                            ON
+                            SKIP_UNITY_BUILD_INCLUSION
+                            ON)
 
 add_arrow_test(scalar_test)
 add_arrow_test(type_test)
@@ -702,15 +630,12 @@ add_arrow_test(table_test
 add_arrow_test(tensor_test)
 add_arrow_test(sparse_tensor_test)
 
-set(STL_TEST_SRCS stl_iterator_test.cc)
 if(ARROW_COMPUTE)
   # This unit test uses compute code
-  list(APPEND STL_TEST_SRCS stl_test.cc)
+  add_arrow_test(stl_test)
 endif()
-add_arrow_test(stl_test SOURCES ${STL_TEST_SRCS})
 
 add_arrow_benchmark(builder_benchmark)
-add_arrow_benchmark(compare_benchmark)
 add_arrow_benchmark(memory_pool_benchmark)
 add_arrow_benchmark(type_benchmark)
 
@@ -734,10 +659,6 @@ endif()
 
 if(ARROW_COMPUTE)
   add_subdirectory(compute)
-endif()
-
-if(ARROW_SUBSTRAIT)
-  add_subdirectory(engine)
 endif()
 
 if(ARROW_CUDA)

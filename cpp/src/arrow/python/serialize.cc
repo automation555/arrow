@@ -29,14 +29,13 @@
 #include <numpy/arrayscalars.h>
 
 #include "arrow/array.h"
-#include "arrow/array/builder_binary.h"
-#include "arrow/array/builder_nested.h"
-#include "arrow/array/builder_primitive.h"
 #include "arrow/array/builder_union.h"
+#include "arrow/builder.h"
 #include "arrow/io/interfaces.h"
 #include "arrow/io/memory.h"
 #include "arrow/ipc/util.h"
 #include "arrow/ipc/writer.h"
+#include "arrow/memory_pool.h"
 #include "arrow/record_batch.h"
 #include "arrow/result.h"
 #include "arrow/tensor.h"
@@ -165,6 +164,17 @@ class SequenceBuilder {
     return sparse_coo_tensor_indices_->Append(sparse_coo_tensor_index);
   }
 
+  // Appending a sparse split-coo tensor to the sequence
+  //
+  // \param sparse_split_coo_tensor_index Index of the sparse split-coo tensor in the
+  // object.
+  Status AppendSparseSplitCOOTensor(const int32_t sparse_split_coo_tensor_index) {
+    RETURN_NOT_OK(CreateAndUpdate(&sparse_split_coo_tensor_indices_,
+                                  PythonType::SPARSESPLITCOOTENSOR,
+                                  [this]() { return new Int32Builder(pool_); }));
+    return sparse_split_coo_tensor_indices_->Append(sparse_split_coo_tensor_index);
+  }
+
   // Appending a sparse csr matrix to the sequence
   //
   // \param sparse_csr_matrix_index Index of the sparse csr matrix in the object.
@@ -289,6 +299,7 @@ class SequenceBuilder {
 
   std::shared_ptr<Int32Builder> tensor_indices_;
   std::shared_ptr<Int32Builder> sparse_coo_tensor_indices_;
+  std::shared_ptr<Int32Builder> sparse_split_coo_tensor_indices_;
   std::shared_ptr<Int32Builder> sparse_csr_matrix_indices_;
   std::shared_ptr<Int32Builder> sparse_csc_matrix_indices_;
   std::shared_ptr<Int32Builder> sparse_csf_tensor_indices_;
@@ -519,6 +530,11 @@ Status Append(PyObject* context, PyObject* elem, SequenceBuilder* builder,
         static_cast<int32_t>(blobs_out->sparse_tensors.size())));
     ARROW_ASSIGN_OR_RAISE(auto tensor, unwrap_sparse_coo_tensor(elem));
     blobs_out->sparse_tensors.push_back(tensor);
+  } else if (is_sparse_split_coo_tensor(elem)) {
+    RETURN_NOT_OK(builder->AppendSparseSplitCOOTensor(
+        static_cast<int32_t>(blobs_out->sparse_tensors.size())));
+    ARROW_ASSIGN_OR_RAISE(auto tensor, unwrap_sparse_split_coo_tensor(elem));
+    blobs_out->sparse_tensors.push_back(tensor);
   } else if (is_sparse_csr_matrix(elem)) {
     RETURN_NOT_OK(builder->AppendSparseCSRMatrix(
         static_cast<int32_t>(blobs_out->sparse_tensors.size())));
@@ -675,6 +691,8 @@ Status CountSparseTensors(
     const std::vector<std::shared_ptr<SparseTensor>>& sparse_tensors, PyObject** out) {
   OwnedRef num_sparse_tensors(PyDict_New());
   size_t num_coo = 0;
+  size_t num_split_coo = 0;
+  size_t ndim_split_coo = 0;
   size_t num_csr = 0;
   size_t num_csc = 0;
   size_t num_csf = 0;
@@ -684,6 +702,10 @@ Status CountSparseTensors(
     switch (sparse_tensor->format_id()) {
       case SparseTensorFormat::COO:
         ++num_coo;
+        break;
+      case SparseTensorFormat::SplitCOO:
+        ++num_split_coo;
+        ndim_split_coo += sparse_tensor->ndim();
         break;
       case SparseTensorFormat::CSR:
         ++num_csr;
@@ -699,6 +721,10 @@ Status CountSparseTensors(
   }
 
   PyDict_SetItemString(num_sparse_tensors.obj(), "coo", PyLong_FromSize_t(num_coo));
+  PyDict_SetItemString(num_sparse_tensors.obj(), "split_coo",
+                       PyLong_FromSize_t(num_split_coo));
+  PyDict_SetItemString(num_sparse_tensors.obj(), "ndim_split_coo",
+                       PyLong_FromSize_t(ndim_split_coo));
   PyDict_SetItemString(num_sparse_tensors.obj(), "csr", PyLong_FromSize_t(num_csr));
   PyDict_SetItemString(num_sparse_tensors.obj(), "csc", PyLong_FromSize_t(num_csc));
   PyDict_SetItemString(num_sparse_tensors.obj(), "csf", PyLong_FromSize_t(num_csf));

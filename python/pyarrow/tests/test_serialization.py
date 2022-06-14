@@ -21,7 +21,6 @@ import pytest
 import collections
 import datetime
 import os
-import pathlib
 import pickle
 import subprocess
 import string
@@ -51,11 +50,6 @@ try:
     import sparse
 except ImportError:
     sparse = None
-
-
-# ignore all serialization deprecation warnings in this file, we test that the
-# warnings are actually raised in test_serialization_deprecated.py
-pytestmark = pytest.mark.filterwarnings("ignore:'pyarrow:FutureWarning")
 
 
 def assert_equal(obj1, obj2):
@@ -239,8 +233,7 @@ CUSTOM_OBJECTS = [Exception("Test object."), CustomError(), Point(11, y=22),
 
 
 def make_serialization_context():
-    with pytest.warns(FutureWarning):
-        context = pa.default_serialization_context()
+    context = pa.default_serialization_context()
 
     context.register_type(Foo, "Foo")
     context.register_type(Bar, "Bar")
@@ -280,9 +273,9 @@ def _check_component_roundtrip(value, context=global_serialization_context):
     assert_equal(value, recons)
 
 
-@pytest.fixture(scope='session')
+@pytest.yield_fixture(scope='session')
 def large_buffer(size=32*1024*1024):
-    yield pa.allocate_buffer(size)
+    return pa.allocate_buffer(size)
 
 
 def large_memory_map(tmpdir_factory, size=100*1024*1024):
@@ -618,6 +611,62 @@ def test_pydata_sparse_sparse_coo_tensor_serialization():
     result = serialized.deserialize()
 
     assert np.array_equal(sparse_array.todense(), result.todense())
+
+
+@pytest.mark.parametrize('tensor_type', tensor_types)
+@pytest.mark.parametrize('index_type', index_types)
+def test_sparse_split_coo_tensor_serialization(index_type, tensor_type):
+    tensor_dtype = np.dtype(tensor_type)
+    index_dtype0 = np.dtype(index_type)
+    index_dtype1 = np.int32 if index_dtype0 != np.int32 else np.int16
+    index_dtype2 = np.int64 if index_dtype0 != np.int64 else np.int16
+
+    data = np.array([[1, 2, 3, 4, 5, 6]]).T.astype(tensor_dtype)
+    indices = [
+        np.array([0, 0, 2, 3, 1, 3], dtype=index_dtype0),
+        np.array([0, 2, 0, 4, 5, 5], dtype=index_dtype1),
+        np.array([0, 1, 2, 3, 4, 5], dtype=index_dtype2),
+    ]
+    shape = (4, 6, 8)
+    dim_names = ('x', 'y', 'z')
+
+    sparse_tensor = pa.SparseSplitCOOTensor.from_numpy(data, indices,
+                                                       shape, dim_names)
+
+    context = pa.default_serialization_context()
+    serialized = pa.serialize(sparse_tensor, context=context).to_buffer()
+    result = pa.deserialize(serialized)
+    assert_equal(result, sparse_tensor)
+    assert isinstance(result, pa.SparseSplitCOOTensor)
+
+    data_result, indices_result = result.to_numpy()
+    assert np.array_equal(data_result, data)
+    assert np.array_equal(indices[0], indices_result[0])
+    assert np.array_equal(indices[1], indices_result[1])
+    assert np.array_equal(indices[2], indices_result[2])
+    assert result.dim_names == dim_names
+
+
+@pytest.mark.parametrize('tensor_type', tensor_types)
+@pytest.mark.parametrize('index_type', index_types)
+def test_sparse_split_coo_tensor_components_serialization(
+        large_buffer, index_type, tensor_type):
+    index_dtype0 = np.dtype(index_type)
+    index_dtype1 = np.int32 if index_dtype0 != np.int32 else np.int16
+    index_dtype2 = np.int64 if index_dtype0 != np.int64 else np.int16
+
+    data = np.array([[1, 2, 3, 4, 5, 6]]).T.astype(tensor_type)
+    indices = [
+        np.array([0, 0, 2, 3, 1, 3], dtype=index_dtype0),
+        np.array([0, 2, 0, 4, 5, 5], dtype=index_dtype1),
+        np.array([0, 1, 2, 3, 4, 5], dtype=index_dtype2),
+    ]
+    shape = (4, 6, 8)
+    dim_names = ('x', 'y', 'z')
+
+    sparse_tensor = pa.SparseSplitCOOTensor.from_numpy(data, indices,
+                                                       shape, dim_names)
+    serialization_roundtrip(sparse_tensor, large_buffer)
 
 
 @pytest.mark.parametrize('tensor_type', tensor_types)
@@ -1010,7 +1059,8 @@ def test_serialize_to_components_invalid_cases():
     components = {
         'num_tensors': 0,
         'num_sparse_tensors': {
-            'coo': 0, 'csr': 0, 'csc': 0, 'csf': 0, 'ndim_csf': 0
+            'coo': 0, 'csr': 0, 'csc': 0, 'csf': 0, 'ndim_csf': 0,
+            'split_coo': 0, 'ndim_split_coo': 0
         },
         'num_ndarrays': 0,
         'num_buffers': 1,
@@ -1023,7 +1073,8 @@ def test_serialize_to_components_invalid_cases():
     components = {
         'num_tensors': 0,
         'num_sparse_tensors': {
-            'coo': 0, 'csr': 0, 'csc': 0, 'csf': 0, 'ndim_csf': 0
+            'coo': 0, 'csr': 0, 'csc': 0, 'csf': 0, 'ndim_csf': 0,
+            'split_coo': 0, 'ndim_split_coo': 0
         },
         'num_ndarrays': 1,
         'num_buffers': 0,
@@ -1143,8 +1194,10 @@ def test_set_pickle():
     assert deserialized == b'custom serialization 2'
 
 
+@pytest.mark.skipif(sys.version_info < (3, 6), reason="need Python 3.6")
 def test_path_objects(tmpdir):
     # Test compatibility with PEP 519 path-like objects
+    import pathlib
     p = pathlib.Path(tmpdir) / 'zzz.bin'
     obj = 1234
     pa.serialize_to(obj, p)
