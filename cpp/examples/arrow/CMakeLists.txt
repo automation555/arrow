@@ -21,8 +21,8 @@ if(ARROW_COMPUTE)
   add_arrow_example(compute_register_example)
 endif()
 
-if(ARROW_SUBSTRAIT)
-  add_arrow_example(engine_substrait_consumption EXTRA_LINK_LIBS arrow_substrait_shared)
+if(ARROW_ENGINE)
+  add_arrow_example(engine_substrait_consumption EXTRA_LINK_LIBS arrow_engine_shared)
 endif()
 
 if(ARROW_COMPUTE AND ARROW_CSV)
@@ -134,6 +134,16 @@ if(ARROW_PARQUET AND ARROW_DATASET)
   add_arrow_example(join_example EXTRA_LINK_LIBS ${DATASET_EXAMPLES_LINK_LIBS})
   add_dependencies(join-example parquet)
 
-  add_arrow_example(udf_example)
+  if(ARROW_SKYHOOK)
+    if(ARROW_BUILD_SHARED)
+      list(APPEND DATASET_EXAMPLES_LINK_LIBS arrow_skyhook_shared)
+    else()
+      list(APPEND DATASET_EXAMPLES_LINK_LIBS arrow_skyhook_static)
+    endif()
+
+    add_arrow_example(dataset_skyhook_scan_example EXTRA_LINK_LIBS
+                      ${DATASET_EXAMPLES_LINK_LIBS})
+    add_dependencies(dataset-skyhook-scan-example parquet)
+  endif()
 
 endif()
