@@ -16,7 +16,9 @@
 // under the License.
 
 #include "gandiva/hash_utils.h"
+
 #include <cstring>
+
 #include "arrow/util/logging.h"
 #include "gandiva/gdv_function_stubs.h"
 #include "openssl/evp.h"
@@ -24,28 +26,20 @@
 namespace gandiva {
 /// Hashes a generic message using the SHA256 algorithm
 GANDIVA_EXPORT
-const char* gdv_sha256_hash(int64_t context, const void* message, size_t message_length,
-                            int32_t* out_length) {
+const char* gdv_hash_using_sha256(void* context, const void* message,
+                                  size_t message_length, int32_t* out_length) {
   constexpr int sha256_result_length = 64;
-  return gdv_hash_using_openssl(context, message, message_length, EVP_sha256(),
-                                sha256_result_length, out_length);
+  return gdv_hash_using_sha(context, message, message_length, EVP_sha256(),
+                            sha256_result_length, out_length);
 }
 
 /// Hashes a generic message using the SHA1 algorithm
 GANDIVA_EXPORT
-const char* gdv_sha1_hash(int64_t context, const void* message, size_t message_length,
-                          int32_t* out_length) {
+const char* gdv_hash_using_sha1(void* context, const void* message, size_t message_length,
+                                int32_t* out_length) {
   constexpr int sha1_result_length = 40;
-  return gdv_hash_using_openssl(context, message, message_length, EVP_sha1(),
-                                sha1_result_length, out_length);
-}
-
-GANDIVA_EXPORT
-const char* gdv_md5_hash(int64_t context, const void* message, size_t message_length,
-                         int32_t* out_length) {
-  constexpr int md5_result_length = 32;
-  return gdv_hash_using_openssl(context, message, message_length, EVP_md5(),
-                                md5_result_length, out_length);
+  return gdv_hash_using_sha(context, message, message_length, EVP_sha1(),
+                            sha1_result_length, out_length);
 }
 
 /// \brief Hashes a generic message using SHA algorithm.
@@ -54,9 +48,9 @@ const char* gdv_md5_hash(int64_t context, const void* message, size_t message_le
 /// the hash. The type of the hash is defined by the
 /// \b hash_type \b parameter.
 GANDIVA_EXPORT
-const char* gdv_hash_using_openssl(int64_t context, const void* message,
-                                   size_t message_length, const EVP_MD* hash_type,
-                                   uint32_t result_buf_size, int32_t* out_length) {
+const char* gdv_hash_using_sha(void* context, const void* message, size_t message_length,
+                               const EVP_MD* hash_type, uint32_t result_buf_size,
+                               int32_t* out_length) {
   EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
 
   if (md_ctx == nullptr) {
