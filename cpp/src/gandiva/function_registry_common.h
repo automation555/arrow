@@ -102,6 +102,17 @@ typedef std::unordered_map<const FunctionSignature*, const NativeFunction*, KeyH
 // - NULL handling is of type NULL_IF_NULL
 //
 // The pre-compiled fn name includes the base name & input type names. eg. mod_int64_int32
+#define BINARY_GENERIC_UNSAFE_NULL_IF_NULL(NAME, ALIASES, IN_TYPE1, IN_TYPE2, OUT_TYPE) \
+  NativeFunction(#NAME, std::vector<std::string> ALIASES,                               \
+                 DataTypeVector{IN_TYPE1(), IN_TYPE2()}, OUT_TYPE(), kResultNullIfNull, \
+                 ARROW_STRINGIFY(NAME##_##IN_TYPE1##_##IN_TYPE2),                       \
+                 NativeFunction::kNeedsContext | NativeFunction::kCanReturnErrors)
+
+// Binary functions that :
+// - have different input types, or output type
+// - NULL handling is of type NULL_IF_NULL
+//
+// The pre-compiled fn name includes the base name & input type names. eg. mod_int64_int32
 #define BINARY_GENERIC_SAFE_NULL_IF_NULL(NAME, ALIASES, IN_TYPE1, IN_TYPE2, OUT_TYPE)   \
   NativeFunction(#NAME, std::vector<std::string> ALIASES,                               \
                  DataTypeVector{IN_TYPE1(), IN_TYPE2()}, OUT_TYPE(), kResultNullIfNull, \
@@ -126,6 +137,17 @@ typedef std::unordered_map<const FunctionSignature*, const NativeFunction*, KeyH
 #define UNARY_SAFE_NULL_IF_NULL(NAME, ALIASES, IN_TYPE, OUT_TYPE)                    \
   NativeFunction(#NAME, std::vector<std::string> ALIASES, DataTypeVector{IN_TYPE()}, \
                  OUT_TYPE(), kResultNullIfNull, ARROW_STRINGIFY(NAME##_##IN_TYPE))
+
+// Unary functions in gdv stubs file that :
+// - NULL handling is of type NULL_IF_NULL
+//
+// The pre-compiled fn name includes the base name & input type name.
+// eg. gdv_fn_abs_float32
+#define STUBS_UNARY_SAFE_NULL_IF_NULL(NAME, ALIASES, IN_TYPE, OUT_TYPE)              \
+  NativeFunction(#NAME, std::vector<std::string> ALIASES, DataTypeVector{IN_TYPE()}, \
+                 OUT_TYPE(), kResultNullIfNull,                                      \
+                 ARROW_STRINGIFY(gdv_fn_##NAME##_##IN_TYPE),                         \
+                 NativeFunction::kNeedsContext)
 
 // Unary functions that :
 // - NULL handling is of type NULL_NEVER
@@ -184,12 +206,6 @@ typedef std::unordered_map<const FunctionSignature*, const NativeFunction*, KeyH
 #define LAST_DAY_SAFE_NULL_IF_NULL(NAME, ALIASES, TYPE)                           \
   NativeFunction(#NAME, std::vector<std::string> ALIASES, DataTypeVector{TYPE()}, \
                  date64(), kResultNullIfNull, ARROW_STRINGIFY(NAME##_from_##TYPE))
-
-#define NEXT_DAY_SAFE_NULL_IF_NULL(NAME, ALIASES, TYPE)                       \
-  NativeFunction(#NAME, std::vector<std::string> ALIASES,                     \
-                 DataTypeVector{TYPE(), utf8()}, date64(), kResultNullIfNull, \
-                 ARROW_STRINGIFY(NAME##_from_##TYPE),                         \
-                 NativeFunction::kNeedsContext | NativeFunction::kCanReturnErrors)
 
 // Hash32 functions that :
 // - NULL handling is of type NULL_NEVER
