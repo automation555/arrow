@@ -33,6 +33,7 @@
 #include "arrow/ipc/writer.h"
 #include "arrow/record_batch.h"
 #include "arrow/status.h"
+#include "arrow/tensor.h"
 #include "arrow/testing/extension_type.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/type.h"
@@ -331,6 +332,133 @@ TEST_F(TestExtensionType, ValidateExtensionArray) {
   ASSERT_OK(ext_arr2->ValidateFull());
   ASSERT_OK(ext_arr3->ValidateFull());
   ASSERT_OK(ext_arr4->ValidateFull());
+}
+
+class TensorArray : public ExtensionArray {
+ public:
+  using ExtensionArray::ExtensionArray;
+};
+
+class TensorArrayType : public ExtensionType {
+ public:
+  explicit TensorArrayType(const std::shared_ptr<DataType>& type,
+                           const std::vector<int64_t>& shape,
+                           const std::vector<int64_t>& strides)
+      : ExtensionType(type), type_(type), shape_(shape), strides_(strides) {}
+
+  uint32_t ndim() const { return shape_.size(); }
+  std::vector<int64_t> shape() const { return shape_; }
+  std::vector<int64_t> strides() const { return strides_; }
+  std::shared_ptr<DataType> type() const { return type_; }
+
+  std::string extension_name() const override { return "ext-array-tensor-type"; }
+
+  bool ExtensionEquals(const ExtensionType& other) const override {
+    const auto& other_ext = static_cast<const ExtensionType&>(other);
+    if (other_ext.extension_name() != this->extension_name()) {
+      return false;
+    }
+    return true;
+  }
+
+  std::shared_ptr<Array> MakeArray(std::shared_ptr<ArrayData> data) const override {
+    return std::make_shared<TensorArray>(data);
+  }
+
+  Result<std::shared_ptr<DataType>> Deserialize(
+      std::shared_ptr<DataType> storage_type,
+      const std::string& serialized) const override {
+    if (serialized != extension_name()) {
+      return Status::Invalid("Type identifier did not match");
+    }
+    return std::make_shared<TensorArrayType>(type_, shape_, strides_);
+  }
+
+  std::string Serialize() const override { return extension_name(); }
+
+ private:
+  std::shared_ptr<DataType> type_;
+  std::vector<int64_t> shape_;
+  std::vector<int64_t> strides_;
+};
+
+std::shared_ptr<TensorArray> TensorToArray(std::shared_ptr<Tensor> tensor) {
+  ARROW_PREDICT_TRUE(tensor->is_row_major());
+  std::vector<int64_t> shape(tensor->shape());
+  shape.erase(shape.begin());
+
+  auto type = fixed_size_list(tensor->type(),
+                              static_cast<int32_t>(tensor->size() / tensor->shape()[0]));
+  auto ext_type = std::make_shared<TensorArrayType>(type, shape, tensor->strides());
+
+  auto data = ArrayData::Make(tensor->type(), tensor->size(), {nullptr, tensor->data()});
+  auto arr =
+      std::make_shared<FixedSizeListArray>(type, tensor->shape()[0], MakeArray(data));
+  return std::make_shared<TensorArray>(ext_type, arr);
+}
+
+std::shared_ptr<Tensor> ArrayToTensor(std::shared_ptr<TensorArray> arr) {
+  auto ext_type = std::dynamic_pointer_cast<TensorArrayType>(arr->type());
+  std::vector<int64_t> shape(ext_type->shape());
+  shape.insert(shape.begin(), 1, arr->length());
+  std::shared_ptr<ArrayData> data = arr->data()->child_data[0];
+  return std::make_shared<Tensor>(data->type, data->buffers[1], shape,
+                                  ext_type->strides());
+}
+
+TEST_F(TestExtensionType, TensorArrayType) {
+  auto value_type = int64();
+  std::vector<int64_t> shape = {3, 3, 4};
+  std::vector<int64_t> strides = {96, 32, 8};
+  std::vector<int64_t> values = {0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11,
+                                 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                                 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35};
+  std::vector<int64_t> values_partial = {0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11,
+                                         12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23};
+  std::vector<int64_t> shape_partial = {2, 3, 4};
+
+  ASSERT_OK_AND_ASSIGN(auto tensor,
+                       Tensor::Make(value_type, Buffer::Wrap(values), shape, strides));
+  ASSERT_OK_AND_ASSIGN(
+      auto tensor_partial,
+      Tensor::Make(value_type, Buffer::Wrap(values_partial), shape_partial, strides));
+  auto arr = TensorToArray(tensor);
+  auto arr_partial = TensorToArray(tensor_partial);
+
+  ASSERT_OK(arr->ValidateFull());
+  ASSERT_OK(arr_partial->ValidateFull());
+
+  AssertArraysEqual(*arr->storage()->Slice(0, 2), *arr_partial->storage());
+  ASSERT_TRUE(tensor->Equals(*ArrayToTensor(arr)));
+  ASSERT_TRUE(tensor_partial->Equals(*ArrayToTensor(arr_partial)));
+
+  auto arr_slice = std::dynamic_pointer_cast<TensorArray>(arr->Slice(0, 2));
+  auto tensor_slice = ArrayToTensor(arr_slice);
+  ASSERT_TRUE(tensor_partial->Equals(*tensor_slice));
+
+  auto type = std::dynamic_pointer_cast<TensorArrayType>(arr->type());
+  ASSERT_EQ(type->id(), Type::EXTENSION);
+
+  const auto& ext_type = static_cast<const ExtensionType&>(*type);
+  std::string serialized = ext_type.Serialize();
+
+  ASSERT_OK_AND_ASSIGN(auto deserialized,
+                       ext_type.Deserialize(fixed_size_binary(16), serialized));
+  ASSERT_TRUE(deserialized->Equals(*type));
+  ASSERT_FALSE(deserialized->Equals(*fixed_size_binary(16)));
+
+  ASSERT_OK(RegisterExtensionType(type));
+  auto batch = RecordBatch::Make(schema({field("f0", type)}), 3, {arr});
+
+  std::shared_ptr<RecordBatch> read_batch;
+  RoundtripBatch(batch, &read_batch);
+  CompareBatch(*batch, *read_batch, false /* compare_metadata */);
+
+  auto strides_1 = std::vector<int64_t>{96, 32, 8};
+  auto strides_2 = std::vector<int64_t>{8, 32, 96};
+  auto ext_type_1 = std::make_shared<TensorArrayType>(int64(), shape, strides_1);
+  auto ext_type_2 = std::make_shared<TensorArrayType>(int32(), shape, strides_2);
+  ASSERT_TRUE(ext_type_1->ExtensionEquals(*ext_type_2));
 }
 
 }  // namespace arrow
