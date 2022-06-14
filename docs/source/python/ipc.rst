@@ -15,17 +15,6 @@
 .. specific language governing permissions and limitations
 .. under the License.
 
-.. ipython:: python
-    :suppress:
-
-    # set custom tmp working directory for files that create data
-    import os
-    import tempfile
-
-    orig_working_dir = os.getcwd()
-    temp_working_dir = tempfile.mkdtemp(prefix="pyarrow-")
-    os.chdir(temp_working_dir)
-
 .. currentmodule:: pyarrow
 
 .. _ipc:
@@ -76,19 +65,20 @@ this one can be created with :func:`~pyarrow.ipc.new_stream`:
 .. ipython:: python
 
    sink = pa.BufferOutputStream()
-   
-   with pa.ipc.new_stream(sink, batch.schema) as writer:
-      for i in range(5):
-         writer.write_batch(batch)
+   writer = pa.ipc.new_stream(sink, batch.schema)
 
-Here we used an in-memory Arrow buffer stream (``sink``), 
-but this could have been a socket or some other IO sink.
+Here we used an in-memory Arrow buffer stream, but this could have been a
+socket or some other IO sink.
 
 When creating the ``StreamWriter``, we pass the schema, since the schema
 (column names and types) must be the same for all of the batches sent in this
 particular stream. Now we can do:
 
 .. ipython:: python
+
+   for i in range(5):
+      writer.write_batch(batch)
+   writer.close()
 
    buf = sink.getvalue()
    buf.size
@@ -99,11 +89,10 @@ convenience function ``pyarrow.ipc.open_stream``:
 
 .. ipython:: python
 
-   with pa.ipc.open_stream(buf) as reader:
-         schema = reader.schema
-         batches = [b for b in reader]
-   
-   schema
+   reader = pa.ipc.open_stream(buf)
+   reader.schema
+
+   batches = [b for b in reader]
    len(batches)
 
 We can check the returned batches are the same as the original input:
@@ -116,6 +105,11 @@ An important point is that if the input source supports zero-copy reads
 (e.g. like a memory map, or ``pyarrow.BufferReader``), then the returned
 batches are also zero-copy and do not allocate any new memory on read.
 
+All stream objects have a ``close`` method. In the above example 
+:func:`~pyarrow.BufferOutputStream.getvalue` both closes and returns the buffer.
+If the return object is not needed, call the relevent ``close`` method
+after you are finished using the object to avoid data corruption issues.
+
 Writing and Reading Random Access Files
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -126,10 +120,11 @@ The :class:`~pyarrow.RecordBatchFileWriter` has the same API as
 .. ipython:: python
 
    sink = pa.BufferOutputStream()
-   
-   with pa.ipc.new_file(sink, batch.schema) as writer:
-      for i in range(10):
-         writer.write_batch(batch)
+   writer = pa.ipc.new_file(sink, batch.schema)
+
+   for i in range(10):
+      writer.write_batch(batch)
+   writer.close()
 
    buf = sink.getvalue()
    buf.size
@@ -141,16 +136,15 @@ operations. We can also use the :func:`~pyarrow.ipc.open_file` method to open a 
 
 .. ipython:: python
 
-   with pa.ipc.open_file(buf) as reader:
-      num_record_batches = reader.num_record_batches
-      b = reader.get_batch(3)
+   reader = pa.ipc.open_file(buf)
 
 Because we have access to the entire payload, we know the number of record
-batches in the file, and can read any at random.
+batches in the file, and can read any at random:
 
 .. ipython:: python
 
-   num_record_batches
+   reader.num_record_batches
+   b = reader.get_batch(3)
    b.equals(batch)
 
 Reading from Stream and File Format for pandas
@@ -162,77 +156,8 @@ DataFrame output:
 
 .. ipython:: python
 
-   with pa.ipc.open_file(buf) as reader:
-      df = reader.read_pandas()
-   
+   df = pa.ipc.open_file(buf).read_pandas()
    df[:5]
-
-Efficiently Writing and Reading Arrow Data
-------------------------------------------
-
-Being optimized for zero copy and memory mapped data, Arrow allows to easily
-read and write arrays consuming the minimum amount of resident memory.
-
-When writing and reading raw Arrow data, we can use the Arrow File Format
-or the Arrow Streaming Format.
-
-To dump an array to file, you can use the :meth:`~pyarrow.ipc.new_file`
-which will provide a new :class:`~pyarrow.ipc.RecordBatchFileWriter` instance
-that can be used to write batches of data to that file.
-
-For example to write an array of 10M integers, we could write it in 1000 chunks
-of 10000 entries:
-
-.. ipython:: python
-
-      BATCH_SIZE = 10000
-      NUM_BATCHES = 1000
-
-      schema = pa.schema([pa.field('nums', pa.int32())])
-
-      with pa.OSFile('bigfile.arrow', 'wb') as sink:
-         with pa.ipc.new_file(sink, schema) as writer:
-            for row in range(NUM_BATCHES):
-                  batch = pa.record_batch([pa.array(range(BATCH_SIZE), type=pa.int32())], schema)
-                  writer.write(batch)
-
-record batches support multiple columns, so in practice we always write the
-equivalent of a :class:`~pyarrow.Table`.
-
-Writing in batches is effective because we in theory need to keep in memory only
-the current batch we are writing. But when reading back, we can be even more effective
-by directly mapping the data from disk and avoid allocating any new memory on read.
-
-Under normal conditions, reading back our file will consume a few hundred megabytes
-of memory:
-
-.. ipython:: python
-
-      with pa.OSFile('bigfile.arrow', 'rb') as source:
-         loaded_array = pa.ipc.open_file(source).read_all()
-
-      print("LEN:", len(loaded_array))
-      print("RSS: {}MB".format(pa.total_allocated_bytes() >> 20))
-
-To more efficiently read big data from disk, we can memory map the file, so that
-Arrow can directly reference the data mapped from disk and avoid having to
-allocate its own memory.
-In such case the operating system will be able to page in the mapped memory
-lazily and page it out without any write back cost when under pressure,
-allowing to more easily read arrays bigger than the total memory.
-
-.. ipython:: python
-
-      with pa.memory_map('bigfile.arrow', 'rb') as source:
-         loaded_array = pa.ipc.open_file(source).read_all()
-      print("LEN:", len(loaded_array))
-      print("RSS: {}MB".format(pa.total_allocated_bytes() >> 20))
-
-.. note::
-
-   Other high level APIs like :meth:`~pyarrow.parquet.read_table` also provide a
-   ``memory_map`` option. But in those cases, the memory mapping can't help with
-   reducing resident memory consumption. See :ref:`parquet_mmap` for details.
 
 Arbitrary Object Serialization
 ------------------------------
@@ -394,14 +319,3 @@ An object can be reconstructed from its component-based representation using
 
 ``deserialize_components`` is also available as a method on
 ``SerializationContext`` objects.
-
-
-.. ipython:: python
-    :suppress:
-
-    # clean-up custom working directory
-    import os
-    import shutil
-
-    os.chdir(orig_working_dir)
-    shutil.rmtree(temp_working_dir, ignore_errors=True)
