@@ -17,6 +17,8 @@
 
 #include "./arrow_types.h"
 
+#if defined(ARROW_R_WITH_ARROW)
+
 #include <arrow/compute/api.h>
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
@@ -391,8 +393,8 @@ std::shared_ptr<arrow::compute::FunctionOptions> make_compute_options(
 
   if (func_name == "assume_timezone") {
     using Options = arrow::compute::AssumeTimezoneOptions;
-    enum Options::Ambiguous ambiguous = Options::AMBIGUOUS_RAISE;
-    enum Options::Nonexistent nonexistent = Options::NONEXISTENT_RAISE;
+    enum Options::Ambiguous ambiguous;
+    enum Options::Nonexistent nonexistent;
 
     if (!Rf_isNull(options["ambiguous"])) {
       ambiguous = cpp11::as_cpp<enum Options::Ambiguous>(options["ambiguous"]);
@@ -519,6 +521,35 @@ std::shared_ptr<arrow::compute::FunctionOptions> make_compute_options(
     return out;
   }
 
+  if (func_name == "round_temporal" || func_name == "floor_temporal" ||
+      func_name == "ceil_temporal") {
+    using Options = arrow::compute::RoundTemporalOptions;
+
+    int64_t multiple = 1;
+    enum arrow::compute::CalendarUnit unit = arrow::compute::CalendarUnit::DAY;
+    bool week_starts_monday = true;
+    bool change_on_boundary = true;
+    bool calendar_based_origin = true;
+
+    if (!Rf_isNull(options["multiple"])) {
+      multiple = cpp11::as_cpp<int64_t>(options["multiple"]);
+    }
+    if (!Rf_isNull(options["unit"])) {
+      unit = cpp11::as_cpp<enum arrow::compute::CalendarUnit>(options["unit"]);
+    }
+    if (!Rf_isNull(options["week_starts_monday"])) {
+      week_starts_monday = cpp11::as_cpp<int64_t>(options["week_starts_monday"]);
+    }
+    if (!Rf_isNull(options["change_on_boundary"])) {
+      change_on_boundary = cpp11::as_cpp<int64_t>(options["change_on_boundary"]);
+    }
+    if (!Rf_isNull(options["calendar_based_origin"])) {
+      calendar_based_origin = cpp11::as_cpp<int64_t>(options["calendar_based_origin"]);
+    }
+    return std::make_shared<Options>(multiple, unit, week_starts_monday,
+                                     change_on_boundary, calendar_based_origin);
+  }
+
   if (func_name == "round_to_multiple") {
     using Options = arrow::compute::RoundToMultipleOptions;
     auto out = std::make_shared<Options>(Options::Defaults());
@@ -574,3 +605,5 @@ SEXP compute__CallFunction(std::string func_name, cpp11::list args, cpp11::list 
 std::vector<std::string> compute__GetFunctionNames() {
   return arrow::compute::GetFunctionRegistry()->GetFunctionNames();
 }
+
+#endif

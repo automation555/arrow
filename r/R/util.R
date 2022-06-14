@@ -125,29 +125,31 @@ read_compressed_error <- function(e) {
   stop(e)
 }
 
-handle_parquet_io_error <- function(e, format, call) {
+handle_parquet_io_error <- function(e, format) {
   msg <- conditionMessage(e)
   if (grepl("Parquet magic bytes not found in footer", msg) && length(format) > 1 && is_character(format)) {
     # If length(format) > 1, that means it is (almost certainly) the default/not specified value
     # so let the user know that they should specify the actual (not parquet) format
-    msg <- c(
+    abort(c(
       msg,
       i = "Did you mean to specify a 'format' other than the default (parquet)?"
-    )
+    ))
   }
-  abort(msg, call = call)
+  stop(e)
 }
 
-as_writable_table <- function(x) {
-  tryCatch(
-    as_arrow_table(x),
-    arrow_no_method_as_arrow_table = function(e) {
-      abort(
-        "Object must be coercible to an Arrow Table using `as_arrow_table()`",
-        parent = e,
-        call = rlang::caller_env(2)
-      )
-    }
+is_writable_table <- function(x) {
+  inherits(x, c("data.frame", "ArrowTabular"))
+}
+
+# This attribute is used when is_writable is passed into assert_that, and allows
+# the call to form part of the error message when is_writable is FALSE
+attr(is_writable_table, "fail") <- function(call, env) {
+  paste0(
+    deparse(call$x),
+    " must be an object of class 'data.frame', 'RecordBatch', or 'Table', not '",
+    class(env[[deparse(call$x)]])[[1]],
+    "'."
   )
 }
 
@@ -196,22 +198,90 @@ repeat_value_as_array <- function(object, n) {
   return(Scalar$create(object)$as_array(n))
 }
 
-handle_csv_read_error <- function(e, schema, call) {
+handle_csv_read_error <- function(e, schema) {
   msg <- conditionMessage(e)
 
   if (grepl("conversion error", msg) && inherits(schema, "Schema")) {
-    msg <- c(
+    abort(c(
       msg,
       i = paste(
         "If you have supplied a schema and your data contains a header",
         "row, you should supply the argument `skip = 1` to prevent the",
         "header being read in as data."
       )
-    )
+    ))
   }
-  abort(msg, call = call)
+
+  abort(msg)
 }
 
-is_compressed <- function(compression) {
-  !identical(compression, "uncompressed")
+parse_period_unit <- function(x) {
+
+  # the regexp matches against fractional units, but per lubridate
+  # supports integer multiples of a known unit only
+  match_info <- regexpr(
+    pattern = " *(?<multiple>[0-9.,]+)? *(?<unit>[^ \t\n]+)",
+    text = x[[1]],
+    perl = TRUE
+  )
+
+  capture_start <- attr(match_info, "capture.start")
+  capture_length <- attr(match_info, "capture.length")
+  capture_end <- capture_start + capture_length - 1L
+
+  str_unit <- substr(x, capture_start[[2]], capture_end[[2]])
+  str_multiple <- substr(x, capture_start[[1]], capture_end[[1]])
+
+  known_units <- c("nanosecond", "microsecond", "millisecond", "second",
+                   "minute", "hour", "day", "week", "month", "quarter", "year")
+
+  # match the period unit
+  str_unit_start <- substr(str_unit, 1, 3)
+  unit <- as.integer(pmatch(str_unit_start, known_units)) - 1L
+
+  if (any(is.na(unit))) {
+    abort(sprintf("Unknown unit '%s'", str_unit))
+  }
+
+  # empty string in multiple interpreted as 1
+  if (capture_length[[1]] == 0) {
+    multiple <- 1L
+
+  } else {
+
+    # special cases: interpret fractions of 1 second as integer
+    # multiples of nanoseconds, microseconds, or milliseconds
+    # to mirror lubridate syntax
+    multiple <- as.numeric(str_multiple)
+
+    if (unit == 3L & multiple < 10^-6) {
+      unit <- 0L
+      multiple <- 10^9 * multiple
+    }
+    if (unit == 3L & multiple < 10^-3) {
+      unit <- 1L
+      multiple <- 10^6 * multiple
+    }
+    if (unit == 3L & multiple < 1) {
+      unit <- 2L
+      multiple <- 10^3 * multiple
+    }
+
+    multiple <- as.integer(multiple)
+  }
+
+
+  # more special cases: lubridate imposes sensible maximum
+  # values on the number of seconds, minutes and hours
+  if (unit == 3L & multiple > 60) {
+    abort("Rounding with second > 60 is not supported")
+  }
+  if (unit == 4L & multiple > 60) {
+    abort("Rounding with minute > 60 is not supported")
+  }
+  if (unit == 5L & multiple > 24) {
+    abort("Rounding with hour > 24 is not supported")
+  }
+
+  return(list(unit = unit, multiple = multiple))
 }
