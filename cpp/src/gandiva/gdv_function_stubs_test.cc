@@ -17,28 +17,12 @@
 
 #include "gandiva/gdv_function_stubs.h"
 
-#include <gandiva/precompiled/testing.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "arrow/util/logging.h"
 #include "gandiva/execution_context.h"
 
 namespace gandiva {
-
-TEST(TestGdvFnStubs, TestCrc32) {
-  gandiva::ExecutionContext ctx;
-  auto ctx_ptr = reinterpret_cast<int64_t>(&ctx);
-  EXPECT_EQ(gdv_fn_crc_32_utf8(ctx_ptr, "ABC", 3), 2743272264);
-  EXPECT_EQ(gdv_fn_crc_32_utf8(ctx_ptr, "Hello", 5), 4157704578);
-  EXPECT_EQ(gdv_fn_crc_32_utf8(ctx_ptr, "hive", 4), 3698179064);
-  EXPECT_EQ(gdv_fn_crc_32_utf8(ctx_ptr, "372189372123", 12), 2607335846);
-  EXPECT_EQ(gdv_fn_crc_32_utf8(ctx_ptr, "", 0), 0);
-
-  EXPECT_EQ(gdv_fn_crc_32_utf8(ctx_ptr, "-5", -5), 0);
-  EXPECT_THAT(ctx.get_error(), ::testing::HasSubstr("Input length can't be negative"));
-  ctx.Reset();
-}
 
 TEST(TestGdvFnStubs, TestCastVarbinaryNumeric) {
   gandiva::ExecutionContext ctx;
@@ -167,7 +151,6 @@ TEST(TestGdvFnStubs, TestCastINT) {
   EXPECT_EQ(gdv_fn_castINT_utf8(ctx_ptr, "-2147483648", 11), -2147483648LL);
   EXPECT_EQ(gdv_fn_castINT_utf8(ctx_ptr, "-02147483648", 12), -2147483648LL);
   EXPECT_EQ(gdv_fn_castINT_utf8(ctx_ptr, " 12 ", 4), 12);
-  EXPECT_EQ(gdv_fn_castINT_utf8(ctx_ptr, "12", 2), 12);
 
   gdv_fn_castINT_utf8(ctx_ptr, "2147483648", 10);
   EXPECT_THAT(ctx.get_error(),
@@ -349,37 +332,6 @@ TEST(TestGdvFnStubs, TestCastVARCHARFromInt64) {
   // test with required length less than actual buffer length
   out_str = gdv_fn_castVARCHAR_int64_int64(ctx_ptr, 12345, 3, &out_len);
   EXPECT_EQ(std::string(out_str, out_len), "123");
-  EXPECT_FALSE(ctx.has_error());
-}
-
-TEST(TestGdvFnStubs, TestCastVARCHARFromMilliseconds) {
-  gandiva::ExecutionContext ctx;
-  uint64_t ctx_ptr = reinterpret_cast<int64_t>(&ctx);
-  int32_t out_len = 0;
-
-  gdv_date64 ts = StringToTimestamp("2021-04-23 10:20:33");
-  const char* out_str = gdv_fn_castVARCHAR_date64_int64(ctx_ptr, ts, 100, &out_len);
-  EXPECT_EQ(std::string(out_str, out_len), "2021-04-23");
-  EXPECT_FALSE(ctx.has_error());
-
-  ts = StringToTimestamp("2008-08-20 10:20:33");
-  out_str = gdv_fn_castVARCHAR_date64_int64(ctx_ptr, ts, 100, &out_len);
-  EXPECT_EQ(std::string(out_str, out_len), "2008-08-20");
-  EXPECT_FALSE(ctx.has_error());
-
-  ts = StringToTimestamp("2011-09-28 10:20:33");
-  out_str = gdv_fn_castVARCHAR_date64_int64(ctx_ptr, ts, 100, &out_len);
-  EXPECT_EQ(std::string(out_str, out_len), "2011-09-28");
-  EXPECT_FALSE(ctx.has_error());
-
-  ts = StringToTimestamp("2021-04-21 10:20:33");
-  out_str = gdv_fn_castVARCHAR_date64_int64(ctx_ptr, ts, 7, &out_len);
-  EXPECT_EQ(std::string(out_str, out_len), "2021-04");
-  EXPECT_FALSE(ctx.has_error());
-
-  ts = StringToTimestamp("2008-04-21 10:20:33");
-  out_str = gdv_fn_castVARCHAR_date64_int64(ctx_ptr, ts, 4, &out_len);
-  EXPECT_EQ(std::string(out_str, out_len), "2008");
   EXPECT_FALSE(ctx.has_error());
 }
 
@@ -814,140 +766,27 @@ TEST(TestGdvFnStubs, TestCastVarbinaryFloat8) {
   ctx.Reset();
 }
 
-TEST(TestGdvFnStubs, TestMaskFirstN) {
+TEST(TestGdvFnStubs, TestFormatNumberHive) {
   gandiva::ExecutionContext ctx;
-  int64_t ctx_ptr = reinterpret_cast<int64_t>(&ctx);
-  int32_t out_len = 0;
+  uint64_t ctx_ptr = reinterpret_cast<gdv_int64>(&ctx);
+  gdv_int32 out_len = 0;
+  const char* out_str;
 
-  std::string data = "a〜Çç&";
-  auto data_len = static_cast<int32_t>(data.length());
-  std::string expected = "x〜Xx&";
-  const char* result =
-      gdv_mask_first_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 4, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
+  out_str = gdv_fn_format_number(ctx_ptr, 10123.4444, 2, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "10,123.44");
 
-  data = "世界您";
-  data_len = static_cast<int32_t>(data.length());
-  expected = "世界您";
-  result = gdv_mask_first_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 4, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
+  out_str = gdv_fn_format_number(ctx_ptr, 123456789.1234, 3, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "123,456,789.123");
 
-  data = "a6Ççé";
-  data_len = static_cast<int32_t>(data.length());
-  expected = "xnXxé";
-  result = gdv_mask_first_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 4, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
+  out_str = gdv_fn_format_number(ctx_ptr, 987654321.987654, 0, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "987,654,321");
 
-  data = "0123456789";
-  data_len = static_cast<int32_t>(data.length());
-  expected = "nnnnnnnnnn";
-  result = gdv_mask_first_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 10, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
+  out_str = gdv_fn_format_number(ctx_ptr, 987654321.987654, -1, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_TRUE(ctx.has_error());
+  EXPECT_EQ(ctx.get_error(), "Could not format with negative decimal point");
 
-  data = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  data_len = static_cast<int32_t>(data.length());
-  expected = "XXXXXXXXXXXXXXXXXXXXXXXXXX";
-  result = gdv_mask_first_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 26, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-
-  data = "abcdefghijklmnopqrstuvwxyz";
-  expected = "xxxxxxxxxxxxxxxxxxxxxxxxxx";
-  result = gdv_mask_first_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 26, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-
-  data = "aB-6";
-  data_len = static_cast<int32_t>(data.length());
-  expected = "xX-6";
-  result = gdv_mask_first_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 3, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-
-  expected = "xX-n";
-  result = gdv_mask_first_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 5, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-
-  expected = "aB-6";
-  result = gdv_mask_first_n_utf8_int32(ctx_ptr, data.c_str(), data_len, -3, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-
-  result = gdv_mask_first_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 0, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-
-  data = "ABcd-123456";
-  data_len = static_cast<int32_t>(data.length());
-  expected = "XXxx-n23456";
-  result = gdv_mask_first_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 6, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-
-  data = "";
-  data_len = 0;
-  expected = "";
-  result = gdv_mask_first_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 6, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-}
-
-TEST(TestGdvFnStubs, TestMaskLastN) {
-  gandiva::ExecutionContext ctx;
-  int64_t ctx_ptr = reinterpret_cast<int64_t>(&ctx);
-  int32_t out_len = 0;
-
-  std::string data = "a〜Çç&";
-  int32_t data_len = static_cast<int32_t>(data.length());
-  std::string expected = "a〜Xx&";
-  const char* result =
-      gdv_mask_last_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 4, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-
-  data = "abÇçé";
-  data_len = static_cast<int32_t>(data.length());
-  expected = "axXxx";
-  result = gdv_mask_last_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 4, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-
-  data = "0123456789";
-  data_len = static_cast<int32_t>(data.length());
-  expected = "nnnnnnnnnn";
-  result = gdv_mask_last_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 10, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-
-  data = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  data_len = static_cast<int32_t>(data.length());
-  expected = "XXXXXXXXXXXXXXXXXXXXXXXXXX";
-  result = gdv_mask_last_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 26, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-
-  data = "abcdefghijklmnopqrstuvwxyz";
-  expected = "xxxxxxxxxxxxxxxxxxxxxxxxxx";
-  result = gdv_mask_last_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 26, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-
-  data = "aB-6";
-  data_len = static_cast<int32_t>(data.length());
-  expected = "aX-n";
-  result = gdv_mask_last_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 3, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-
-  expected = "xX-n";
-  result = gdv_mask_last_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 5, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-
-  expected = "aB-6";
-  result = gdv_mask_last_n_utf8_int32(ctx_ptr, data.c_str(), data_len, -3, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-
-  result = gdv_mask_last_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 0, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-
-  data = "ABcd-123456";
-  data_len = static_cast<int32_t>(data.length());
-  expected = "ABcd-nnnnnn";
-  result = gdv_mask_last_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 6, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
-
-  data = "";
-  data_len = 0;
-  expected = "";
-  result = gdv_mask_last_n_utf8_int32(ctx_ptr, data.c_str(), data_len, 6, &out_len);
-  EXPECT_EQ(expected, std::string(result, out_len));
+  ctx.Reset();
 }
 
 }  // namespace gandiva
