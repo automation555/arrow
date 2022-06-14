@@ -44,7 +44,7 @@ class ARROW_EXPORT FilterOptions : public FunctionOptions {
   };
 
   explicit FilterOptions(NullSelectionBehavior null_selection = DROP);
-  static constexpr char const kTypeName[] = "FilterOptions";
+  constexpr static char const kTypeName[] = "FilterOptions";
   static FilterOptions Defaults() { return FilterOptions(); }
 
   NullSelectionBehavior null_selection_behavior = DROP;
@@ -53,7 +53,7 @@ class ARROW_EXPORT FilterOptions : public FunctionOptions {
 class ARROW_EXPORT TakeOptions : public FunctionOptions {
  public:
   explicit TakeOptions(bool boundscheck = true);
-  static constexpr char const kTypeName[] = "TakeOptions";
+  constexpr static char const kTypeName[] = "TakeOptions";
   static TakeOptions BoundsCheck() { return TakeOptions(true); }
   static TakeOptions NoBoundsCheck() { return TakeOptions(false); }
   static TakeOptions Defaults() { return BoundsCheck(); }
@@ -73,7 +73,7 @@ class ARROW_EXPORT DictionaryEncodeOptions : public FunctionOptions {
   };
 
   explicit DictionaryEncodeOptions(NullEncodingBehavior null_encoding = MASK);
-  static constexpr char const kTypeName[] = "DictionaryEncodeOptions";
+  constexpr static char const kTypeName[] = "DictionaryEncodeOptions";
   static DictionaryEncodeOptions Defaults() { return DictionaryEncodeOptions(); }
 
   NullEncodingBehavior null_encoding_behavior = MASK;
@@ -117,7 +117,7 @@ class ARROW_EXPORT ArraySortOptions : public FunctionOptions {
  public:
   explicit ArraySortOptions(SortOrder order = SortOrder::Ascending,
                             NullPlacement null_placement = NullPlacement::AtEnd);
-  static constexpr char const kTypeName[] = "ArraySortOptions";
+  constexpr static char const kTypeName[] = "ArraySortOptions";
   static ArraySortOptions Defaults() { return ArraySortOptions(); }
 
   /// Sorting order
@@ -130,7 +130,7 @@ class ARROW_EXPORT SortOptions : public FunctionOptions {
  public:
   explicit SortOptions(std::vector<SortKey> sort_keys = {},
                        NullPlacement null_placement = NullPlacement::AtEnd);
-  static constexpr char const kTypeName[] = "SortOptions";
+  constexpr static char const kTypeName[] = "SortOptions";
   static SortOptions Defaults() { return SortOptions(); }
 
   /// Column key(s) to order by and how to order by these sort keys.
@@ -143,7 +143,7 @@ class ARROW_EXPORT SortOptions : public FunctionOptions {
 class ARROW_EXPORT SelectKOptions : public FunctionOptions {
  public:
   explicit SelectKOptions(int64_t k = -1, std::vector<SortKey> sort_keys = {});
-  static constexpr char const kTypeName[] = "SelectKOptions";
+  constexpr static char const kTypeName[] = "SelectKOptions";
   static SelectKOptions Defaults() { return SelectKOptions(); }
 
   static SelectKOptions TopKDefault(int64_t k, std::vector<std::string> key_names = {}) {
@@ -174,50 +174,13 @@ class ARROW_EXPORT SelectKOptions : public FunctionOptions {
   std::vector<SortKey> sort_keys;
 };
 
-/// \brief Rank options
-class ARROW_EXPORT RankOptions : public FunctionOptions {
- public:
-  /// Configure how ties between equal values are handled
-  enum Tiebreaker {
-    /// Ties get the smallest possible rank in sorted order.
-    Min,
-    /// Ties get the largest possible rank in sorted order.
-    Max,
-    /// Ranks are assigned in order of when ties appear in the input.
-    /// This ensures the ranks are a stable permutation of the input.
-    First,
-    /// The ranks span a dense [1, M] interval where M is the number
-    /// of distinct values in the input.
-    Dense
-  };
-
-  explicit RankOptions(std::vector<SortKey> sort_keys = {},
-                       NullPlacement null_placement = NullPlacement::AtEnd,
-                       Tiebreaker tiebreaker = RankOptions::First);
-  /// Convenience constructor for array inputs
-  explicit RankOptions(SortOrder order,
-                       NullPlacement null_placement = NullPlacement::AtEnd,
-                       Tiebreaker tiebreaker = RankOptions::First)
-      : RankOptions({SortKey("", order)}, null_placement, tiebreaker) {}
-
-  static constexpr char const kTypeName[] = "RankOptions";
-  static RankOptions Defaults() { return RankOptions(); }
-
-  /// Column key(s) to order by and how to order by these sort keys.
-  std::vector<SortKey> sort_keys;
-  /// Whether nulls and NaNs are placed at the start or at the end
-  NullPlacement null_placement;
-  /// Tiebreaker for dealing with equal values in ranks
-  Tiebreaker tiebreaker;
-};
-
 /// \brief Partitioning options for NthToIndices
 class ARROW_EXPORT PartitionNthOptions : public FunctionOptions {
  public:
   explicit PartitionNthOptions(int64_t pivot,
                                NullPlacement null_placement = NullPlacement::AtEnd);
   PartitionNthOptions() : PartitionNthOptions(0) {}
-  static constexpr char const kTypeName[] = "PartitionNthOptions";
+  constexpr static char const kTypeName[] = "PartitionNthOptions";
 
   /// The index into the equivalent sorted array of the partition pivot element.
   int64_t pivot;
@@ -225,25 +188,33 @@ class ARROW_EXPORT PartitionNthOptions : public FunctionOptions {
   NullPlacement null_placement;
 };
 
-/// \brief Options for cumulative sum function
-class ARROW_EXPORT CumulativeSumOptions : public FunctionOptions {
+/// \brief Options for IsMonotonic
+class ARROW_EXPORT IsMonotonicOptions : public FunctionOptions {
  public:
-  explicit CumulativeSumOptions(double start = 0, bool skip_nulls = false,
-                                bool check_overflow = false);
-  explicit CumulativeSumOptions(std::shared_ptr<Scalar> start, bool skip_nulls = false,
-                                bool check_overflow = false);
-  static constexpr char const kTypeName[] = "CumulativeSumOptions";
-  static CumulativeSumOptions Defaults() { return CumulativeSumOptions(); }
+  enum NullHandling {
+    /// Ignore nulls.
+    IGNORE_NULLS,
+    /// Use min value of element type as the value of nulls.
+    /// -Inf for floating point numbers.
+    USE_MIN_VALUE,
+    /// Use max value of element type as the value of nulls.
+    /// Inf for floating point numbers.
+    USE_MAX_VALUE
+  };
 
-  /// Optional starting value for cumulative operation computation
-  std::shared_ptr<Scalar> start;
+  explicit IsMonotonicOptions(NullHandling null_handling = IGNORE_NULLS,
+                              bool floating_approximate = false,
+                              double epsilon = kDefaultAbsoluteTolerance);
+  constexpr static char const kTypeName[] = "IsMonotonicOptions";
+  static IsMonotonicOptions Defaults() { return IsMonotonicOptions(); }
 
-  /// If true, nulls in the input are ignored and produce a corresponding null output.
-  /// When false, the first null encountered is propagated through the remaining output.
-  bool skip_nulls = false;
-
-  /// When true, returns an Invalid Status when overflow is detected
-  bool check_overflow = false;
+  /// Define how nulls are handled.
+  NullHandling null_handling = IGNORE_NULLS;
+  /// Whether or not to use approximate floating point number comparisons.
+  bool floating_approximate = false;
+  /// Epsilon (error bound) value used when approximately comparing floating points
+  /// numbers.
+  double epsilon = kDefaultAbsoluteTolerance;
 };
 
 /// @}
@@ -303,34 +274,6 @@ Result<std::shared_ptr<ArrayData>> GetTakeIndices(
 ARROW_EXPORT
 Result<Datum> ReplaceWithMask(const Datum& values, const Datum& mask,
                               const Datum& replacements, ExecContext* ctx = NULLPTR);
-
-/// \brief FillNullForward fill null values in forward direction
-///
-/// The output array will be of the same type as the input values
-/// array, with replaced null values in forward direction.
-///
-/// For example given values = ["a", "b", "c", null, null, "f"],
-/// the output will be = ["a", "b", "c", "c", "c", "f"]
-///
-/// \param[in] values datum from which to take
-/// \param[in] ctx the function execution context, optional
-/// \return the resulting datum
-ARROW_EXPORT
-Result<Datum> FillNullForward(const Datum& values, ExecContext* ctx = NULLPTR);
-
-/// \brief FillNullBackward fill null values in backward direction
-///
-/// The output array will be of the same type as the input values
-/// array, with replaced null values in backward direction.
-///
-/// For example given values = ["a", "b", "c", null, null, "f"],
-/// the output will be = ["a", "b", "c", "f", "f", "f"]
-///
-/// \param[in] values datum from which to take
-/// \param[in] ctx the function execution context, optional
-/// \return the resulting datum
-ARROW_EXPORT
-Result<Datum> FillNullBackward(const Datum& values, ExecContext* ctx = NULLPTR);
 
 /// \brief Take from an array of values at indices in another array
 ///
@@ -580,10 +523,26 @@ Result<Datum> DictionaryEncode(
     const DictionaryEncodeOptions& options = DictionaryEncodeOptions::Defaults(),
     ExecContext* ctx = NULLPTR);
 
+/// \brief Returns information about the monotonicity of the elements in an
+/// array with well-ordered elements.
+///
+/// Returns a struct scalar with type
+/// struct<
+///   increasing: boolean,
+///   strictly_increasing: boolean,
+///   decreasing: boolean,
+///   strictly_decreasing: boolean
+/// >
+///
+/// \param[in] data input data.
+/// \param[in] options see IsMonotonicOptions for more information.
+/// \param[in] ctx the function execution context, optional.
+/// \return resulting datum as a struct scalar.
+///
+/// \since x.0.0 \note API not yet finalized
 ARROW_EXPORT
-Result<Datum> CumulativeSum(
-    const Datum& values,
-    const CumulativeSumOptions& options = CumulativeSumOptions::Defaults(),
+Result<Datum> IsMonotonic(
+    const Datum& data, const IsMonotonicOptions& options = IsMonotonicOptions::Defaults(),
     ExecContext* ctx = NULLPTR);
 
 // ----------------------------------------------------------------------

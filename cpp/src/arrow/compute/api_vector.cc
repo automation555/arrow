@@ -42,8 +42,8 @@ namespace internal {
 
 using compute::DictionaryEncodeOptions;
 using compute::FilterOptions;
+using compute::IsMonotonicOptions;
 using compute::NullPlacement;
-using compute::RankOptions;
 
 template <>
 struct EnumTraits<FilterOptions::NullSelectionBehavior>
@@ -90,20 +90,20 @@ struct EnumTraits<NullPlacement>
   }
 };
 template <>
-struct EnumTraits<RankOptions::Tiebreaker>
-    : BasicEnumTraits<RankOptions::Tiebreaker, RankOptions::Min, RankOptions::Max,
-                      RankOptions::First, RankOptions::Dense> {
-  static std::string name() { return "Tiebreaker"; }
-  static std::string value_name(RankOptions::Tiebreaker value) {
+struct EnumTraits<IsMonotonicOptions::NullHandling>
+    : BasicEnumTraits<IsMonotonicOptions::NullHandling,
+                      IsMonotonicOptions::NullHandling::IGNORE_NULLS,
+                      IsMonotonicOptions::NullHandling::USE_MIN_VALUE,
+                      IsMonotonicOptions::NullHandling::USE_MAX_VALUE> {
+  static std::string name() { return "IsMonotonicOptions::NullHandling"; }
+  static std::string value_name(IsMonotonicOptions::NullHandling value) {
     switch (value) {
-      case RankOptions::Min:
-        return "Min";
-      case RankOptions::Max:
-        return "Max";
-      case RankOptions::First:
-        return "First";
-      case RankOptions::Dense:
-        return "Dense";
+      case IsMonotonicOptions::NullHandling::IGNORE_NULLS:
+        return "IGNORE_NULLS";
+      case IsMonotonicOptions::NullHandling::USE_MIN_VALUE:
+        return "USE_MIN_VALUE";
+      case IsMonotonicOptions::NullHandling::USE_MAX_VALUE:
+        return "USE_MAX_VALUE";
     }
     return "<INVALID>";
   }
@@ -155,14 +155,11 @@ static auto kPartitionNthOptionsType = GetFunctionOptionsType<PartitionNthOption
 static auto kSelectKOptionsType = GetFunctionOptionsType<SelectKOptions>(
     DataMember("k", &SelectKOptions::k),
     DataMember("sort_keys", &SelectKOptions::sort_keys));
-static auto kCumulativeSumOptionsType = GetFunctionOptionsType<CumulativeSumOptions>(
-    DataMember("start", &CumulativeSumOptions::start),
-    DataMember("skip_nulls", &CumulativeSumOptions::skip_nulls),
-    DataMember("check_overflow", &CumulativeSumOptions::check_overflow));
-static auto kRankOptionsType = GetFunctionOptionsType<RankOptions>(
-    DataMember("sort_keys", &RankOptions::sort_keys),
-    DataMember("null_placement", &RankOptions::null_placement),
-    DataMember("tiebreaker", &RankOptions::tiebreaker));
+static auto kIsMonotonicOptionsType = GetFunctionOptionsType<IsMonotonicOptions>(
+    DataMember("null_handling", &IsMonotonicOptions::null_handling),
+    DataMember("floating_approximate", &IsMonotonicOptions::floating_approximate),
+    DataMember("epsilon", &IsMonotonicOptions::epsilon));
+
 }  // namespace
 }  // namespace internal
 
@@ -204,25 +201,13 @@ SelectKOptions::SelectKOptions(int64_t k, std::vector<SortKey> sort_keys)
       sort_keys(std::move(sort_keys)) {}
 constexpr char SelectKOptions::kTypeName[];
 
-CumulativeSumOptions::CumulativeSumOptions(double start, bool skip_nulls,
-                                           bool check_overflow)
-    : CumulativeSumOptions(std::make_shared<DoubleScalar>(start), skip_nulls,
-                           check_overflow) {}
-CumulativeSumOptions::CumulativeSumOptions(std::shared_ptr<Scalar> start, bool skip_nulls,
-                                           bool check_overflow)
-    : FunctionOptions(internal::kCumulativeSumOptionsType),
-      start(std::move(start)),
-      skip_nulls(skip_nulls),
-      check_overflow(check_overflow) {}
-constexpr char CumulativeSumOptions::kTypeName[];
-
-RankOptions::RankOptions(std::vector<SortKey> sort_keys, NullPlacement null_placement,
-                         RankOptions::Tiebreaker tiebreaker)
-    : FunctionOptions(internal::kRankOptionsType),
-      sort_keys(std::move(sort_keys)),
-      null_placement(null_placement),
-      tiebreaker(tiebreaker) {}
-constexpr char RankOptions::kTypeName[];
+IsMonotonicOptions::IsMonotonicOptions(IsMonotonicOptions::NullHandling null_handling,
+                                       bool floating_approximate, double epsilon)
+    : FunctionOptions(internal::kIsMonotonicOptionsType),
+      null_handling(null_handling),
+      floating_approximate(floating_approximate),
+      epsilon(epsilon) {}
+constexpr char IsMonotonicOptions::kTypeName[];
 
 namespace internal {
 void RegisterVectorOptions(FunctionRegistry* registry) {
@@ -233,8 +218,7 @@ void RegisterVectorOptions(FunctionRegistry* registry) {
   DCHECK_OK(registry->AddFunctionOptionsType(kSortOptionsType));
   DCHECK_OK(registry->AddFunctionOptionsType(kPartitionNthOptionsType));
   DCHECK_OK(registry->AddFunctionOptionsType(kSelectKOptionsType));
-  DCHECK_OK(registry->AddFunctionOptionsType(kCumulativeSumOptionsType));
-  DCHECK_OK(registry->AddFunctionOptionsType(kRankOptionsType));
+  DCHECK_OK(registry->AddFunctionOptionsType(kIsMonotonicOptionsType));
 }
 }  // namespace internal
 
@@ -268,14 +252,6 @@ Result<std::shared_ptr<Array>> SelectKUnstable(const Datum& datum,
 Result<Datum> ReplaceWithMask(const Datum& values, const Datum& mask,
                               const Datum& replacements, ExecContext* ctx) {
   return CallFunction("replace_with_mask", {values, mask, replacements}, ctx);
-}
-
-Result<Datum> FillNullForward(const Datum& values, ExecContext* ctx) {
-  return CallFunction("fill_null_forward", {values}, ctx);
-}
-
-Result<Datum> FillNullBackward(const Datum& values, ExecContext* ctx) {
-  return CallFunction("fill_null_backward", {values}, ctx);
 }
 
 Result<std::shared_ptr<Array>> SortIndices(const Array& values,
@@ -338,6 +314,11 @@ Result<std::shared_ptr<StructArray>> ValueCounts(const Datum& value, ExecContext
   return checked_pointer_cast<StructArray>(result.make_array());
 }
 
+Result<Datum> IsMonotonic(const Datum& value, const IsMonotonicOptions& options,
+                          ExecContext* ctx) {
+  return CallFunction("is_monotonic", {value}, &options, ctx);
+}
+
 // ----------------------------------------------------------------------
 // Filter- and take-related selection functions
 
@@ -373,15 +354,6 @@ Result<Datum> DropNull(const Datum& values, ExecContext* ctx) {
 Result<std::shared_ptr<Array>> DropNull(const Array& values, ExecContext* ctx) {
   ARROW_ASSIGN_OR_RAISE(Datum out, DropNull(Datum(values), ctx));
   return out.make_array();
-}
-
-// ----------------------------------------------------------------------
-// Cumulative functions
-
-Result<Datum> CumulativeSum(const Datum& values, const CumulativeSumOptions& options,
-                            ExecContext* ctx) {
-  auto func_name = (options.check_overflow) ? "cumulative_sum_checked" : "cumulative_sum";
-  return CallFunction(func_name, {Datum(values)}, &options, ctx);
 }
 
 // ----------------------------------------------------------------------

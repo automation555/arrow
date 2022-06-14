@@ -85,22 +85,12 @@ TYPE_ID_TRAIT(EXTENSION, ExtensionType)
 // Per-type type traits
 //
 
-/// \addtogroup type-traits
-/// \brief Base template for type traits of Arrow data types
-/// Type traits provide various information about a type at compile time, such
-/// as the associated ArrayType, BuilderType, and ScalarType. Not all types
-/// provide all information.
-/// \tparam T An Arrow data type
 template <typename T>
 struct TypeTraits {};
 
-/// \brief Base template for type traits of C++ types
-/// \tparam T A standard C++ type
 template <typename T>
 struct CTypeTraits {};
 
-/// \addtogroup type-traits
-/// @{
 template <>
 struct TypeTraits<NullType> {
   using ArrayType = NullArray;
@@ -125,9 +115,7 @@ struct TypeTraits<BooleanType> {
   constexpr static bool is_parameter_free = true;
   static inline std::shared_ptr<DataType> type_singleton() { return boolean(); }
 };
-/// @}
 
-/// \addtogroup c-type-traits
 template <>
 struct CTypeTraits<bool> : public TypeTraits<BooleanType> {
   using ArrowType = BooleanType;
@@ -174,8 +162,6 @@ PRIMITIVE_TYPE_TRAITS_DEF(double, Double, float64)
 #undef PRIMITIVE_TYPE_TRAITS_DEF
 #undef PRIMITIVE_TYPE_TRAITS_DEF_
 
-/// \addtogroup type-traits
-/// @{
 template <>
 struct TypeTraits<Date64Type> {
   using ArrayType = Date64Array;
@@ -381,10 +367,6 @@ struct TypeTraits<LargeStringType> {
   static inline std::shared_ptr<DataType> type_singleton() { return large_utf8(); }
 };
 
-/// @}
-
-/// \addtogroup c-type-traits
-/// @{
 template <>
 struct CTypeTraits<std::string> : public TypeTraits<StringType> {
   using ArrowType = StringType;
@@ -401,10 +383,7 @@ struct CTypeTraits<DayTimeIntervalType::DayMilliseconds>
     : public TypeTraits<DayTimeIntervalType> {
   using ArrowType = DayTimeIntervalType;
 };
-/// @}
 
-/// \addtogroup type-traits
-/// @{
 template <>
 struct TypeTraits<ListType> {
   using ArrayType = ListArray;
@@ -447,9 +426,7 @@ struct TypeTraits<FixedSizeListType> {
   using ScalarType = FixedSizeListScalar;
   constexpr static bool is_parameter_free = false;
 };
-/// @}
 
-/// \addtogroup c-type-traits
 template <typename CType>
 struct CTypeTraits<std::vector<CType>> : public TypeTraits<ListType> {
   using ArrowType = ListType;
@@ -459,8 +436,6 @@ struct CTypeTraits<std::vector<CType>> : public TypeTraits<ListType> {
   }
 };
 
-/// \addtogroup type-traits
-/// @{
 template <>
 struct TypeTraits<StructType> {
   using ArrayType = StructArray;
@@ -498,7 +473,6 @@ struct TypeTraits<ExtensionType> {
   using ScalarType = ExtensionScalar;
   constexpr static bool is_parameter_free = false;
 };
-/// @}
 
 namespace internal {
 
@@ -515,9 +489,6 @@ using void_t = typename make_void<Ts...>::type;
 //
 // Useful type predicates
 //
-
-/// \addtogroup type-predicates
-/// @{
 
 // only in C++14
 template <bool B, typename T = void>
@@ -570,6 +541,9 @@ using is_floating_type = std::is_base_of<FloatingPointType, T>;
 
 template <typename T, typename R = void>
 using enable_if_floating_point = enable_if_t<is_floating_type<T>::value, R>;
+
+template <typename T, typename R = void>
+using enable_if_not_floating_point = enable_if_t<!is_floating_type<T>::value, R>;
 
 // Half floats are special in that they behave physically like an unsigned
 // integer.
@@ -842,10 +816,6 @@ template <typename T, typename R = void>
 using enable_if_physical_floating_point =
     enable_if_t<is_physical_floating_type<T>::value, R>;
 
-/// @}
-
-/// \addtogroup runtime-type-predicates
-/// @{
 static inline bool is_integer(Type::type type_id) {
   switch (type_id) {
     case Type::UINT8:
@@ -1089,7 +1059,5 @@ static inline int offset_bit_width(Type::type type_id) {
   }
   return 0;
 }
-
-/// @}
 
 }  // namespace arrow
