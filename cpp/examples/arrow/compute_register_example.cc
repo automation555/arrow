@@ -69,9 +69,9 @@ std::unique_ptr<cp::FunctionOptions> ExampleFunctionOptionsType::Copy(
   return std::unique_ptr<cp::FunctionOptions>(new ExampleFunctionOptions());
 }
 
-arrow::Status ExampleFunctionImpl(cp::KernelContext* ctx, const cp::ExecSpan& batch,
-                                  cp::ExecResult* out) {
-  out->value = batch[0].array.ToArrayData();
+arrow::Status ExampleFunctionImpl(cp::KernelContext* ctx, const cp::ExecBatch& batch,
+                                  arrow::Datum* out) {
+  *out->mutable_array() = *batch[0].array();
   return arrow::Status::OK();
 }
 
@@ -92,17 +92,14 @@ class ExampleNode : public cp::ExecNode {
     return arrow::Status::OK();
   }
 
-  void ResumeProducing(ExecNode* output, int32_t counter) override {
-    inputs_[0]->ResumeProducing(this, counter);
-  }
-  void PauseProducing(ExecNode* output, int32_t counter) override {
-    inputs_[0]->PauseProducing(this, counter);
-  }
+  void ResumeProducing(ExecNode* output) override {}
+  void PauseProducing(ExecNode* output) override {}
 
   void StopProducing(ExecNode* output) override { inputs_[0]->StopProducing(this); }
   void StopProducing() override { inputs_[0]->StopProducing(); }
 
-  void InputReceived(ExecNode* input, cp::ExecBatch batch) override {}
+  void InputReceived(ExecNode* input,
+                     std::function<arrow::Result<cp::ExecBatch>()> task) override {}
   void ErrorReceived(ExecNode* input, arrow::Status error) override {}
   void InputFinished(ExecNode* input, int total_batches) override {}
 
@@ -126,7 +123,7 @@ const cp::FunctionDoc func_doc{
 
 int main(int argc, char** argv) {
   const std::string name = "compute_register_example";
-  auto func = std::make_shared<cp::ScalarFunction>(name, cp::Arity::Unary(), func_doc);
+  auto func = std::make_shared<cp::ScalarFunction>(name, cp::Arity::Unary(), &func_doc);
   cp::ScalarKernel kernel({cp::InputType::Array(arrow::int64())}, arrow::int64(),
                           ExampleFunctionImpl);
   kernel.mem_allocation = cp::MemAllocation::NO_PREALLOCATE;

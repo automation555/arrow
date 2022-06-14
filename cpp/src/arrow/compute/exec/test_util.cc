@@ -71,7 +71,7 @@ struct DummyNode : ExecNode {
 
   const char* kind_name() const override { return "Dummy"; }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {}
+  void InputReceived(ExecNode*, std::function<Result<ExecBatch>()>) override {}
 
   void ErrorReceived(ExecNode* input, Status error) override {}
 
@@ -85,12 +85,12 @@ struct DummyNode : ExecNode {
     return Status::OK();
   }
 
-  void PauseProducing(ExecNode* output, int32_t counter) override {
+  void PauseProducing(ExecNode* output) override {
     ASSERT_GE(num_outputs(), 0) << "Sink nodes should not experience backpressure";
     AssertIsOutput(output);
   }
 
-  void ResumeProducing(ExecNode* output, int32_t counter) override {
+  void ResumeProducing(ExecNode* output) override {
     ASSERT_GE(num_outputs(), 0) << "Sink nodes should not experience backpressure";
     AssertIsOutput(output);
   }
@@ -165,12 +165,6 @@ ExecBatch ExecBatchFromJSON(const std::vector<ValueDescr>& descrs,
   return batch;
 }
 
-Future<> StartAndFinish(ExecPlan* plan) {
-  RETURN_NOT_OK(plan->Validate());
-  RETURN_NOT_OK(plan->StartProducing());
-  return plan->finished();
-}
-
 Future<std::vector<ExecBatch>> StartAndCollect(
     ExecPlan* plan, AsyncGenerator<util::optional<ExecBatch>> gen) {
   RETURN_NOT_OK(plan->Validate());
@@ -193,20 +187,6 @@ BatchesWithSchema MakeBasicBatches() {
       ExecBatchFromJSON({int32(), boolean()}, "[[null, true], [4, false]]"),
       ExecBatchFromJSON({int32(), boolean()}, "[[5, null], [6, false], [7, false]]")};
   out.schema = schema({field("i32", int32()), field("bool", boolean())});
-  return out;
-}
-
-BatchesWithSchema MakeNestedBatches() {
-  auto ty = struct_({field("i32", int32()), field("bool", boolean())});
-  BatchesWithSchema out;
-  out.batches = {
-      ExecBatchFromJSON(
-          {ty},
-          R"([[{"i32": null, "bool": true}], [{"i32": 4, "bool": false}], [null]])"),
-      ExecBatchFromJSON(
-          {ty},
-          R"([[{"i32": 5, "bool": null}], [{"i32": 6, "bool": false}], [{"i32": 7, "bool": false}]])")};
-  out.schema = schema({field("struct", ty)});
   return out;
 }
 
