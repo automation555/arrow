@@ -63,13 +63,13 @@ set(SRC_FILES
     decimal_xlarge.cc
     engine.cc
     date_utils.cc
-    encrypt_utils.cc
     expr_decomposer.cc
     expr_validator.cc
     expression.cc
     expression_registry.cc
     exported_funcs_registry.cc
     filter.cc
+    null_ops.cc
     function_ir_builder.cc
     function_registry.cc
     function_registry_arithmetic.cc
@@ -79,18 +79,15 @@ set(SRC_FILES
     function_registry_string.cc
     function_registry_timestamp_arithmetic.cc
     function_signature.cc
-    gandiva_object_cache.cc
     gdv_function_stubs.cc
-    gdv_string_function_stubs.cc
-    gdv_hash_function_stubs.cc
     hash_utils.cc
-    interval_holder.cc
     llvm_generator.cc
     llvm_types.cc
+    like_holder.cc
     literal_holder.cc
     projector.cc
     regex_util.cc
-    regex_functions_holder.cc
+    replace_holder.cc
     selection_vector.cc
     tree_expr_builder.cc
     to_date_holder.cc
@@ -98,21 +95,9 @@ set(SRC_FILES
     ${GANDIVA_PRECOMPILED_CC_PATH})
 
 set(GANDIVA_SHARED_PRIVATE_LINK_LIBS arrow_shared LLVM::LLVM_INTERFACE
-                                     ${GANDIVA_OPENSSL_LIBS} Boost::headers)
-set(GANDIVA_STATIC_LINK_LIBS arrow_static LLVM::LLVM_INTERFACE ${GANDIVA_OPENSSL_LIBS}
-                             Boost::headers)
-if(ARROW_WITH_RE2)
-  list(APPEND GANDIVA_SHARED_PRIVATE_LINK_LIBS re2::re2)
-  list(APPEND GANDIVA_STATIC_LINK_LIBS re2::re2)
-endif()
-if(ARROW_WITH_UTF8PROC)
-  list(APPEND GANDIVA_SHARED_PRIVATE_LINK_LIBS utf8proc::utf8proc)
-  list(APPEND GANDIVA_STATIC_LINK_LIBS utf8proc::utf8proc)
-endif()
-if(ARROW_USE_XSIMD)
-  list(APPEND GANDIVA_SHARED_PRIVATE_LINK_LIBS xsimd)
-  list(APPEND GANDIVA_STATIC_LINK_LIBS xsimd)
-endif()
+                                     ${GANDIVA_OPENSSL_LIBS})
+
+set(GANDIVA_STATIC_LINK_LIBS arrow_static LLVM::LLVM_INTERFACE ${GANDIVA_OPENSSL_LIBS})
 
 if(ARROW_GANDIVA_STATIC_LIBSTDCPP AND (CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUCXX
                                       ))
@@ -240,19 +225,19 @@ add_gandiva_test(internals-test
                  llvm_generator_test.cc
                  annotator_test.cc
                  tree_expr_test.cc
-                 encrypt_utils_test.cc
                  expr_decomposer_test.cc
                  expression_registry_test.cc
                  selection_vector_test.cc
-                 lru_cache_test.cc
+                 greedy_dual_size_cache_test.cc
                  to_date_holder_test.cc
                  simple_arena_test.cc
-                 regex_functions_holder_test.cc
+                 like_holder_test.cc
+                 replace_holder_test.cc
                  decimal_type_util_test.cc
                  random_generator_holder_test.cc
                  hash_utils_test.cc
                  gdv_function_stubs_test.cc
-                 interval_holder_test.cc
+                 null_ops_test.cc
                  EXTRA_DEPENDENCIES
                  LLVM::LLVM_INTERFACE
                  ${GANDIVA_OPENSSL_LIBS}
