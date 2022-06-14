@@ -157,8 +157,7 @@ elseif(GRPC_VERSION EQUAL "1.34" OR GRPC_VERSION EQUAL "1.35")
 elseif(GRPC_VERSION EQUAL "1.36")
   add_definitions(-DGRPC_USE_TLS_CHANNEL_CREDENTIALS_OPTIONS
                   -DGRPC_NAMESPACE_FOR_TLS_CREDENTIALS_OPTIONS=grpc::experimental)
-elseif((GRPC_VERSION EQUAL "1.43") OR (GRPC_VERSION EQUAL "1.46"))
-  # 1.46 is the bundled version
+elseif(GRPC_VERSION EQUAL "1.43")
   add_definitions(-DGRPC_USE_TLS_CHANNEL_CREDENTIALS_OPTIONS
                   -DGRPC_NAMESPACE_FOR_TLS_CREDENTIALS_OPTIONS=grpc::experimental
                   -DGRPC_USE_CERTIFICATE_VERIFIER)
@@ -184,10 +183,13 @@ set(ARROW_FLIGHT_SRCS
     "${CMAKE_CURRENT_BINARY_DIR}/Flight.pb.cc"
     client.cc
     client_cookie_middleware.cc
+    client_tracing_middleware.cc
     cookie_internal.cc
+    middleware.cc
     serialization_internal.cc
     server.cc
     server_auth.cc
+    server_tracing_middleware.cc
     transport.cc
     transport_server.cc
     # Bundle the gRPC impl with libarrow_flight
