@@ -16,7 +16,6 @@
 // under the License.
 
 #include <unordered_set>
-#include <utility>
 
 #include "arrow/compute/exec/exec_plan.h"
 #include "arrow/compute/exec/hash_join.h"
@@ -28,7 +27,6 @@
 #include "arrow/util/future.h"
 #include "arrow/util/make_unique.h"
 #include "arrow/util/thread_pool.h"
-#include "arrow/util/tracing_internal.h"
 
 namespace arrow {
 
@@ -88,8 +86,8 @@ Status HashJoinSchema::Init(JoinType join_type, const Schema& left_schema,
                             const Schema& right_schema,
                             const std::vector<FieldRef>& right_keys,
                             const Expression& filter,
-                            const std::string& left_field_name_suffix,
-                            const std::string& right_field_name_suffix) {
+                            const std::string& left_field_name_prefix,
+                            const std::string& right_field_name_prefix) {
   std::vector<FieldRef> left_output;
   if (join_type != JoinType::RIGHT_SEMI && join_type != JoinType::RIGHT_ANTI) {
     const FieldVector& left_fields = left_schema.fields();
@@ -108,18 +106,18 @@ Status HashJoinSchema::Init(JoinType join_type, const Schema& left_schema,
     }
   }
   return Init(join_type, left_schema, left_keys, left_output, right_schema, right_keys,
-              right_output, filter, left_field_name_suffix, right_field_name_suffix);
+              right_output, filter, left_field_name_prefix, right_field_name_prefix);
 }
 
 Status HashJoinSchema::Init(
     JoinType join_type, const Schema& left_schema, const std::vector<FieldRef>& left_keys,
     const std::vector<FieldRef>& left_output, const Schema& right_schema,
     const std::vector<FieldRef>& right_keys, const std::vector<FieldRef>& right_output,
-    const Expression& filter, const std::string& left_field_name_suffix,
-    const std::string& right_field_name_suffix) {
+    const Expression& filter, const std::string& left_field_name_prefix,
+    const std::string& right_field_name_prefix) {
   RETURN_NOT_OK(ValidateSchemas(join_type, left_schema, left_keys, left_output,
                                 right_schema, right_keys, right_output,
-                                left_field_name_suffix, right_field_name_suffix));
+                                left_field_name_prefix, right_field_name_prefix));
 
   std::vector<HashJoinProjection> handles;
   std::vector<const std::vector<FieldRef>*> field_refs;
@@ -174,8 +172,8 @@ Status HashJoinSchema::ValidateSchemas(JoinType join_type, const Schema& left_sc
                                        const Schema& right_schema,
                                        const std::vector<FieldRef>& right_keys,
                                        const std::vector<FieldRef>& right_output,
-                                       const std::string& left_field_name_suffix,
-                                       const std::string& right_field_name_suffix) {
+                                       const std::string& left_field_name_prefix,
+                                       const std::string& right_field_name_prefix) {
   // Checks for key fields:
   // 1. Key field refs must match exactly one input field
   // 2. Same number of key fields on left and right
@@ -243,7 +241,7 @@ Status HashJoinSchema::ValidateSchemas(JoinType join_type, const Schema& left_sc
   // 4. Left semi/anti join (right semi/anti join) must not output fields from right
   // (left)
   // 5. No name collisions in output fields after adding (potentially empty)
-  // suffixes to left and right output
+  // prefixes to left and right output
   //
   if (left_output.empty() && right_output.empty()) {
     return Status::Invalid("Join must output at least one field");
@@ -277,68 +275,37 @@ Status HashJoinSchema::ValidateSchemas(JoinType join_type, const Schema& left_sc
 }
 
 std::shared_ptr<Schema> HashJoinSchema::MakeOutputSchema(
-    const std::string& left_field_name_suffix,
-    const std::string& right_field_name_suffix) {
+    const std::string& left_field_name_prefix,
+    const std::string& right_field_name_prefix) {
   std::vector<std::shared_ptr<Field>> fields;
   int left_size = proj_maps[0].num_cols(HashJoinProjection::OUTPUT);
   int right_size = proj_maps[1].num_cols(HashJoinProjection::OUTPUT);
   fields.resize(left_size + right_size);
 
-  std::unordered_multimap<std::string, int> left_field_map;
-  left_field_map.reserve(left_size);
-  for (int i = 0; i < left_size; ++i) {
-    int side = 0;  // left
-    int input_field_id =
-        proj_maps[side].map(HashJoinProjection::OUTPUT, HashJoinProjection::INPUT).get(i);
+  for (int i = 0; i < left_size + right_size; ++i) {
+    bool is_left = (i < left_size);
+    int side = (is_left ? 0 : 1);
+    int input_field_id = proj_maps[side]
+                             .map(HashJoinProjection::OUTPUT, HashJoinProjection::INPUT)
+                             .get(is_left ? i : i - left_size);
     const std::string& input_field_name =
         proj_maps[side].field_name(HashJoinProjection::INPUT, input_field_id);
     const std::shared_ptr<DataType>& input_data_type =
         proj_maps[side].data_type(HashJoinProjection::INPUT, input_field_id);
-    left_field_map.insert({input_field_name, i});
-    // insert left table field
+
+    std::string output_field_name =
+        (is_left ? left_field_name_prefix : right_field_name_prefix) + input_field_name;
+
+    // All fields coming out of join are marked as nullable.
     fields[i] =
-        std::make_shared<Field>(input_field_name, input_data_type, true /*nullable*/);
-  }
-
-  for (int i = 0; i < right_size; ++i) {
-    int side = 1;  // right
-    int input_field_id =
-        proj_maps[side].map(HashJoinProjection::OUTPUT, HashJoinProjection::INPUT).get(i);
-    const std::string& input_field_name =
-        proj_maps[side].field_name(HashJoinProjection::INPUT, input_field_id);
-    const std::shared_ptr<DataType>& input_data_type =
-        proj_maps[side].data_type(HashJoinProjection::INPUT, input_field_id);
-    // search the map and add suffix to the elements which
-    // are present both in left and right tables
-    auto search_it = left_field_map.equal_range(input_field_name);
-    bool match_found = false;
-    for (auto search = search_it.first; search != search_it.second; ++search) {
-      match_found = true;
-      auto left_val = search->first;
-      auto left_index = search->second;
-      auto left_field = fields[left_index];
-      // update left table field with suffix
-      fields[left_index] =
-          std::make_shared<Field>(input_field_name + left_field_name_suffix,
-                                  left_field->type(), true /*nullable*/);
-      // insert right table field with suffix
-      fields[left_size + i] = std::make_shared<Field>(
-          input_field_name + right_field_name_suffix, input_data_type, true /*nullable*/);
-    }
-
-    if (!match_found) {
-      // insert right table field without suffix
-      fields[left_size + i] =
-          std::make_shared<Field>(input_field_name, input_data_type, true /*nullable*/);
-    }
+        std::make_shared<Field>(output_field_name, input_data_type, true /*nullable*/);
   }
   return std::make_shared<Schema>(std::move(fields));
 }
 
 Result<Expression> HashJoinSchema::BindFilter(Expression filter,
                                               const Schema& left_schema,
-                                              const Schema& right_schema,
-                                              ExecContext* exec_context) {
+                                              const Schema& right_schema) {
   if (filter.IsBound() || filter == literal(true)) {
     return std::move(filter);
   }
@@ -369,7 +336,7 @@ Result<Expression> HashJoinSchema::BindFilter(Expression filter,
                                           filter);
 
   // Step 3: Bind
-  ARROW_ASSIGN_OR_RAISE(filter, filter.Bind(filter_schema, exec_context));
+  ARROW_ASSIGN_OR_RAISE(filter, filter.Bind(filter_schema));
   if (filter.type()->id() != Type::BOOL) {
     return Status::TypeError("Filter expression must evaluate to bool, but ",
                              filter.ToString(), " evaluates to ",
@@ -456,20 +423,6 @@ Status HashJoinSchema::CollectFilterColumns(std::vector<FieldRef>& left_filter,
   return Status::OK();
 }
 
-Status ValidateHashJoinNodeOptions(const HashJoinNodeOptions& join_options) {
-  if (join_options.key_cmp.empty() || join_options.left_keys.empty() ||
-      join_options.right_keys.empty()) {
-    return Status::Invalid("key_cmp and keys cannot be empty");
-  }
-
-  if ((join_options.key_cmp.size() != join_options.left_keys.size()) ||
-      (join_options.key_cmp.size() != join_options.right_keys.size())) {
-    return Status::Invalid("key_cmp and keys must have the same size");
-  }
-
-  return Status::OK();
-}
-
 class HashJoinNode : public ExecNode {
  public:
   HashJoinNode(ExecPlan* plan, NodeVector inputs, const HashJoinNodeOptions& join_options,
@@ -483,8 +436,7 @@ class HashJoinNode : public ExecNode {
         key_cmp_(join_options.key_cmp),
         filter_(std::move(filter)),
         schema_mgr_(std::move(schema_mgr)),
-        impl_(std::move(impl)),
-        disable_bloom_filter_(join_options.disable_bloom_filter) {
+        impl_(std::move(impl)) {
     complete_.store(false);
   }
 
@@ -497,32 +449,31 @@ class HashJoinNode : public ExecNode {
         ::arrow::internal::make_unique<HashJoinSchema>();
 
     const auto& join_options = checked_cast<const HashJoinNodeOptions&>(options);
-    RETURN_NOT_OK(ValidateHashJoinNodeOptions(join_options));
 
     const auto& left_schema = *(inputs[0]->output_schema());
     const auto& right_schema = *(inputs[1]->output_schema());
-
     // This will also validate input schemas
     if (join_options.output_all) {
       RETURN_NOT_OK(schema_mgr->Init(
           join_options.join_type, left_schema, join_options.left_keys, right_schema,
           join_options.right_keys, join_options.filter,
-          join_options.output_suffix_for_left, join_options.output_suffix_for_right));
+          join_options.output_prefix_for_left, join_options.output_prefix_for_right));
     } else {
       RETURN_NOT_OK(schema_mgr->Init(
           join_options.join_type, left_schema, join_options.left_keys,
           join_options.left_output, right_schema, join_options.right_keys,
           join_options.right_output, join_options.filter,
-          join_options.output_suffix_for_left, join_options.output_suffix_for_right));
+          join_options.output_prefix_for_left, join_options.output_prefix_for_right));
     }
 
-    ARROW_ASSIGN_OR_RAISE(Expression filter,
-                          schema_mgr->BindFilter(join_options.filter, left_schema,
-                                                 right_schema, plan->exec_context()));
+    ARROW_ASSIGN_OR_RAISE(
+        Expression filter,
+        schema_mgr->BindFilter(join_options.filter, left_schema, right_schema));
 
     // Generate output schema
     std::shared_ptr<Schema> output_schema = schema_mgr->MakeOutputSchema(
-        join_options.output_suffix_for_left, join_options.output_suffix_for_right);
+        join_options.output_prefix_for_left, join_options.output_prefix_for_right);
+
     // Create hash join implementation object
     ARROW_ASSIGN_OR_RAISE(std::unique_ptr<HashJoinImpl> impl, HashJoinImpl::MakeBasic());
 
@@ -533,22 +484,23 @@ class HashJoinNode : public ExecNode {
 
   const char* kind_name() const override { return "HashJoinNode"; }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {
+  void InputReceived(ExecNode* input, std::function<Result<ExecBatch>()> task) override {
     ARROW_DCHECK(std::find(inputs_.begin(), inputs_.end(), input) != inputs_.end());
+
     if (complete_.load()) {
       return;
     }
 
     size_t thread_index = thread_indexer_();
     int side = (input == inputs_[0]) ? 0 : 1;
-
-    EVENT(span_, "InputReceived", {{"batch.length", batch.length}, {"side", side}});
-    util::tracing::Span span;
-    START_COMPUTE_SPAN_WITH_PARENT(span, span_, "InputReceived",
-                                   {{"batch.length", batch.length}});
-
     {
-      Status status = impl_->InputReceived(thread_index, side, std::move(batch));
+      auto batch = task();
+      if (!batch.ok()) {
+        StopProducing();
+        ErrorIfNotOk(batch.status());
+        return;
+      }
+      Status status = impl_->InputReceived(thread_index, side, batch.MoveValueUnsafe());
       if (!status.ok()) {
         StopProducing();
         ErrorIfNotOk(status);
@@ -566,7 +518,6 @@ class HashJoinNode : public ExecNode {
   }
 
   void ErrorReceived(ExecNode* input, Status error) override {
-    EVENT(span_, "ErrorReceived", {{"error", error.message()}});
     DCHECK_EQ(input, inputs_[0]);
     StopProducing();
     outputs_[0]->ErrorReceived(this, std::move(error));
@@ -578,8 +529,6 @@ class HashJoinNode : public ExecNode {
     size_t thread_index = thread_indexer_();
     int side = (input == inputs_[0]) ? 0 : 1;
 
-    EVENT(span_, "InputFinished", {{"side", side}, {"batches.length", total_batches}});
-
     if (batch_count_[side].SetTotal(total_batches)) {
       Status status = impl_->InputFinished(thread_index, side);
       if (!status.ok()) {
@@ -590,150 +539,26 @@ class HashJoinNode : public ExecNode {
     }
   }
 
-  // The Bloom filter is built on the build side of some upstream join. For a join to
-  // evaluate the Bloom filter on its input columns, it has to rearrange its input columns
-  // to match the column order of the Bloom filter.
-  //
-  // The first part of the pair is the HashJoin to actually perform the pushdown into.
-  // The second part is a mapping such that column_map[i] is the index of key i in
-  // the first part's input.
-  // If we should disable Bloom filter, returns nullptr and an empty vector, and sets
-  // the disable_bloom_filter_ flag.
-  std::pair<HashJoinImpl*, std::vector<int>> GetPushdownTarget() {
-#if !ARROW_LITTLE_ENDIAN
-    // TODO (ARROW-16591): Debug bloom_filter.cc to enable on Big endian. It probably just
-    // needs a few byte swaps in the proper spots.
-    disable_bloom_filter_ = true;
-    return {nullptr, {}};
-#else
-    // A build-side Bloom filter tells us if a row is definitely not in the build side.
-    // This allows us to early-eliminate rows or early-accept rows depending on the type
-    // of join. Left Outer Join and Full Outer Join output all rows, so a build-side Bloom
-    // filter would only allow us to early-output. Left Antijoin outputs only if there is
-    // no match, so again early output. We don't implement early output for now, so we
-    // must disallow these types of joins.
-    bool bloom_filter_does_not_apply_to_join = join_type_ == JoinType::LEFT_ANTI ||
-                                               join_type_ == JoinType::LEFT_OUTER ||
-                                               join_type_ == JoinType::FULL_OUTER;
-    disable_bloom_filter_ = disable_bloom_filter_ || bloom_filter_does_not_apply_to_join;
+  Status StartProducing() override {
+    finished_ = Future<>::Make();
 
-    for (int side = 0; side <= 1 && !disable_bloom_filter_; side++) {
-      SchemaProjectionMap keys_to_input = schema_mgr_->proj_maps[side].map(
-          HashJoinProjection::KEY, HashJoinProjection::INPUT);
-      // Bloom filter currently doesn't support dictionaries.
-      for (int i = 0; i < keys_to_input.num_cols; i++) {
-        int idx = keys_to_input.get(i);
-        bool is_dict =
-            inputs_[side]->output_schema()->field(idx)->type()->id() == Type::DICTIONARY;
-        if (is_dict) {
-          disable_bloom_filter_ = true;
-          break;
-        }
-      }
-    }
-
-    bool all_comparisons_is = true;
-    for (JoinKeyCmp cmp : key_cmp_) all_comparisons_is &= (cmp == JoinKeyCmp::IS);
-
-    if ((join_type_ == JoinType::RIGHT_OUTER || join_type_ == JoinType::FULL_OUTER) &&
-        all_comparisons_is)
-      disable_bloom_filter_ = true;
-
-    if (disable_bloom_filter_) return {nullptr, {}};
-
-    // We currently only push Bloom filters on the probe side, and only if that input is
-    // also a join.
-    SchemaProjectionMap probe_key_to_input =
-        schema_mgr_->proj_maps[0].map(HashJoinProjection::KEY, HashJoinProjection::INPUT);
-    int num_keys = probe_key_to_input.num_cols;
-
-    // A mapping such that bloom_to_target[i] is the index of key i in the pushdown
-    // target's input
-    std::vector<int> bloom_to_target(num_keys);
-    HashJoinNode* pushdown_target = this;
-    for (int i = 0; i < num_keys; i++) bloom_to_target[i] = probe_key_to_input.get(i);
-
-    for (ExecNode* candidate = inputs()[0]; candidate->kind_name() == this->kind_name();
-         candidate = candidate->inputs()[0]) {
-      auto* candidate_as_join = checked_cast<HashJoinNode*>(candidate);
-      SchemaProjectionMap candidate_output_to_input =
-          candidate_as_join->schema_mgr_->proj_maps[0].map(HashJoinProjection::OUTPUT,
-                                                           HashJoinProjection::INPUT);
-
-      // Check if any of the keys are missing, if they are, break
-      bool break_outer = false;
-      for (int i = 0; i < num_keys; i++) {
-        // Since all of the probe side columns are before the build side columns,
-        // if the index of an output is greater than the number of probe-side input
-        // columns, it must have come from the candidate's build side.
-        if (bloom_to_target[i] >= candidate_output_to_input.num_cols) {
-          break_outer = true;
-          break;
-        }
-        int candidate_input_idx = candidate_output_to_input.get(bloom_to_target[i]);
-        // The output column has to have come from somewhere...
-        ARROW_DCHECK_NE(candidate_input_idx, schema_mgr_->kMissingField());
-      }
-      if (break_outer) break;
-
-      // The Bloom filter will filter out nulls, which may cause a Right/Full Outer Join
-      // to incorrectly output some rows with nulls padding the probe-side rows. This may
-      // cause a row with all null keys to be emitted. This is normally not an issue
-      // with EQ, but if all comparisons are IS (i.e. all-null is accepted), this could
-      // produce incorrect rows.
-      bool can_produce_build_side_nulls =
-          candidate_as_join->join_type_ == JoinType::RIGHT_OUTER ||
-          candidate_as_join->join_type_ == JoinType::FULL_OUTER;
-
-      if (all_comparisons_is || can_produce_build_side_nulls) break;
-
-      // All keys are present, we can update the mapping
-      for (int i = 0; i < num_keys; i++) {
-        int candidate_input_idx = candidate_output_to_input.get(bloom_to_target[i]);
-        bloom_to_target[i] = candidate_input_idx;
-      }
-      pushdown_target = candidate_as_join;
-    }
-    return std::make_pair(pushdown_target->impl_.get(), std::move(bloom_to_target));
-#endif  // ARROW_LITTLE_ENDIAN
-  }
-
-  Status PrepareToProduce() override {
     bool use_sync_execution = !(plan_->exec_context()->executor());
     size_t num_threads = use_sync_execution ? 1 : thread_indexer_.Capacity();
 
-    HashJoinImpl* pushdown_target = nullptr;
-    std::vector<int> column_map;
-    std::tie(pushdown_target, column_map) = GetPushdownTarget();
-
-    return impl_->Init(
+    RETURN_NOT_OK(impl_->Init(
         plan_->exec_context(), join_type_, use_sync_execution, num_threads,
         schema_mgr_.get(), key_cmp_, filter_,
         [this](ExecBatch batch) { this->OutputBatchCallback(batch); },
         [this](int64_t total_num_batches) { this->FinishedCallback(total_num_batches); },
         [this](std::function<Status(size_t)> func) -> Status {
           return this->ScheduleTaskCallback(std::move(func));
-        },
-        pushdown_target, std::move(column_map));
-  }
-
-  Status StartProducing() override {
-    START_COMPUTE_SPAN(span_, std::string(kind_name()) + ":" + label(),
-                       {{"node.label", label()},
-                        {"node.detail", ToString()},
-                        {"node.kind", kind_name()}});
-    END_SPAN_ON_FUTURE_COMPLETION(span_, finished(), this);
-
+        }));
     return Status::OK();
   }
 
-  void PauseProducing(ExecNode* output, int32_t counter) override {
-    // TODO(ARROW-16246)
-  }
+  void PauseProducing(ExecNode* output) override {}
 
-  void ResumeProducing(ExecNode* output, int32_t counter) override {
-    // TODO(ARROW-16246)
-  }
+  void ResumeProducing(ExecNode* output) override {}
 
   void StopProducing(ExecNode* output) override {
     DCHECK_EQ(output, outputs_[0]);
@@ -741,45 +566,42 @@ class HashJoinNode : public ExecNode {
   }
 
   void StopProducing() override {
-    EVENT(span_, "StopProducing");
     bool expected = false;
     if (complete_.compare_exchange_strong(expected, true)) {
       for (auto&& input : inputs_) {
         input->StopProducing(this);
       }
-      impl_->Abort([this]() { ARROW_UNUSED(task_group_.End()); });
+      impl_->Abort([this]() { finished_.MarkFinished(); });
     }
   }
 
-  Future<> finished() override { return task_group_.OnFinished(); }
+  Future<> finished() override { return finished_; }
 
  private:
   void OutputBatchCallback(ExecBatch batch) {
-    outputs_[0]->InputReceived(this, std::move(batch));
+    outputs_[0]->InputReceived(this, IdentityTask(batch));
   }
 
   void FinishedCallback(int64_t total_num_batches) {
     bool expected = false;
     if (complete_.compare_exchange_strong(expected, true)) {
       outputs_[0]->InputFinished(this, static_cast<int>(total_num_batches));
-      ARROW_UNUSED(task_group_.End());
+      finished_.MarkFinished();
     }
   }
 
   Status ScheduleTaskCallback(std::function<Status(size_t)> func) {
     auto executor = plan_->exec_context()->executor();
     if (executor) {
-      return task_group_.AddTask([this, executor, func] {
-        return DeferNotOk(executor->Submit([this, func] {
-          size_t thread_index = thread_indexer_();
-          Status status = func(thread_index);
-          if (!status.ok()) {
-            StopProducing();
-            ErrorIfNotOk(status);
-            return;
-          }
-        }));
-      });
+      RETURN_NOT_OK(executor->Spawn([this, func] {
+        size_t thread_index = thread_indexer_();
+        Status status = func(thread_index);
+        if (!status.ok()) {
+          StopProducing();
+          ErrorIfNotOk(status);
+          return;
+        }
+      }));
     } else {
       // We should not get here in serial execution mode
       ARROW_DCHECK(false);
@@ -790,17 +612,17 @@ class HashJoinNode : public ExecNode {
  private:
   AtomicCounter batch_count_[2];
   std::atomic<bool> complete_;
+  Future<> finished_ = Future<>::MakeFinished();
   JoinType join_type_;
   std::vector<JoinKeyCmp> key_cmp_;
   Expression filter_;
   ThreadIndexer thread_indexer_;
   std::unique_ptr<HashJoinSchema> schema_mgr_;
   std::unique_ptr<HashJoinImpl> impl_;
-  util::AsyncTaskGroup task_group_;
-  bool disable_bloom_filter_;
 };
 
 namespace internal {
+
 void RegisterHashJoinNode(ExecFactoryRegistry* registry) {
   DCHECK_OK(registry->AddFactory("hashjoin", HashJoinNode::Make));
 }

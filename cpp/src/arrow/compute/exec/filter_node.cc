@@ -15,9 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include "arrow/compute/exec/exec_plan.h"
+
 #include "arrow/compute/api_vector.h"
 #include "arrow/compute/exec.h"
-#include "arrow/compute/exec/exec_plan.h"
 #include "arrow/compute/exec/expression.h"
 #include "arrow/compute/exec/options.h"
 #include "arrow/datum.h"
@@ -25,8 +26,6 @@
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/future.h"
 #include "arrow/util/logging.h"
-#include "arrow/util/tracing_internal.h"
-
 namespace arrow {
 
 using internal::checked_cast;
@@ -50,8 +49,7 @@ class FilterNode : public MapNode {
 
     auto filter_expression = filter_options.filter_expression;
     if (!filter_expression.IsBound()) {
-      ARROW_ASSIGN_OR_RAISE(filter_expression,
-                            filter_expression.Bind(*schema, plan->exec_context()));
+      ARROW_ASSIGN_OR_RAISE(filter_expression, filter_expression.Bind(*schema));
     }
 
     if (filter_expression.type()->id() != Type::BOOL) {
@@ -70,12 +68,6 @@ class FilterNode : public MapNode {
     ARROW_ASSIGN_OR_RAISE(Expression simplified_filter,
                           SimplifyWithGuarantee(filter_, target.guarantee));
 
-    util::tracing::Span span;
-    START_COMPUTE_SPAN(span, "Filter",
-                       {{"filter.expression", ToStringExtra()},
-                        {"filter.expression.simplified", simplified_filter.ToString()},
-                        {"filter.length", target.length}});
-
     ARROW_ASSIGN_OR_RAISE(Datum mask, ExecuteScalarExpression(simplified_filter, target,
                                                               plan()->exec_context()));
 
@@ -84,6 +76,7 @@ class FilterNode : public MapNode {
       if (mask_scalar.is_valid && mask_scalar.value) {
         return target;
       }
+
       return target.Slice(0, 0);
     }
 
@@ -96,30 +89,23 @@ class FilterNode : public MapNode {
       if (value.is_scalar()) continue;
       ARROW_ASSIGN_OR_RAISE(value, Filter(value, mask, FilterOptions::Defaults()));
     }
-    return ExecBatch::Make(std::move(values));
+
+    ARROW_ASSIGN_OR_RAISE(auto result, ExecBatch::Make(std::move(values)));
+    result.guarantee = target.guarantee;
+    return result;
   }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {
-    EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
+  void InputReceived(ExecNode* input, std::function<Result<ExecBatch>()> task) override {
     DCHECK_EQ(input, inputs_[0]);
-    auto func = [this](ExecBatch batch) {
-      util::tracing::Span span;
-      START_COMPUTE_SPAN_WITH_PARENT(span, span_, "InputReceived",
-                                     {{"filter", ToStringExtra()},
-                                      {"node.label", label()},
-                                      {"batch.length", batch.length}});
-      auto result = DoFilter(std::move(batch));
-      MARK_SPAN(span, result.status());
-      END_SPAN(span);
-      return result;
+    auto func = [this, task]() -> Result<ExecBatch> {
+      ARROW_ASSIGN_OR_RAISE(auto batch, task());
+      return DoFilter(std::move(batch));
     };
-    this->SubmitTask(std::move(func), std::move(batch));
+    this->SubmitTask(std::move(func));
   }
 
  protected:
-  std::string ToStringExtra(int indent = 0) const override {
-    return "filter=" + filter_.ToString();
-  }
+  std::string ToStringExtra() const override { return "filter=" + filter_.ToString(); }
 
  private:
   Expression filter_;
