@@ -112,10 +112,8 @@ inline void VisitRawValuesInline(const ArrayType& values,
                                  VisitorNotNull&& visitor_not_null,
                                  VisitorNull&& visitor_null) {
   const auto data = values.raw_values();
-  auto validity_buf = values.data()->buffers[0];
-  const uint8_t* bitmap = validity_buf == nullptr ? nullptr : validity_buf->data();
   VisitBitBlocksVoid(
-      bitmap, values.offset(), values.length(),
+      values.null_bitmap(), values.offset(), values.length(),
       [&](int64_t i) { visitor_not_null(data[i]); }, [&]() { visitor_null(); });
 }
 
@@ -125,15 +123,14 @@ inline void VisitRawValuesInline(const BooleanArray& values,
                                  VisitorNull&& visitor_null) {
   if (values.null_count() != 0) {
     const uint8_t* data = values.data()->GetValues<uint8_t>(1, 0);
-    const uint8_t* bitmap = values.data()->buffers[0]->data();
     VisitBitBlocksVoid(
-        bitmap, values.offset(), values.length(),
+        values.null_bitmap(), values.offset(), values.length(),
         [&](int64_t i) { visitor_not_null(bit_util::GetBit(data, values.offset() + i)); },
         [&]() { visitor_null(); });
   } else {
     // Can avoid GetBit() overhead in the no-nulls case
     VisitBitBlocksVoid(
-        values.data()->buffers[1]->data(), values.offset(), values.length(),
+        values.data()->buffers[1], values.offset(), values.length(),
         [&](int64_t i) { visitor_not_null(true); }, [&]() { visitor_not_null(false); });
   }
 }
@@ -173,6 +170,49 @@ class ArrayCompareSorter {
     }
     return p;
   }
+};
+
+template <typename ArrowType>
+class StructArrayCompareSorter {
+  using ArrayType = typename TypeTraits<ArrowType>::ArrayType;
+
+ public:
+  // `offset` is used when this is called on a chunk of a chunked array
+  NullPartitionResult operator()(uint64_t* indices_begin, uint64_t* indices_end,
+                                 const Array& array, int64_t offset,
+                                 const ArraySortOptions& options) {
+    const auto& values = checked_cast<const ArrayType&>(array);
+    nested_value_comparator_ = std::make_shared<NestedValuesComparator>();
+
+    if (nested_value_comparator_->Prepare(values) != Status::OK()) {
+      // TODO: Improve error handling
+      return NullPartitionResult();
+    }
+
+    const auto p = PartitionNulls<ArrayType, StablePartitioner>(
+        indices_begin, indices_end, values, offset, options.null_placement);
+
+    bool asc_order = options.order == SortOrder::Ascending;
+    std::stable_sort(p.non_nulls_begin, p.non_nulls_end,
+                     [&offset, &values, asc_order, this](uint64_t left, uint64_t right) {
+                       // is better to do values.fields.size() or
+                       // values.schema().num_fields() ?
+                       for (ArrayVector::size_type fieldidx = 0;
+                            fieldidx < values.fields().size(); ++fieldidx) {
+                         int result = nested_value_comparator_->Compare(
+                             values, fieldidx, offset, asc_order ? left : right,
+                             asc_order ? right : left);
+                         if (result == -1)
+                           return true;
+                         else if (result == 1)
+                           return false;
+                       }
+                       return false;
+                     });
+    return p;
+  }
+
+  std::shared_ptr<NestedValuesComparator> nested_value_comparator_;
 };
 
 template <typename ArrowType>
@@ -413,6 +453,11 @@ struct ArraySorter<
   ArrayCompareSorter<Type> impl;
 };
 
+template <typename Type>
+struct ArraySorter<Type, enable_if_t<is_struct_type<Type>::value>> {
+  StructArrayCompareSorter<Type> impl;
+};
+
 struct ArraySorterFactory {
   ArraySortFunc sorter;
 
@@ -477,30 +522,30 @@ void AddArraySortingKernels(VectorKernel base, VectorFunction* func) {
 
   // duration type
   base.signature = KernelSignature::Make({InputType::Array(Type::DURATION)}, uint64());
-  base.exec = GenerateNumericOld<ExecTemplate, UInt64Type>(*int64());
+  base.exec = GenerateNumeric<ExecTemplate, UInt64Type>(*int64());
   DCHECK_OK(func->AddKernel(base));
 
   for (const auto& ty : NumericTypes()) {
     auto physical_type = GetPhysicalType(ty);
     base.signature = KernelSignature::Make({InputType::Array(ty)}, uint64());
-    base.exec = GenerateNumericOld<ExecTemplate, UInt64Type>(*physical_type);
+    base.exec = GenerateNumeric<ExecTemplate, UInt64Type>(*physical_type);
     DCHECK_OK(func->AddKernel(base));
   }
   for (const auto& ty : TemporalTypes()) {
     auto physical_type = GetPhysicalType(ty);
     base.signature = KernelSignature::Make({InputType::Array(ty->id())}, uint64());
-    base.exec = GenerateNumericOld<ExecTemplate, UInt64Type>(*physical_type);
+    base.exec = GenerateNumeric<ExecTemplate, UInt64Type>(*physical_type);
     DCHECK_OK(func->AddKernel(base));
   }
   for (const auto id : {Type::DECIMAL128, Type::DECIMAL256}) {
     base.signature = KernelSignature::Make({InputType::Array(id)}, uint64());
-    base.exec = GenerateDecimalOld<ExecTemplate, UInt64Type>(id);
+    base.exec = GenerateDecimal<ExecTemplate, UInt64Type>(id);
     DCHECK_OK(func->AddKernel(base));
   }
   for (const auto& ty : BaseBinaryTypes()) {
     auto physical_type = GetPhysicalType(ty);
     base.signature = KernelSignature::Make({InputType::Array(ty)}, uint64());
-    base.exec = GenerateVarBinaryBaseOld<ExecTemplate, UInt64Type>(*physical_type);
+    base.exec = GenerateVarBinaryBase<ExecTemplate, UInt64Type>(*physical_type);
     DCHECK_OK(func->AddKernel(base));
   }
   base.signature =
@@ -512,6 +557,13 @@ void AddArraySortingKernels(VectorKernel base, VectorFunction* func) {
 const ArraySortOptions* GetDefaultArraySortOptions() {
   static const auto kDefaultArraySortOptions = ArraySortOptions::Defaults();
   return &kDefaultArraySortOptions;
+}
+
+template <template <typename...> class ExecTemplate>
+void AddArraySortingNestedKernels(VectorKernel base, VectorFunction* func) {
+  base.signature = KernelSignature::Make({InputType::Array(Type::STRUCT)}, uint64());
+  base.exec = ExecTemplate<UInt64Type, StructType>::Exec;
+  DCHECK_OK(func->AddKernel(base));
 }
 
 const FunctionDoc array_sort_indices_doc(
@@ -558,15 +610,16 @@ void RegisterVectorArraySort(FunctionRegistry* registry) {
   base.can_execute_chunkwise = false;
 
   auto array_sort_indices = std::make_shared<VectorFunction>(
-      "array_sort_indices", Arity::Unary(), array_sort_indices_doc,
+      "array_sort_indices", Arity::Unary(), &array_sort_indices_doc,
       GetDefaultArraySortOptions());
   base.init = ArraySortIndicesState::Init;
   AddArraySortingKernels<ArraySortIndices>(base, array_sort_indices.get());
+  AddArraySortingNestedKernels<ArraySortIndices>(base, array_sort_indices.get());
   DCHECK_OK(registry->AddFunction(std::move(array_sort_indices)));
 
   // partition_nth_indices has a parameter so needs its init function
   auto part_indices = std::make_shared<VectorFunction>(
-      "partition_nth_indices", Arity::Unary(), partition_nth_indices_doc);
+      "partition_nth_indices", Arity::Unary(), &partition_nth_indices_doc);
   base.init = PartitionNthToIndicesState::Init;
   AddArraySortingKernels<PartitionNthToIndices>(base, part_indices.get());
   DCHECK_OK(registry->AddFunction(std::move(part_indices)));
