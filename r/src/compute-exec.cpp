@@ -17,10 +17,18 @@
 
 #include "./arrow_types.h"
 
+#if defined(ARROW_R_WITH_ARROW)
+
 #include <arrow/compute/api.h>
 #include <arrow/compute/exec/exec_plan.h>
 #include <arrow/compute/exec/expression.h>
 #include <arrow/compute/exec/options.h>
+#include <arrow/compute/exec/tpch_node.h>
+// TODO: We probably don't want to add dataset + filesystem here, so instead we'll
+// probably want to move the definition of Tpch_Dbgen_Write if it works
+#include <arrow/dataset/api.h>
+#include <arrow/filesystem/filesystem.h>
+#include <arrow/filesystem/localfs.h>
 #include <arrow/table.h>
 #include <arrow/util/async_generator.h>
 #include <arrow/util/future.h>
@@ -30,11 +38,13 @@
 #include <iostream>
 
 namespace compute = ::arrow::compute;
+// TODO: We probably don't want to add dataset + fs here, so instead we'll probably
+// want to move the definition of Tpch_Dbgen_Write if it works
+namespace ds = ::arrow::dataset;
+namespace fs = ::arrow::fs;
 
 std::shared_ptr<compute::FunctionOptions> make_compute_options(std::string func_name,
                                                                cpp11::list options);
-
-std::shared_ptr<arrow::KeyValueMetadata> strings_to_kvm(cpp11::strings metadata);
 
 // [[arrow::export]]
 std::shared_ptr<compute::ExecPlan> ExecPlan_create(bool use_threads) {
@@ -59,7 +69,7 @@ std::shared_ptr<compute::ExecNode> MakeExecNodeOrStop(
 std::shared_ptr<arrow::RecordBatchReader> ExecPlan_run(
     const std::shared_ptr<compute::ExecPlan>& plan,
     const std::shared_ptr<compute::ExecNode>& final_node, cpp11::list sort_options,
-    cpp11::strings metadata, int64_t head = -1) {
+    int64_t head = -1) {
   // For now, don't require R to construct SinkNodes.
   // Instead, just pass the node we should collect as an argument.
   arrow::AsyncGenerator<arrow::util::optional<compute::ExecBatch>> sink_gen;
@@ -103,15 +113,9 @@ std::shared_ptr<arrow::RecordBatchReader> ExecPlan_run(
                                          }
                                        }};
 
-  // Attach metadata to the schema
-  auto out_schema = final_node->output_schema();
-  if (metadata.size() > 0) {
-    auto kv = strings_to_kvm(metadata);
-    out_schema = out_schema->WithMetadata(kv);
-  }
   return compute::MakeGeneratorReader(
-      out_schema, [stop_producing, plan, sink_gen] { return sink_gen(); },
-      gc_memory_pool());
+      final_node->output_schema(),
+      [stop_producing, plan, sink_gen] { return sink_gen(); }, gc_memory_pool());
 }
 
 // [[arrow::export]]
@@ -127,20 +131,19 @@ std::shared_ptr<arrow::Schema> ExecNode_output_schema(
 
 #if defined(ARROW_R_WITH_DATASET)
 
-#include <arrow/dataset/file_base.h>
 #include <arrow/dataset/plan.h>
 #include <arrow/dataset/scanner.h>
 
 // [[dataset::export]]
 std::shared_ptr<compute::ExecNode> ExecNode_Scan(
     const std::shared_ptr<compute::ExecPlan>& plan,
-    const std::shared_ptr<ds::Dataset>& dataset,
+    const std::shared_ptr<arrow::dataset::Dataset>& dataset,
     const std::shared_ptr<compute::Expression>& filter,
     std::vector<std::string> materialized_field_names) {
   arrow::dataset::internal::Initialize();
 
   // TODO: pass in FragmentScanOptions
-  auto options = std::make_shared<ds::ScanOptions>();
+  auto options = std::make_shared<arrow::dataset::ScanOptions>();
 
   options->use_threads = arrow::r::GetBoolOption("arrow.use_threads", true);
 
@@ -161,43 +164,7 @@ std::shared_ptr<compute::ExecNode> ExecNode_Scan(
                       .Bind(*dataset->schema()));
 
   return MakeExecNodeOrStop("scan", plan.get(), {},
-                            ds::ScanNodeOptions{dataset, options});
-}
-
-// [[dataset::export]]
-void ExecPlan_Write(
-    const std::shared_ptr<compute::ExecPlan>& plan,
-    const std::shared_ptr<compute::ExecNode>& final_node, cpp11::strings metadata,
-    const std::shared_ptr<ds::FileWriteOptions>& file_write_options,
-    const std::shared_ptr<fs::FileSystem>& filesystem, std::string base_dir,
-    const std::shared_ptr<ds::Partitioning>& partitioning, std::string basename_template,
-    arrow::dataset::ExistingDataBehavior existing_data_behavior, int max_partitions,
-    uint32_t max_open_files, uint64_t max_rows_per_file, uint64_t min_rows_per_group,
-    uint64_t max_rows_per_group) {
-  arrow::dataset::internal::Initialize();
-
-  // TODO(ARROW-16200): expose FileSystemDatasetWriteOptions in R
-  // and encapsulate this logic better
-  ds::FileSystemDatasetWriteOptions opts;
-  opts.file_write_options = file_write_options;
-  opts.existing_data_behavior = existing_data_behavior;
-  opts.filesystem = filesystem;
-  opts.base_dir = base_dir;
-  opts.partitioning = partitioning;
-  opts.basename_template = basename_template;
-  opts.max_partitions = max_partitions;
-  opts.max_open_files = max_open_files;
-  opts.max_rows_per_file = max_rows_per_file;
-  opts.min_rows_per_group = min_rows_per_group;
-  opts.max_rows_per_group = max_rows_per_group;
-
-  auto kv = strings_to_kvm(metadata);
-  MakeExecNodeOrStop("write", final_node->plan(), {final_node.get()},
-                     ds::WriteNodeOptions{std::move(opts), std::move(kv)});
-
-  StopIfNotOk(plan->Validate());
-  StopIfNotOk(plan->StartProducing());
-  StopIfNotOk(plan->finished().status());
+                            arrow::dataset::ScanNodeOptions{dataset, options});
 }
 
 #endif
@@ -260,8 +227,7 @@ std::shared_ptr<compute::ExecNode> ExecNode_Join(
     const std::shared_ptr<compute::ExecNode>& input, int type,
     const std::shared_ptr<compute::ExecNode>& right_data,
     std::vector<std::string> left_keys, std::vector<std::string> right_keys,
-    std::vector<std::string> left_output, std::vector<std::string> right_output,
-    std::string output_suffix_for_left, std::string output_suffix_for_right) {
+    std::vector<std::string> left_output, std::vector<std::string> right_output) {
   std::vector<arrow::FieldRef> left_refs, right_refs, left_out_refs, right_out_refs;
   for (auto&& name : left_keys) {
     left_refs.emplace_back(std::move(name));
@@ -305,17 +271,8 @@ std::shared_ptr<compute::ExecNode> ExecNode_Join(
 
   return MakeExecNodeOrStop(
       "hashjoin", input->plan(), {input.get(), right_data.get()},
-      compute::HashJoinNodeOptions{
-          join_type, std::move(left_refs), std::move(right_refs),
-          std::move(left_out_refs), std::move(right_out_refs), compute::literal(true),
-          std::move(output_suffix_for_left), std::move(output_suffix_for_right)});
-}
-
-// [[arrow::export]]
-std::shared_ptr<compute::ExecNode> ExecNode_Union(
-    const std::shared_ptr<compute::ExecNode>& input,
-    const std::shared_ptr<compute::ExecNode>& right_data) {
-  return MakeExecNodeOrStop("union", input->plan(), {input.get(), right_data.get()}, {});
+      compute::HashJoinNodeOptions{join_type, std::move(left_refs), std::move(right_refs),
+                                   std::move(left_out_refs), std::move(right_out_refs)});
 }
 
 // [[arrow::export]]
@@ -341,85 +298,129 @@ std::shared_ptr<compute::ExecNode> ExecNode_TableSourceNode(
   return MakeExecNodeOrStop("table_source", plan.get(), {}, options);
 }
 
-#if defined(ARROW_R_WITH_SUBSTRAIT)
+std::shared_ptr<arrow::RecordBatchReader> Tpch_Dbgen(
+    const std::shared_ptr<compute::ExecPlan>& plan, int scale_factor,
+    std::string table_name) {
+  auto gen = ValueOrStop(arrow::compute::TpchGen::Make(plan.get(), scale_factor));
 
-#include <arrow/engine/substrait/api.h>
-
-// Just for example usage until a C++ method is available that implements
-// a RecordBatchReader output (ARROW-15849)
-class AccumulatingConsumer : public compute::SinkNodeConsumer {
- public:
-  const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches() { return batches_; }
-
-  arrow::Status Init(const std::shared_ptr<arrow::Schema>& schema,
-                     compute::BackpressureControl* backpressure_control) override {
-    schema_ = schema;
-    return arrow::Status::OK();
+  compute::ExecNode* table;
+  if (table_name == "part") {
+    table = ValueOrStop(gen.Part());
+  } else if (table_name == "supplier") {
+    table = ValueOrStop(gen.Supplier());
+  } else if (table_name == "partsupp") {
+    table = ValueOrStop(gen.PartSupp());
+  } else if (table_name == "customer") {
+    table = ValueOrStop(gen.Customer());
+  } else if (table_name == "nation") {
+    table = ValueOrStop(gen.Nation());
+  } else if (table_name == "lineitem") {
+    table = ValueOrStop(gen.Lineitem());
+  } else if (table_name == "region") {
+    table = ValueOrStop(gen.Region());
+  } else if (table_name == "orders") {
+    table = ValueOrStop(gen.Orders());
+  } else {
+    cpp11::stop("That's not a valid table name");
   }
 
-  arrow::Status Consume(compute::ExecBatch batch) override {
-    auto record_batch = batch.ToRecordBatch(schema_);
-    ARROW_RETURN_NOT_OK(record_batch);
-    batches_.push_back(record_batch.ValueUnsafe());
+  arrow::AsyncGenerator<arrow::util::optional<compute::ExecBatch>> sink_gen;
 
-    return arrow::Status::OK();
-  }
-
-  arrow::Future<> Finish() override { return arrow::Future<>::MakeFinished(); }
-
- private:
-  std::shared_ptr<arrow::Schema> schema_;
-  std::vector<std::shared_ptr<arrow::RecordBatch>> batches_;
-};
-
-// Expose these so that it's easier to write tests
-
-// [[substrait::export]]
-std::string substrait__internal__SubstraitToJSON(
-    const std::shared_ptr<arrow::Buffer>& serialized_plan) {
-  return ValueOrStop(arrow::engine::internal::SubstraitToJSON("Plan", *serialized_plan));
-}
-
-// [[substrait::export]]
-std::shared_ptr<arrow::Buffer> substrait__internal__SubstraitFromJSON(
-    std::string substrait_json) {
-  return ValueOrStop(arrow::engine::internal::SubstraitFromJSON("Plan", substrait_json));
-}
-
-// [[substrait::export]]
-std::shared_ptr<arrow::Table> ExecPlan_run_substrait(
-    const std::shared_ptr<compute::ExecPlan>& plan,
-    const std::shared_ptr<arrow::Buffer>& serialized_plan) {
-  std::vector<std::shared_ptr<AccumulatingConsumer>> consumers;
-
-  std::function<std::shared_ptr<compute::SinkNodeConsumer>()> consumer_factory = [&] {
-    consumers.emplace_back(new AccumulatingConsumer());
-    return consumers.back();
-  };
-
-  arrow::Result<std::vector<compute::Declaration>> maybe_decls =
-      ValueOrStop(arrow::engine::DeserializePlans(*serialized_plan, consumer_factory));
-  std::vector<compute::Declaration> decls = std::move(ValueOrStop(maybe_decls));
-
-  // For now, the Substrait plan must include a 'read' that points to
-  // a Parquet file (instead of using a source node create in Arrow)
-  for (const compute::Declaration& decl : decls) {
-    auto node = decl.AddToPlan(plan.get());
-    StopIfNotOk(node.status());
-  }
+  MakeExecNodeOrStop("sink", plan.get(), {table}, compute::SinkNodeOptions{&sink_gen});
 
   StopIfNotOk(plan->Validate());
   StopIfNotOk(plan->StartProducing());
-  StopIfNotOk(plan->finished().status());
 
-  std::vector<std::shared_ptr<arrow::RecordBatch>> all_batches;
-  for (const auto& consumer : consumers) {
-    for (const auto& batch : consumer->batches()) {
-      all_batches.push_back(batch);
-    }
+  // If the generator is destroyed before being completely drained, inform plan
+  std::shared_ptr<void> stop_producing{nullptr, [plan](...) {
+                                         bool not_finished_yet =
+                                             plan->finished().TryAddCallback([&plan] {
+                                               return [plan](const arrow::Status&) {};
+                                             });
+
+                                         if (not_finished_yet) {
+                                           plan->StopProducing();
+                                         }
+                                       }};
+
+  return compute::MakeGeneratorReader(
+      table->output_schema(), [stop_producing, plan, sink_gen] { return sink_gen(); },
+      gc_memory_pool());
+}
+
+// [[arrow::export]]
+void Tpch_Dbgen_Write(const std::shared_ptr<compute::ExecPlan>& plan, int scale_factor,
+                      std::string table_name,
+                      const std::shared_ptr<fs::FileSystem>& filesystem,
+                      std::string base_dir,
+                      arrow::dataset::ExistingDataBehavior existing_data_behavior,
+                      int max_partitions) {
+  auto gen = ValueOrStop(arrow::compute::TpchGen::Make(plan.get(), scale_factor));
+
+  compute::ExecNode* table;
+  if (table_name == "part") {
+    table = ValueOrStop(gen.Part());
+  } else if (table_name == "supplier") {
+    table = ValueOrStop(gen.Supplier());
+  } else if (table_name == "partsupp") {
+    table = ValueOrStop(gen.PartSupp());
+  } else if (table_name == "customer") {
+    table = ValueOrStop(gen.Customer());
+  } else if (table_name == "nation") {
+    table = ValueOrStop(gen.Nation());
+  } else if (table_name == "lineitem") {
+    table = ValueOrStop(gen.Lineitem());
+  } else if (table_name == "region") {
+    table = ValueOrStop(gen.Region());
+  } else if (table_name == "orders") {
+    table = ValueOrStop(gen.Orders());
+  } else {
+    cpp11::stop("That's not a valid table name");
   }
 
-  return ValueOrStop(arrow::Table::FromRecordBatches(std::move(all_batches)));
+  // TODO: unhardcode this once it's working
+  auto base_path = base_dir + "/parquet_dataset";
+  filesystem->CreateDir(base_path);
+
+  auto format = std::make_shared<ds::ParquetFileFormat>();
+
+  ds::FileSystemDatasetWriteOptions write_options;
+  write_options.file_write_options = format->DefaultWriteOptions();
+  write_options.existing_data_behavior =
+      ds::ExistingDataBehavior::kDeleteMatchingPartitions;
+  write_options.filesystem = filesystem;
+  write_options.base_dir = base_path;
+  write_options.partitioning = arrow::dataset::Partitioning::Default();
+  write_options.basename_template = "part{i}.parquet";
+  write_options.max_partitions = 1024;
+
+  // TODO: this had a checked_cast in front of it in the code I adapted it from
+  // but I ran into namespace issues when doing it so I took it out to see if it
+  // worked, but maybe that's what's causing the sefault?
+  const ds::WriteNodeOptions options =
+      ds::WriteNodeOptions{write_options, table->output_schema()};
+
+  MakeExecNodeOrStop("consuming_sink", plan.get(), {table}, options);
+
+  cpp11::message("Just after consume");
+
+  StopIfNotOk(plan->Validate());
+
+  cpp11::message("Just after validate");
+
+  StopIfNotOk(plan->StartProducing());
+
+  // If the generator is destroyed before being completely drained, inform plan
+  std::shared_ptr<void> stop_producing{nullptr, [plan](...) {
+                                         bool not_finished_yet =
+                                             plan->finished().TryAddCallback([&plan] {
+                                               return [plan](const arrow::Status&) {};
+                                             });
+
+                                         if (not_finished_yet) {
+                                           plan->StopProducing();
+                                         }
+                                       }};
 }
 
 #endif

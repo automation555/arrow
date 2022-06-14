@@ -15,8 +15,31 @@
 # specific language governing permissions and limitations
 # under the License.
 
-arrow_install_all_headers("arrow/vendored")
+thirdparty/*.tar*
+CMakeFiles/
+CMakeCache.txt
+CMakeUserPresets.json
+CTestTestfile.cmake
+Makefile
+cmake_install.cmake
+build/
+*-build/
+Testing/
+build-support/boost_*
+vcpkg_installed/
 
-add_subdirectory(datetime)
-add_subdirectory(double-conversion)
-add_subdirectory(pcg)
+# Build directories created by Clion
+cmake-build-*/
+
+#########################################
+# Editor temporary/working/backup files #
+.#*
+*\#*\#
+[#]*#
+*~
+*$
+*.bak
+*flymake*
+*.kdev4
+*.log
+*.swp
