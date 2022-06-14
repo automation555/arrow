@@ -20,7 +20,6 @@ package org.apache.arrow.vector.complex;
 import static java.util.Collections.singletonList;
 import static org.apache.arrow.memory.util.LargeMemoryUtil.capAtMaxInt;
 import static org.apache.arrow.memory.util.LargeMemoryUtil.checkedCastToInt;
-import static org.apache.arrow.util.Preconditions.checkArgument;
 import static org.apache.arrow.util.Preconditions.checkNotNull;
 
 import java.util.ArrayList;
@@ -103,12 +102,14 @@ public class ListVector extends BaseRepeatedValueVector implements PromotableVec
 
   @Override
   public void initializeChildrenFromFields(List<Field> children) {
-    checkArgument(children.size() == 1,
-            "Lists have one child Field. Found: %s", children.isEmpty() ? "none" : children);
-
+    if (children.size() != 1) {
+      throw new IllegalArgumentException("Lists have only one child. Found: " + children);
+    }
     Field field = children.get(0);
     AddOrGetResult<FieldVector> addOrGetVector = addOrGetVector(field.getFieldType());
-    checkArgument(addOrGetVector.isCreated(), "Child vector already existed: %s", addOrGetVector.getVector());
+    if (!addOrGetVector.isCreated()) {
+      throw new IllegalArgumentException("Child vector already existed: " + addOrGetVector.getVector());
+    }
 
     addOrGetVector.getVector().initializeChildrenFromFields(field.getChildren());
   }
@@ -480,21 +481,23 @@ public class ListVector extends BaseRepeatedValueVector implements PromotableVec
     public void splitAndTransfer(int startIndex, int length) {
       Preconditions.checkArgument(startIndex >= 0 && length >= 0 && startIndex + length <= valueCount,
           "Invalid parameters startIndex: %s, length: %s for valueCount: %s", startIndex, length, valueCount);
-      final int startPoint = offsetBuffer.getInt(startIndex * OFFSET_WIDTH);
-      final int sliceLength = offsetBuffer.getInt((startIndex + length) * OFFSET_WIDTH) - startPoint;
       to.clear();
-      to.allocateOffsetBuffer((length + 1) * OFFSET_WIDTH);
-      /* splitAndTransfer offset buffer */
-      for (int i = 0; i < length + 1; i++) {
-        final int relativeOffset = offsetBuffer.getInt((startIndex + i) * OFFSET_WIDTH) - startPoint;
-        to.offsetBuffer.setInt(i * OFFSET_WIDTH, relativeOffset);
+      if (length > 0) {
+        final int startPoint = offsetBuffer.getInt(startIndex * OFFSET_WIDTH);
+        final int sliceLength = offsetBuffer.getInt((startIndex + length) * OFFSET_WIDTH) - startPoint;
+        to.allocateOffsetBuffer((length + 1) * OFFSET_WIDTH);
+        /* splitAndTransfer offset buffer */
+        for (int i = 0; i < length + 1; i++) {
+          final int relativeOffset = offsetBuffer.getInt((startIndex + i) * OFFSET_WIDTH) - startPoint;
+          to.offsetBuffer.setInt(i * OFFSET_WIDTH, relativeOffset);
+        }
+        /* splitAndTransfer validity buffer */
+        splitAndTransferValidityBuffer(startIndex, length, to);
+        /* splitAndTransfer data buffer */
+        dataTransferPair.splitAndTransfer(startPoint, sliceLength);
+        to.lastSet = length - 1;
+        to.setValueCount(length);
       }
-      /* splitAndTransfer validity buffer */
-      splitAndTransferValidityBuffer(startIndex, length, to);
-      /* splitAndTransfer data buffer */
-      dataTransferPair.splitAndTransfer(startPoint, sliceLength);
-      to.lastSet = length - 1;
-      to.setValueCount(length);
     }
 
     /*
