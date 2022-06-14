@@ -34,7 +34,7 @@ else:
     from distutils import sysconfig
 
 import pkg_resources
-from setuptools import setup, Extension, Distribution, find_namespace_packages
+from setuptools import setup, Extension, Distribution
 
 from Cython.Distutils import build_ext as _build_ext
 import Cython
@@ -108,13 +108,10 @@ class build_ext(_build_ext):
                       'namespace of boost (default: boost)'),
                      ('with-cuda', None, 'build the Cuda extension'),
                      ('with-flight', None, 'build the Flight extension'),
-                     ('with-substrait', None, 'build the Substrait extension'),
                      ('with-dataset', None, 'build the Dataset extension'),
                      ('with-parquet', None, 'build the Parquet extension'),
                      ('with-parquet-encryption', None,
                       'build the Parquet encryption extension'),
-                     ('with-gcs', None,
-                      'build the Google Cloud Storage (GCS) extension'),
                      ('with-s3', None, 'build the Amazon S3 extension'),
                      ('with-static-parquet', None, 'link parquet statically'),
                      ('with-static-boost', None, 'link boost statically'),
@@ -157,16 +154,12 @@ class build_ext(_build_ext):
             if not hasattr(sys, 'gettotalrefcount'):
                 self.build_type = 'release'
 
-        self.with_gcs = strtobool(
-            os.environ.get('PYARROW_WITH_GCS', '0'))
         self.with_s3 = strtobool(
             os.environ.get('PYARROW_WITH_S3', '0'))
         self.with_hdfs = strtobool(
             os.environ.get('PYARROW_WITH_HDFS', '0'))
         self.with_cuda = strtobool(
             os.environ.get('PYARROW_WITH_CUDA', '0'))
-        self.with_substrait = strtobool(
-            os.environ.get('PYARROW_WITH_SUBSTRAIT', '0'))
         self.with_flight = strtobool(
             os.environ.get('PYARROW_WITH_FLIGHT', '0'))
         self.with_dataset = strtobool(
@@ -220,11 +213,10 @@ class build_ext(_build_ext):
         '_parquet_encryption',
         '_orc',
         '_plasma',
-        '_gcsfs',
         '_s3fs',
-        '_substrait',
         '_hdfs',
         '_hdfsio',
+        '_ipc',
         'gandiva']
 
     def _run_cmake(self):
@@ -254,11 +246,6 @@ class build_ext(_build_ext):
                                      cachefile.read()).group(1)
                 cachefile.close()
                 if (cachedir != build_temp):
-                    build_base = pjoin(saved_cwd, build_cmd.build_base)
-                    print(f"-- Skipping build. Temp build {build_temp} does "
-                          f"not match cached dir {cachedir}")
-                    print("---- For a clean build you might want to delete "
-                          f"{build_base}.")
                     return
 
             static_lib_option = ''
@@ -277,7 +264,6 @@ class build_ext(_build_ext):
                 cmake_options += ['-G', self.cmake_generator]
 
             append_cmake_bool(self.with_cuda, 'PYARROW_BUILD_CUDA')
-            append_cmake_bool(self.with_substrait, 'PYARROW_BUILD_SUBSTRAIT')
             append_cmake_bool(self.with_flight, 'PYARROW_BUILD_FLIGHT')
             append_cmake_bool(self.with_gandiva, 'PYARROW_BUILD_GANDIVA')
             append_cmake_bool(self.with_dataset, 'PYARROW_BUILD_DATASET')
@@ -286,7 +272,6 @@ class build_ext(_build_ext):
             append_cmake_bool(self.with_parquet_encryption,
                               'PYARROW_BUILD_PARQUET_ENCRYPTION')
             append_cmake_bool(self.with_plasma, 'PYARROW_BUILD_PLASMA')
-            append_cmake_bool(self.with_gcs, 'PYARROW_BUILD_GCS')
             append_cmake_bool(self.with_s3, 'PYARROW_BUILD_S3')
             append_cmake_bool(self.with_hdfs, 'PYARROW_BUILD_HDFS')
             append_cmake_bool(self.with_tensorflow, 'PYARROW_USE_TENSORFLOW')
@@ -404,8 +389,6 @@ class build_ext(_build_ext):
         move_shared_libs(build_prefix, build_lib, "arrow_python")
         if self.with_cuda:
             move_shared_libs(build_prefix, build_lib, "arrow_cuda")
-        if self.with_substrait:
-            move_shared_libs(build_prefix, build_lib, "arrow_substrait")
         if self.with_flight:
             move_shared_libs(build_prefix, build_lib, "arrow_flight")
             move_shared_libs(build_prefix, build_lib,
@@ -450,10 +433,6 @@ class build_ext(_build_ext):
         if name == '_orc' and not self.with_orc:
             return True
         if name == '_flight' and not self.with_flight:
-            return True
-        if name == '_substrait' and not self.with_substrait:
-            return True
-        if name == '_gcsfs' and not self.with_gcs:
             return True
         if name == '_s3fs' and not self.with_s3:
             return True
@@ -621,10 +600,9 @@ else:
 
 
 if strtobool(os.environ.get('PYARROW_INSTALL_TESTS', '1')):
-    packages = find_namespace_packages(include=['pyarrow*'])
+    packages = ['pyarrow', 'pyarrow.tests']
 else:
-    packages = find_namespace_packages(include=['pyarrow*'],
-                                       exclude=["pyarrow.tests*"])
+    packages = ['pyarrow']
 
 
 setup(
