@@ -120,6 +120,12 @@ TEST_F(MockDatasetFactoryTest, UnifySchemas) {
   ASSERT_RAISES(Invalid, factory_->Inspect());
   // Return the individual schema for closer inspection should not fail.
   AssertInspectSchemas({schema({i32, f64}), schema({f64, i32_fake})});
+
+  MakeFactory({schema({field("num", int32())}), schema({field("num", float64())})});
+  ASSERT_RAISES(Invalid, factory_->Inspect());
+  InspectOptions permissive_options;
+  permissive_options.field_merge_options = Field::MergeOptions::Permissive();
+  AssertInspect(schema({field("num", float64())}), permissive_options);
 }
 
 class FileSystemDatasetFactoryTest : public DatasetFactoryTest {
@@ -138,8 +144,7 @@ class FileSystemDatasetFactoryTest : public DatasetFactoryTest {
     }
     options_ = std::make_shared<ScanOptions>();
     options_->dataset_schema = schema;
-    ASSERT_OK_AND_ASSIGN(auto projection, ProjectionDescr::Default(*schema));
-    SetProjection(options_.get(), std::move(projection));
+    ASSERT_OK(SetProjection(options_.get(), schema->field_names()));
     ASSERT_OK_AND_ASSIGN(dataset_, factory_->Finish(schema));
     ASSERT_OK_AND_ASSIGN(auto fragment_it, dataset_->GetFragments());
     AssertFragmentsAreFromPath(std::move(fragment_it), paths);
@@ -474,6 +479,12 @@ TEST(UnionDatasetFactoryTest, ConflictingSchemas) {
   auto i32_schema = schema({i32});
   ASSERT_OK_AND_ASSIGN(auto dataset, factory->Finish(i32_schema));
   EXPECT_EQ(*dataset->schema(), *i32_schema);
+
+  // The user decided to allow merging the types.
+  FinishOptions options;
+  options.inspect_options.field_merge_options = Field::MergeOptions::Permissive();
+  ASSERT_OK_AND_ASSIGN(dataset, factory->Finish(options));
+  EXPECT_EQ(*dataset->schema(), *schema({f64, i32}));
 }
 
 }  // namespace dataset

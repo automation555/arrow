@@ -82,8 +82,8 @@ class ARROW_EXPORT Fingerprintable {
   virtual std::string ComputeFingerprint() const = 0;
   virtual std::string ComputeMetadataFingerprint() const = 0;
 
-  mutable std::atomic<std::string*> fingerprint_{NULLPTR};
-  mutable std::atomic<std::string*> metadata_fingerprint_{NULLPTR};
+  mutable std::atomic<std::string*> fingerprint_;
+  mutable std::atomic<std::string*> metadata_fingerprint_;
 };
 
 }  // namespace detail
@@ -126,8 +126,7 @@ struct ARROW_EXPORT DataTypeLayout {
 ///
 /// Simple datatypes may be entirely described by their Type::type id, but
 /// complex datatypes are usually parametric.
-class ARROW_EXPORT DataType : public std::enable_shared_from_this<DataType>,
-                              public detail::Fingerprintable {
+class ARROW_EXPORT DataType : public detail::Fingerprintable {
  public:
   explicit DataType(Type::type id) : detail::Fingerprintable(), id_(id) {}
   ~DataType() override;
@@ -150,7 +149,6 @@ class ARROW_EXPORT DataType : public std::enable_shared_from_this<DataType>,
   /// \brief Return the number of children fields associated with this type.
   int num_fields() const { return static_cast<int>(children_.size()); }
 
-  /// \brief Apply the TypeVisitor::Visit() method specialized to the data type
   Status Accept(TypeVisitor* visitor) const;
 
   /// \brief A string representation of the type, including any children
@@ -174,26 +172,6 @@ class ARROW_EXPORT DataType : public std::enable_shared_from_this<DataType>,
 
   /// \brief Return the type category of the storage type
   virtual Type::type storage_id() const { return id_; }
-
-  /// \brief Returns the type's fixed byte width, if any. Returns -1
-  /// for non-fixed-width types, and should only be used for
-  /// subclasses of FixedWidthType
-  virtual int32_t byte_width() const {
-    int32_t num_bits = this->bit_width();
-    return num_bits > 0 ? num_bits / 8 : -1;
-  }
-
-  /// \brief Returns the type's fixed bit width, if any. Returns -1
-  /// for non-fixed-width types, and should only be used for
-  /// subclasses of FixedWidthType
-  virtual int bit_width() const { return -1; }
-
-  // \brief EXPERIMENTAL: Enable retrieving shared_ptr<DataType> from a const
-  // context. Implementation requires enable_shared_from_this but we may fix
-  // this in the future
-  std::shared_ptr<DataType> Copy() const {
-    return const_cast<DataType*>(this)->shared_from_this();
-  }
 
  protected:
   // Dummy version that returns a null string (indicating not implemented).
@@ -236,6 +214,8 @@ std::shared_ptr<DataType> GetPhysicalType(const std::shared_ptr<DataType>& type)
 class ARROW_EXPORT FixedWidthType : public DataType {
  public:
   using DataType::DataType;
+
+  virtual int bit_width() const = 0;
 };
 
 /// \brief Base class for all data types representing primitive values
@@ -323,14 +303,78 @@ class ARROW_EXPORT Field : public detail::Fingerprintable {
   /// \brief Options that control the behavior of `MergeWith`.
   /// Options are to be added to allow type conversions, including integer
   /// widening, promotion from integer to float, or conversion to or from boolean.
-  struct MergeOptions {
+  struct ARROW_EXPORT MergeOptions : public util::ToStringOstreamable<MergeOptions> {
     /// If true, a Field of NullType can be unified with a Field of another type.
     /// The unified field will be of the other type and become nullable.
     /// Nullability will be promoted to the looser option (nullable if one is not
     /// nullable).
     bool promote_nullability = true;
 
+    /// Allow a decimal to be unified with another decimal of the same
+    /// width, adjusting scale and precision as appropriate. May fail
+    /// if the adjustment is not possible.
+    bool promote_decimal = false;
+
+    /// Allow a decimal to be promoted to a float. The float type will
+    /// not itself be promoted (e.g. Decimal128 + Float32 = Float32).
+    bool promote_decimal_float = false;
+
+    /// Allow an integer to be promoted to a decimal.
+    ///
+    /// May fail if the decimal has insufficient precision to
+    /// accomodate the integer. (See increase_decimal_precision.)
+    bool promote_integer_decimal = false;
+
+    /// Allow an integer of a given bit width to be promoted to a
+    /// float; the result will be a float of an equal or greater bit
+    /// width to both of the inputs.
+    bool promote_integer_float = false;
+
+    /// Allow an unsigned integer of a given bit width to be promoted
+    /// to a signed integer of the equal or greater bit width.
+    bool promote_integer_sign = false;
+
+    /// Allow an integer, float, or decimal of a given bit width to be
+    /// promoted to an equivalent type of a greater bit width.
+    bool promote_numeric_width = false;
+
+    /// Allow strings to be promoted to binary types.
+    bool promote_binary = false;
+
+    /// Promote Date32 to Date64.
+    bool promote_date = false;
+
+    /// Promote second to millisecond, etc.
+    bool promote_duration = false;
+
+    /// Promote Time32 to Time64, or Time32(SECOND) to Time32(MILLI), etc.
+    bool promote_time = false;
+
+    /// Promote second to millisecond, etc.
+    bool promote_timestamp = false;
+
+    /// Promote dictionary index types to a common type, and unify the
+    /// value types.
+    bool promote_dictionary = false;
+
+    /// Allow merging ordered and non-ordered dictionaries, else
+    /// error. The result will be ordered if and only if both inputs
+    /// are ordered.
+    bool promote_dictionary_ordered = false;
+
+    /// Allow a type to be promoted to the Large variant.
+    bool promote_large = false;
+
+    /// Recursively merge nested types.
+    bool promote_nested = false;
+
+    /// Get default options. Only NullType will be merged with other types.
     static MergeOptions Defaults() { return MergeOptions(); }
+    /// Get permissive options. All options are enabled, except
+    /// promote_dictionary_ordered.
+    static MergeOptions Permissive();
+    /// Get a human-readable representation of the options.
+    std::string ToString() const;
   };
 
   /// \brief Merge the current field with a field of the same name.
@@ -384,8 +428,6 @@ class ARROW_EXPORT Field : public detail::Fingerprintable {
  private:
   std::string ComputeFingerprint() const override;
   std::string ComputeMetadataFingerprint() const override;
-
-  ARROW_EXPORT friend void PrintTo(const Field& field, std::ostream* os);
 
   // Field name
   std::string name_;
@@ -718,7 +760,7 @@ class ARROW_EXPORT FixedSizeBinaryType : public FixedWidthType, public Parametri
         {DataTypeLayout::Bitmap(), DataTypeLayout::FixedWidth(byte_width())});
   }
 
-  int32_t byte_width() const override { return byte_width_; }
+  int32_t byte_width() const { return byte_width_; }
   int bit_width() const override;
 
   // Validating constructor
@@ -839,7 +881,7 @@ class ARROW_EXPORT Decimal256Type : public DecimalType {
 class ARROW_EXPORT BaseListType : public NestedType {
  public:
   using NestedType::NestedType;
-  const std::shared_ptr<Field>& value_field() const { return children_[0]; }
+  std::shared_ptr<Field> value_field() const { return children_[0]; }
 
   std::shared_ptr<DataType> value_type() const { return children_[0]->type(); }
 };
@@ -1634,11 +1676,6 @@ class ARROW_EXPORT FieldRef {
   /// Equivalent to a single index string of indices.
   FieldRef(int index) : impl_(FieldPath({index})) {}  // NOLINT runtime/explicit
 
-  /// Construct a nested FieldRef.
-  FieldRef(std::vector<FieldRef> refs) {  // NOLINT runtime/explicit
-    Flatten(std::move(refs));
-  }
-
   /// Convenience constructor for nested FieldRefs: each argument will be used to
   /// construct a FieldRef
   template <typename A0, typename A1, typename... A>
@@ -1671,7 +1708,7 @@ class ARROW_EXPORT FieldRef {
 
   bool Equals(const FieldRef& other) const { return impl_ == other.impl_; }
   bool operator==(const FieldRef& other) const { return Equals(other); }
-  bool operator!=(const FieldRef& other) const { return !Equals(other); }
+  bool operator!=(const FieldRef& other) const { return !(*this == other); }
 
   std::string ToString() const;
 
@@ -1696,11 +1733,6 @@ class ARROW_EXPORT FieldRef {
   }
   const std::string* name() const {
     return IsName() ? &util::get<std::string>(impl_) : NULLPTR;
-  }
-  const std::vector<FieldRef>* nested_refs() const {
-    return util::holds_alternative<std::vector<FieldRef>>(impl_)
-               ? &util::get<std::vector<FieldRef>>(impl_)
-               : NULLPTR;
   }
 
   /// \brief Retrieve FieldPath of every child field which matches this FieldRef.

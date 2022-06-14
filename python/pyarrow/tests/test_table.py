@@ -48,11 +48,8 @@ def test_chunked_array_basics():
     assert all(isinstance(c, pa.lib.Int64Array) for c in data.chunks)
     assert all(isinstance(c, pa.lib.Int64Array) for c in data.iterchunks())
     assert len(data.chunks) == 3
-    assert data.get_total_buffer_size() == sum(c.get_total_buffer_size()
-                                               for c in data.iterchunks())
-    assert sys.getsizeof(data) >= object.__sizeof__(
-        data) + data.get_total_buffer_size()
-    assert data.nbytes == 3 * 3 * 8  # 3 items per 3 lists with int64 size(8)
+    assert data.nbytes == sum(c.nbytes for c in data.iterchunks())
+    assert sys.getsizeof(data) >= object.__sizeof__(data) + data.nbytes
     data.validate()
 
     wr = weakref.ref(data)
@@ -343,71 +340,6 @@ def test_chunked_array_to_pandas_preserve_name():
 
 
 @pytest.mark.pandas
-def test_table_roundtrip_to_pandas_empty_dataframe():
-    # https://issues.apache.org/jira/browse/ARROW-10643
-    # The conversion should not results in a table with 0 rows if the original
-    # DataFrame has a RangeIndex but is empty.
-    import pandas as pd
-
-    data = pd.DataFrame(index=pd.RangeIndex(0, 10, 1))
-    table = pa.table(data)
-    result = table.to_pandas()
-
-    assert table.num_rows == 10
-    assert data.shape == (10, 0)
-    assert result.shape == (10, 0)
-    assert result.index.equals(data.index)
-
-    data = pd.DataFrame(index=pd.RangeIndex(0, 10, 3))
-    table = pa.table(data)
-    result = table.to_pandas()
-
-    assert table.num_rows == 4
-    assert data.shape == (4, 0)
-    assert result.shape == (4, 0)
-    assert result.index.equals(data.index)
-
-
-@pytest.mark.pandas
-def test_recordbatch_roundtrip_to_pandas_empty_dataframe():
-    # https://issues.apache.org/jira/browse/ARROW-10643
-    # The conversion should not results in a RecordBatch with 0 rows if
-    #  the original DataFrame has a RangeIndex but is empty.
-    import pandas as pd
-
-    data = pd.DataFrame(index=pd.RangeIndex(0, 10, 1))
-    batch = pa.RecordBatch.from_pandas(data)
-    result = batch.to_pandas()
-
-    assert batch.num_rows == 10
-    assert data.shape == (10, 0)
-    assert result.shape == (10, 0)
-    assert result.index.equals(data.index)
-
-    data = pd.DataFrame(index=pd.RangeIndex(0, 10, 3))
-    batch = pa.RecordBatch.from_pandas(data)
-    result = batch.to_pandas()
-
-    assert batch.num_rows == 4
-    assert data.shape == (4, 0)
-    assert result.shape == (4, 0)
-    assert result.index.equals(data.index)
-
-
-@pytest.mark.pandas
-def test_to_pandas_empty_table():
-    # https://issues.apache.org/jira/browse/ARROW-15370
-    import pandas as pd
-    import pandas.testing as tm
-
-    df = pd.DataFrame({'a': [1, 2], 'b': [0.1, 0.2]})
-    table = pa.table(df)
-    result = table.schema.empty_table().to_pandas()
-    assert result.shape == (0, 2)
-    tm.assert_frame_equal(result, df.iloc[:0])
-
-
-@pytest.mark.pandas
 @pytest.mark.nopandas
 def test_chunked_array_asarray():
     # ensure this is tested both when pandas is present or not (ARROW-6564)
@@ -494,10 +426,8 @@ def test_recordbatch_basics():
     assert batch.num_rows == 5
     assert batch.num_columns == len(data)
     # (only the second array has a null bitmap)
-    assert batch.get_total_buffer_size() == (5 * 2) + (5 * 4 + 1)
-    batch.nbytes == (5 * 2) + (5 * 4 + 1)
-    assert sys.getsizeof(batch) >= object.__sizeof__(
-        batch) + batch.get_total_buffer_size()
+    assert batch.nbytes == (5 * 2) + (5 * 4 + 1)
+    assert sys.getsizeof(batch) >= object.__sizeof__(batch) + batch.nbytes
     pydict = batch.to_pydict()
     assert pydict == OrderedDict([
         ('c0', [0, 1, 2, 3, 4]),
@@ -856,10 +786,8 @@ def test_table_basics():
     assert table.num_rows == 5
     assert table.num_columns == 2
     assert table.shape == (5, 2)
-    assert table.get_total_buffer_size() == 2 * (5 * 8)
     assert table.nbytes == 2 * (5 * 8)
-    assert sys.getsizeof(table) >= object.__sizeof__(
-        table) + table.get_total_buffer_size()
+    assert sys.getsizeof(table) >= object.__sizeof__(table) + table.nbytes
     pydict = table.to_pydict()
     assert pydict == OrderedDict([
         ('a', [0, 1, 2, 3, 4]),
@@ -1261,6 +1189,15 @@ def test_concat_tables_with_promotion():
         pa.array([None, None, 1.0, 2.0], type=pa.float32()),
     ], ["int64_field", "float_field"]))
 
+    t3 = pa.Table.from_arrays(
+        [pa.array([1, 2], type=pa.int32())], ["int64_field"])
+    result = pa.concat_tables(
+        [t1, t3], promote=True,
+        field_merge_options=pa.FieldMergeOptions.permissive())
+    assert result.equals(pa.Table.from_arrays([
+        pa.array([1, 2, 1, 2], type=pa.int64()),
+    ], ["int64_field"]))
+
 
 def test_concat_tables_with_promotion_error():
     t1 = pa.Table.from_arrays(
@@ -1545,98 +1482,6 @@ def test_table_from_pydict_schema(data, klass):
     assert table.column_names == ['strs']
 
 
-@pytest.mark.parametrize(
-    ('cls'),
-    [
-        (pa.Table),
-        (pa.RecordBatch)
-    ]
-)
-def test_table_from_pylist(cls):
-    table = cls.from_pylist([])
-    assert table.num_columns == 0
-    assert table.num_rows == 0
-    assert table.schema == pa.schema([])
-    assert table.to_pylist() == []
-
-    schema = pa.schema([('strs', pa.utf8()), ('floats', pa.float64())])
-
-    # With lists as values
-    data = [{'strs': '', 'floats': 4.5},
-            {'strs': 'foo', 'floats': 5},
-            {'strs': 'bar', 'floats': None}]
-    table = cls.from_pylist(data)
-    assert table.num_columns == 2
-    assert table.num_rows == 3
-    assert table.schema == schema
-    assert table.to_pylist() == data
-
-    # With metadata and inferred schema
-    metadata = {b'foo': b'bar'}
-    schema = schema.with_metadata(metadata)
-    table = cls.from_pylist(data, metadata=metadata)
-    assert table.schema == schema
-    assert table.schema.metadata == metadata
-    assert table.to_pylist() == data
-
-    # With explicit schema
-    table = cls.from_pylist(data, schema=schema)
-    assert table.schema == schema
-    assert table.schema.metadata == metadata
-    assert table.to_pylist() == data
-
-    # Cannot pass both schema and metadata
-    with pytest.raises(ValueError):
-        cls.from_pylist(data, schema=schema, metadata=metadata)
-
-    # Non-convertible values given schema
-    with pytest.raises(TypeError):
-        cls.from_pylist([{'c0': 0}, {'c0': 1}, {'c0': 2}],
-                        schema=pa.schema([("c0", pa.string())]))
-
-    # Missing schema fields in the passed mapping translate to None
-    schema = pa.schema([('a', pa.int64()),
-                        ('c', pa.int32()),
-                        ('d', pa.int16())
-                        ])
-    table = cls.from_pylist(
-        [{'a': 1, 'b': 3}, {'a': 2, 'b': 4}, {'a': 3, 'b': 5}],
-        schema=schema
-    )
-    data = [{'a': 1, 'c': None, 'd': None},
-            {'a': 2, 'c': None, 'd': None},
-            {'a': 3, 'c': None, 'd': None}]
-    assert table.schema == schema
-    assert table.to_pylist() == data
-
-    # Passed wrong schema type
-    with pytest.raises(TypeError):
-        cls.from_pylist([{'a': 1}, {'a': 2}, {'a': 3}], schema={})
-
-    # If the dictionaries of rows are not same length
-    data = [{'strs': '', 'floats': 4.5},
-            {'floats': 5},
-            {'strs': 'bar'}]
-    data2 = [{'strs': '', 'floats': 4.5},
-             {'strs': None, 'floats': 5},
-             {'strs': 'bar', 'floats': None}]
-    table = cls.from_pylist(data)
-    assert table.num_columns == 2
-    assert table.num_rows == 3
-    assert table.to_pylist() == data2
-
-    data = [{'strs': ''},
-            {'strs': 'foo', 'floats': 5},
-            {'floats': None}]
-    data2 = [{'strs': ''},
-             {'strs': 'foo'},
-             {'strs': None}]
-    table = cls.from_pylist(data)
-    assert table.num_columns == 1
-    assert table.num_rows == 3
-    assert table.to_pylist() == data2
-
-
 @pytest.mark.pandas
 def test_table_from_pandas_schema():
     # passed schema is source of truth for the columns
@@ -1801,8 +1646,8 @@ def test_table_repr_to_string_ellipsis():
 c0: int16
 c1: int32
 ----
-c0: [[1,2,3,4,1,...,4,1,2,3,4]]
-c1: [[10,20,30,40,10,...,40,10,20,30,40]]"""
+c0: [[1,2,3,4,1,2,3,4,1,2,...,3,4,1,2,3,4,1,2,3,4]]
+c1: [[10,20,30,40,10,20,30,40,10,20,...,30,40,10,20,30,40,10,20,30,40]]"""
 
 
 def test_table_function_unicode_schema():
@@ -2032,155 +1877,3 @@ def test_table_sort_by():
         "keys": ["c", "b", "b", "a", "a"],
         "values": [5, 4, 3, 2, 1]
     }
-
-
-def test_table_to_recordbatchreader():
-    table = pa.Table.from_pydict({'x': [1, 2, 3]})
-    reader = table.to_reader()
-    assert table.schema == reader.schema
-    assert table == reader.read_all()
-
-    reader = table.to_reader(max_chunksize=2)
-    assert reader.read_next_batch().num_rows == 2
-    assert reader.read_next_batch().num_rows == 1
-
-
-@pytest.mark.dataset
-def test_table_join():
-    t1 = pa.table({
-        "colA": [1, 2, 6],
-        "col2": ["a", "b", "f"]
-    })
-
-    t2 = pa.table({
-        "colB": [99, 2, 1],
-        "col3": ["Z", "B", "A"]
-    })
-
-    result = t1.join(t2, "colA", "colB")
-    assert result.combine_chunks() == pa.table({
-        "colA": [1, 2, 6],
-        "col2": ["a", "b", "f"],
-        "col3": ["A", "B", None]
-    })
-
-    result = t1.join(t2, "colA", "colB", join_type="full outer")
-    assert result.combine_chunks().sort_by("colA") == pa.table({
-        "colA": [1, 2, 6, 99],
-        "col2": ["a", "b", "f", None],
-        "col3": ["A", "B", None, "Z"]
-    })
-
-
-@pytest.mark.dataset
-def test_table_join_unique_key():
-    t1 = pa.table({
-        "colA": [1, 2, 6],
-        "col2": ["a", "b", "f"]
-    })
-
-    t2 = pa.table({
-        "colA": [99, 2, 1],
-        "col3": ["Z", "B", "A"]
-    })
-
-    result = t1.join(t2, "colA")
-    assert result.combine_chunks() == pa.table({
-        "colA": [1, 2, 6],
-        "col2": ["a", "b", "f"],
-        "col3": ["A", "B", None]
-    })
-
-    result = t1.join(t2, "colA", join_type="full outer", right_suffix="_r")
-    assert result.combine_chunks().sort_by("colA") == pa.table({
-        "colA": [1, 2, 6, 99],
-        "col2": ["a", "b", "f", None],
-        "col3": ["A", "B", None, "Z"]
-    })
-
-
-@pytest.mark.dataset
-def test_table_join_collisions():
-    t1 = pa.table({
-        "colA": [1, 2, 6],
-        "colB": [10, 20, 60],
-        "colVals": ["a", "b", "f"]
-    })
-
-    t2 = pa.table({
-        "colA": [99, 2, 1],
-        "colB": [99, 20, 10],
-        "colVals": ["Z", "B", "A"]
-    })
-
-    result = t1.join(t2, "colA", join_type="full outer")
-    assert result.combine_chunks().sort_by("colA") == pa.table([
-        [1, 2, 6, 99],
-        [10, 20, 60, None],
-        ["a", "b", "f", None],
-        [10, 20, None, 99],
-        ["A", "B", None, "Z"],
-    ], names=["colA", "colB", "colVals", "colB", "colVals"])
-
-
-@pytest.mark.dataset
-def test_table_filter_expression():
-    t1 = pa.table({
-        "colA": [1, 2, 6],
-        "colB": [10, 20, 60],
-        "colVals": ["a", "b", "f"]
-    })
-
-    t2 = pa.table({
-        "colA": [99, 2, 1],
-        "colB": [99, 20, 10],
-        "colVals": ["Z", "B", "A"]
-    })
-
-    t3 = pa.concat_tables([t1, t2])
-
-    result = t3.filter(pc.field("colA") < 10)
-    assert result.combine_chunks() == pa.table({
-        "colA": [1, 2, 6, 2, 1],
-        "colB": [10, 20, 60, 20, 10],
-        "colVals": ["a", "b", "f", "B", "A"]
-    })
-
-
-@pytest.mark.dataset
-def test_table_join_many_columns():
-    t1 = pa.table({
-        "colA": [1, 2, 6],
-        "col2": ["a", "b", "f"]
-    })
-
-    t2 = pa.table({
-        "colB": [99, 2, 1],
-        "col3": ["Z", "B", "A"],
-        "col4": ["Z", "B", "A"],
-        "col5": ["Z", "B", "A"],
-        "col6": ["Z", "B", "A"],
-        "col7": ["Z", "B", "A"]
-    })
-
-    result = t1.join(t2, "colA", "colB")
-    assert result.combine_chunks() == pa.table({
-        "colA": [1, 2, 6],
-        "col2": ["a", "b", "f"],
-        "col3": ["A", "B", None],
-        "col4": ["A", "B", None],
-        "col5": ["A", "B", None],
-        "col6": ["A", "B", None],
-        "col7": ["A", "B", None]
-    })
-
-    result = t1.join(t2, "colA", "colB", join_type="full outer")
-    assert result.combine_chunks().sort_by("colA") == pa.table({
-        "colA": [1, 2, 6, 99],
-        "col2": ["a", "b", "f", None],
-        "col3": ["A", "B", None, "Z"],
-        "col4": ["A", "B", None, "Z"],
-        "col5": ["A", "B", None, "Z"],
-        "col6": ["A", "B", None, "Z"],
-        "col7": ["A", "B", None, "Z"],
-    })
