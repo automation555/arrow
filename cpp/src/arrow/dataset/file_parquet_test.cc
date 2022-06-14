@@ -122,7 +122,9 @@ class ParquetFormatHelper {
 class TestParquetFileFormat : public FileFormatFixtureMixin<ParquetFormatHelper> {
  public:
   RecordBatchIterator Batches(Fragment* fragment) {
-    EXPECT_OK_AND_ASSIGN(auto batch_gen, fragment->ScanBatchesAsync(opts_));
+    EXPECT_OK_AND_ASSIGN(
+        auto batch_gen,
+        fragment->ScanBatchesAsync(opts_, ::arrow::internal::GetCpuThreadPool()));
     return MakeGeneratorIterator(batch_gen);
   }
 
@@ -265,27 +267,17 @@ TEST_F(TestParquetFileFormat, CountRowsPredicatePushdown) {
 [1],
 [2]
 ])");
-    auto batch2 = RecordBatchFromJSON(dataset_schema, R"([
-[4],
-[4]
-])");
-    ASSERT_OK_AND_ASSIGN(auto reader, RecordBatchReader::Make({null_batch, batch, batch2},
-                                                              dataset_schema));
+    ASSERT_OK_AND_ASSIGN(auto reader,
+                         RecordBatchReader::Make({null_batch, batch}, dataset_schema));
     auto source = GetFileSource(reader.get());
     auto fragment = MakeFragment(*source);
     ASSERT_OK_AND_ASSIGN(
         auto predicate,
         greater_equal(field_ref("i64"), literal(1)).Bind(*dataset_schema));
-    ASSERT_FINISHES_OK_AND_EQ(util::make_optional<int64_t>(4),
+    ASSERT_FINISHES_OK_AND_EQ(util::make_optional<int64_t>(2),
                               fragment->CountRows(predicate, options));
-
-    ASSERT_OK_AND_ASSIGN(predicate, is_null(field_ref("i64")).Bind(*dataset_schema));
-    ASSERT_FINISHES_OK_AND_EQ(util::make_optional<int64_t>(3),
-                              fragment->CountRows(predicate, options));
-
-    ASSERT_OK_AND_ASSIGN(predicate, is_valid(field_ref("i64")).Bind(*dataset_schema));
-    ASSERT_FINISHES_OK_AND_EQ(util::make_optional<int64_t>(4),
-                              fragment->CountRows(predicate, options));
+    // TODO(ARROW-12659): SimplifyWithGuarantee can't handle
+    // not(is_null) so trying to count with is_null doesn't work
   }
 }
 
@@ -403,7 +395,6 @@ TEST_P(TestParquetFileFormatScan, ScanRecordBatchReaderWithDuplicateColumn) {
 TEST_P(TestParquetFileFormatScan, ScanRecordBatchReaderWithDuplicateColumnError) {
   TestScanWithDuplicateColumnError();
 }
-TEST_P(TestParquetFileFormatScan, ScanWithPushdownNulls) { TestScanWithPushdownNulls(); }
 TEST_P(TestParquetFileFormatScan, ScanRecordBatchReaderDictEncoded) {
   auto reader = GetRecordBatchReader(schema({field("utf8", utf8())}));
   auto source = GetFileSource(reader.get());
@@ -597,8 +588,10 @@ TEST_P(TestParquetFileFormatScan, ExplicitRowGroupSelection) {
   SetFilter(greater(field_ref("i64"), literal(3)));
   CountRowsAndBatchesInScan(row_groups_fragment({2, 3, 4, 5}), 4 + 5 + 6, 3);
 
-  ASSERT_OK_AND_ASSIGN(auto batch_gen,
-                       row_groups_fragment({kNumRowGroups + 1})->ScanBatchesAsync(opts_));
+  ASSERT_OK_AND_ASSIGN(
+      auto batch_gen,
+      row_groups_fragment({kNumRowGroups + 1})
+          ->ScanBatchesAsync(opts_, ::arrow::internal::GetCpuThreadPool()));
   Status scan_status = CollectAsyncGenerator(batch_gen).status();
 
   EXPECT_RAISES_WITH_MESSAGE_THAT(

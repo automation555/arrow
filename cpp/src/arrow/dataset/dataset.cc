@@ -81,7 +81,8 @@ InMemoryFragment::InMemoryFragment(RecordBatchVector record_batches,
 }
 
 Result<RecordBatchGenerator> InMemoryFragment::ScanBatchesAsync(
-    const std::shared_ptr<ScanOptions>& options) {
+    const std::shared_ptr<ScanOptions>& options,
+    ::arrow::internal::Executor* cpu_executor) {
   struct State {
     State(std::shared_ptr<InMemoryFragment> fragment, int64_t batch_size)
         : fragment(std::move(fragment)),
@@ -202,7 +203,11 @@ Result<FragmentIterator> InMemoryDataset::GetFragmentsImpl(compute::Expression) 
 
   auto create_fragment =
       [schema](std::shared_ptr<RecordBatch> batch) -> Result<std::shared_ptr<Fragment>> {
-    RETURN_NOT_OK(CheckProjectable(*schema, *batch->schema()));
+    if (!batch->schema()->Equals(schema)) {
+      return Status::TypeError("yielded batch had schema ", *batch->schema(),
+                               " which did not match InMemorySource's: ", *schema);
+    }
+
     return std::make_shared<InMemoryFragment>(RecordBatchVector{std::move(batch)});
   };
 

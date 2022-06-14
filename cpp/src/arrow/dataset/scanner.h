@@ -50,10 +50,11 @@ namespace dataset {
 ///
 /// @{
 
-constexpr int64_t kDefaultBatchSize = 1 << 17;  // 128Ki rows
-// This will yield 64 batches ~ 8Mi rows
-constexpr int32_t kDefaultBatchReadahead = 16;
-constexpr int32_t kDefaultFragmentReadahead = 4;
+constexpr int64_t kDefaultBatchSize = 1 << 20;
+constexpr int32_t kDefaultBatchReadahead = 32;
+constexpr int32_t kDefaultFragmentReadahead = 8;
+constexpr int32_t kDefaultBackpressureHigh = 64;
+constexpr int32_t kDefaultBackpressureLow = 32;
 
 /// Scan-specific options, which can be changed between scans of the same dataset.
 struct ARROW_DS_EXPORT ScanOptions {
@@ -87,6 +88,7 @@ struct ARROW_DS_EXPORT ScanOptions {
   /// Set to 0 to disable batch readahead
   ///
   /// Note: May not be supported by all formats
+  /// Note: May not be supported by all scanners
   /// Note: Will be ignored if use_threads is set to false
   int32_t batch_readahead = kDefaultBatchReadahead;
 
@@ -131,10 +133,6 @@ struct ARROW_DS_EXPORT ScanOptions {
   /// This is used by Fragment implementations to apply the column
   /// sub-selection optimization.
   std::vector<FieldRef> MaterializedFields() const;
-
-  /// Parameters which control when the plan should pause for a slow consumer
-  compute::BackpressureOptions backpressure =
-      compute::BackpressureOptions::DefaultBackpressure();
 };
 
 /// \brief Describes a projection
@@ -269,8 +267,6 @@ class ARROW_DS_EXPORT Scanner {
   /// up.
   virtual Result<TaggedRecordBatchIterator> ScanBatches() = 0;
   virtual Result<TaggedRecordBatchGenerator> ScanBatchesAsync() = 0;
-  virtual Result<TaggedRecordBatchGenerator> ScanBatchesAsync(
-      ::arrow::internal::Executor* cpu_thread_pool) = 0;
   /// \brief Scan the dataset into a stream of record batches.  Unlike ScanBatches this
   /// method may allow record batches to be returned out of order.  This allows for more
   /// efficient scanning: some fragments may be accessed more quickly than others (e.g.
@@ -280,8 +276,6 @@ class ARROW_DS_EXPORT Scanner {
   /// positional information.
   virtual Result<EnumeratedRecordBatchIterator> ScanBatchesUnordered() = 0;
   virtual Result<EnumeratedRecordBatchGenerator> ScanBatchesUnorderedAsync() = 0;
-  virtual Result<EnumeratedRecordBatchGenerator> ScanBatchesUnorderedAsync(
-      ::arrow::internal::Executor* cpu_thread_pool) = 0;
   /// \brief A convenience to synchronously load the given rows by index.
   ///
   /// Will only consume as many batches as needed from ScanBatches().
@@ -390,9 +384,6 @@ class ARROW_DS_EXPORT ScannerBuilder {
   /// \brief Set fragment-specific scan options.
   Status FragmentScanOptions(std::shared_ptr<FragmentScanOptions> fragment_scan_options);
 
-  /// \brief Override default backpressure configuration
-  Status Backpressure(compute::BackpressureOptions backpressure);
-
   /// \brief Return the constructed now-immutable Scanner object
   Result<std::shared_ptr<Scanner>> Finish();
 
@@ -411,16 +402,25 @@ class ARROW_DS_EXPORT ScannerBuilder {
 /// ordering for simple ExecPlans.
 class ARROW_DS_EXPORT ScanNodeOptions : public compute::ExecNodeOptions {
  public:
-  explicit ScanNodeOptions(std::shared_ptr<Dataset> dataset,
-                           std::shared_ptr<ScanOptions> scan_options,
-                           bool require_sequenced_output = false)
-      : dataset(std::move(dataset)),
-        scan_options(std::move(scan_options)),
-        require_sequenced_output(require_sequenced_output) {}
+  explicit ScanNodeOptions(
+      std::shared_ptr<Dataset> dataset, std::shared_ptr<ScanOptions> scan_options,
+      std::shared_ptr<util::AsyncToggle> backpressure_toggle = NULLPTR,
+      bool require_sequenced_output = false)
+      : dataset(std::move(dataset)), scan_options(std::move(scan_options)) {}
 
+  /// \brief The dataset to scan
   std::shared_ptr<Dataset> dataset;
+  /// \brief Instructions on how to scan the dataset.
+  ///
+  /// The use_threads option will be ignored.  The scanner will always
+  /// use the exec plan's executor (which may be a serial executor)
   std::shared_ptr<ScanOptions> scan_options;
-  bool require_sequenced_output;
+  /// \brief An optional toggle to allow pausing the scan.
+  ///
+  /// The node will cease reading from the scanner while the toggle is closed.
+  /// The scanner will continue until its readahead queue has filled up at which
+  /// point scanning will pause.
+  std::shared_ptr<util::AsyncToggle> backpressure_toggle;
 };
 
 /// @}

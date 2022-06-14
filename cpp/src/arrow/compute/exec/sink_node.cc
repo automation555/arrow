@@ -46,96 +46,43 @@ using internal::checked_cast;
 namespace compute {
 namespace {
 
-class BackpressureReservoir : public BackpressureMonitor {
- public:
-  BackpressureReservoir(uint64_t resume_if_below, uint64_t pause_if_above)
-      : bytes_used_(0),
-        state_change_counter_(0),
-        resume_if_below_(resume_if_below),
-        pause_if_above_(pause_if_above) {}
-
-  uint64_t bytes_in_use() const override { return bytes_used_; }
-  bool is_paused() const override { return state_change_counter_ % 2 == 1; }
-  bool enabled() const { return pause_if_above_ > 0; }
-
-  int32_t RecordProduced(uint64_t num_bytes) {
-    std::lock_guard<std::mutex> lg(mutex_);
-    bool was_under = bytes_used_ <= pause_if_above_;
-    bytes_used_ += num_bytes;
-    if (was_under && bytes_used_ > pause_if_above_) {
-      return ++state_change_counter_;
-    }
-    return -1;
-  }
-
-  int32_t RecordConsumed(uint64_t num_bytes) {
-    std::lock_guard<std::mutex> lg(mutex_);
-    bool was_over = bytes_used_ >= resume_if_below_;
-    bytes_used_ -= num_bytes;
-    if (was_over && bytes_used_ < resume_if_below_) {
-      return ++state_change_counter_;
-    }
-    return -1;
-  }
-
- private:
-  std::mutex mutex_;
-  uint64_t bytes_used_;
-  int32_t state_change_counter_;
-  const uint64_t resume_if_below_;
-  const uint64_t pause_if_above_;
-};
-
 class SinkNode : public ExecNode {
  public:
   SinkNode(ExecPlan* plan, std::vector<ExecNode*> inputs,
            AsyncGenerator<util::optional<ExecBatch>>* generator,
-           BackpressureOptions backpressure,
-           BackpressureMonitor** backpressure_monitor_out)
+           util::BackpressureOptions backpressure)
       : ExecNode(plan, std::move(inputs), {"collected"}, {},
                  /*num_outputs=*/0),
-        backpressure_queue_(backpressure.resume_if_below, backpressure.pause_if_above),
-        push_gen_(),
-        producer_(push_gen_.producer()),
-        node_destroyed_(std::make_shared<bool>(false)) {
-    if (backpressure_monitor_out) {
-      *backpressure_monitor_out = &backpressure_queue_;
-    }
-    auto node_destroyed_capture = node_destroyed_;
-    *generator = [this, node_destroyed_capture]() -> Future<util::optional<ExecBatch>> {
-      if (*node_destroyed_capture) {
-        return Status::Invalid(
-            "Attempt to consume data after the plan has been destroyed");
-      }
-      return push_gen_().Then([this](const util::optional<ExecBatch>& batch) {
-        if (batch) {
-          RecordBackpressureBytesFreed(*batch);
-        }
-        return batch;
-      });
-    };
+        producer_(MakeProducer(generator, std::move(backpressure))) {
+    DCHECK_EQ(1, inputs_.size());
+    output_schema_ = inputs_[0]->output_schema();
   }
-
-  ~SinkNode() override { *node_destroyed_ = true; }
 
   static Result<ExecNode*> Make(ExecPlan* plan, std::vector<ExecNode*> inputs,
                                 const ExecNodeOptions& options) {
     RETURN_NOT_OK(ValidateExecNodeInputs(plan, inputs, 1, "SinkNode"));
 
     const auto& sink_options = checked_cast<const SinkNodeOptions&>(options);
-    RETURN_NOT_OK(ValidateOptions(sink_options));
     return plan->EmplaceNode<SinkNode>(plan, std::move(inputs), sink_options.generator,
-                                       sink_options.backpressure,
-                                       sink_options.backpressure_monitor);
+                                       sink_options.backpressure);
+  }
+
+  static PushGenerator<util::optional<ExecBatch>>::Producer MakeProducer(
+      AsyncGenerator<util::optional<ExecBatch>>* out_gen,
+      util::BackpressureOptions backpressure) {
+    PushGenerator<util::optional<ExecBatch>> push_gen(std::move(backpressure));
+    auto out = push_gen.producer();
+    *out_gen = std::move(push_gen);
+    return out;
   }
 
   const char* kind_name() const override { return "SinkNode"; }
 
   Status StartProducing() override {
-    START_COMPUTE_SPAN(span_, std::string(kind_name()) + ":" + label(),
-                       {{"node.label", label()},
-                        {"node.detail", ToString()},
-                        {"node.kind", kind_name()}});
+    START_SPAN(span_, std::string(kind_name()) + ":" + label(),
+               {{"node.label", label()},
+                {"node.detail", ToString()},
+                {"node.kind", kind_name()}});
     finished_ = Future<>::Make();
     END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
 
@@ -146,55 +93,27 @@ class SinkNode : public ExecNode {
   [[noreturn]] static void NoOutputs() {
     Unreachable("no outputs; this should never be called");
   }
-  [[noreturn]] void ResumeProducing(ExecNode* output, int32_t counter) override {
-    NoOutputs();
-  }
-  [[noreturn]] void PauseProducing(ExecNode* output, int32_t counter) override {
-    NoOutputs();
-  }
+  [[noreturn]] void ResumeProducing(ExecNode* output) override { NoOutputs(); }
+  [[noreturn]] void PauseProducing(ExecNode* output) override { NoOutputs(); }
   [[noreturn]] void StopProducing(ExecNode* output) override { NoOutputs(); }
 
   void StopProducing() override {
     EVENT(span_, "StopProducing");
-
-    Finish();
-    inputs_[0]->StopProducing(this);
+    if (input_counter_.Cancel()) {
+      Finish();
+    }
   }
 
   Future<> finished() override { return finished_; }
 
-  void RecordBackpressureBytesUsed(const ExecBatch& batch) {
-    if (backpressure_queue_.enabled()) {
-      uint64_t bytes_used = static_cast<uint64_t>(batch.TotalBufferSize());
-      auto state_change = backpressure_queue_.RecordProduced(bytes_used);
-      if (state_change >= 0) {
-        EVENT(span_, "Backpressure applied", {{"backpressure.counter", state_change}});
-        inputs_[0]->PauseProducing(this, state_change);
-      }
-    }
-  }
-
-  void RecordBackpressureBytesFreed(const ExecBatch& batch) {
-    if (backpressure_queue_.enabled()) {
-      uint64_t bytes_freed = static_cast<uint64_t>(batch.TotalBufferSize());
-      auto state_change = backpressure_queue_.RecordConsumed(bytes_freed);
-      if (state_change >= 0) {
-        EVENT(span_, "Backpressure released", {{"backpressure.counter", state_change}});
-        inputs_[0]->ResumeProducing(this, state_change);
-      }
-    }
-  }
-
   void InputReceived(ExecNode* input, ExecBatch batch) override {
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
     util::tracing::Span span;
-    START_COMPUTE_SPAN_WITH_PARENT(
-        span, span_, "InputReceived",
-        {{"node.label", label()}, {"batch.length", batch.length}});
+    START_SPAN_WITH_PARENT(span, span_, "InputReceived",
+                           {{"node.label", label()}, {"batch.length", batch.length}});
 
     DCHECK_EQ(input, inputs_[0]);
 
-    RecordBackpressureBytesUsed(batch);
     bool did_push = producer_.Push(std::move(batch));
     if (!did_push) return;  // producer_ was Closed already
 
@@ -212,7 +131,6 @@ class SinkNode : public ExecNode {
     if (input_counter_.Cancel()) {
       Finish();
     }
-    inputs_[0]->StopProducing(this);
   }
 
   void InputFinished(ExecNode* input, int total_batches) override {
@@ -224,51 +142,26 @@ class SinkNode : public ExecNode {
 
  protected:
   virtual void Finish() {
-    if (producer_.Close()) {
-      finished_.MarkFinished();
-    }
-  }
-
-  static Status ValidateOptions(const SinkNodeOptions& sink_options) {
-    if (!sink_options.generator) {
-      return Status::Invalid(
-          "`generator` is a required SinkNode option and cannot be null");
-    }
-    if (sink_options.backpressure.pause_if_above <
-        sink_options.backpressure.resume_if_below) {
-      return Status::Invalid(
-          "`backpressure::pause_if_above` must be >= `backpressure::resume_if_below");
-    }
-    if (sink_options.backpressure.resume_if_below < 0) {
-      return Status::Invalid(
-          "`backpressure::pause_if_above and backpressure::resume_if_below must be >= 0. "
-          " Set to 0 to disable backpressure.");
-    }
-    return Status::OK();
+    producer_.Close();
+    finished_.MarkFinished();
   }
 
   AtomicCounter input_counter_;
 
-  // Needs to be a shared_ptr as the push generator can technically outlive the node
-  BackpressureReservoir backpressure_queue_;
-  PushGenerator<util::optional<ExecBatch>> push_gen_;
   PushGenerator<util::optional<ExecBatch>>::Producer producer_;
-  std::shared_ptr<bool> node_destroyed_;
 };
 
 // A sink node that owns consuming the data and will not finish until the consumption
 // is finished.  Use SinkNode if you are transferring the ownership of the data to another
 // system.  Use ConsumingSinkNode if the data is being consumed within the exec plan (i.e.
 // the exec plan should not complete until the consumption has completed).
-class ConsumingSinkNode : public ExecNode, public BackpressureControl {
+class ConsumingSinkNode : public ExecNode {
  public:
   ConsumingSinkNode(ExecPlan* plan, std::vector<ExecNode*> inputs,
-                    std::shared_ptr<SinkNodeConsumer> consumer,
-                    std::vector<std::string> names)
+                    std::shared_ptr<SinkNodeConsumer> consumer)
       : ExecNode(plan, std::move(inputs), {"to_consume"}, {},
                  /*num_outputs=*/0),
-        consumer_(std::move(consumer)),
-        names_(std::move(names)) {}
+        consumer_(std::move(consumer)) {}
 
   static Result<ExecNode*> Make(ExecPlan* plan, std::vector<ExecNode*> inputs,
                                 const ExecNodeOptions& options) {
@@ -276,33 +169,16 @@ class ConsumingSinkNode : public ExecNode, public BackpressureControl {
 
     const auto& sink_options = checked_cast<const ConsumingSinkNodeOptions&>(options);
     return plan->EmplaceNode<ConsumingSinkNode>(plan, std::move(inputs),
-                                                std::move(sink_options.consumer),
-                                                std::move(sink_options.names));
+                                                std::move(sink_options.consumer));
   }
 
   const char* kind_name() const override { return "ConsumingSinkNode"; }
 
   Status StartProducing() override {
-    START_COMPUTE_SPAN(span_, std::string(kind_name()) + ":" + label(),
-                       {{"node.label", label()},
-                        {"node.detail", ToString()},
-                        {"node.kind", kind_name()}});
-    DCHECK_GT(inputs_.size(), 0);
-    auto output_schema = inputs_[0]->output_schema();
-    if (names_.size() > 0) {
-      int num_fields = output_schema->num_fields();
-      if (names_.size() != static_cast<size_t>(num_fields)) {
-        return Status::Invalid("ConsumingSinkNode with mismatched number of names");
-      }
-      FieldVector fields(num_fields);
-      int i = 0;
-      for (const auto& output_field : output_schema->fields()) {
-        fields[i] = field(names_[i], output_field->type());
-        ++i;
-      }
-      output_schema = schema(std::move(fields));
-    }
-    RETURN_NOT_OK(consumer_->Init(output_schema, this));
+    START_SPAN(span_, std::string(kind_name()) + ":" + label(),
+               {{"node.label", label()},
+                {"node.detail", ToString()},
+                {"node.kind", kind_name()}});
     finished_ = Future<>::Make();
     END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
     return Status::OK();
@@ -312,22 +188,15 @@ class ConsumingSinkNode : public ExecNode, public BackpressureControl {
   [[noreturn]] static void NoOutputs() {
     Unreachable("no outputs; this should never be called");
   }
-  [[noreturn]] void ResumeProducing(ExecNode* output, int32_t counter) override {
-    NoOutputs();
-  }
-  [[noreturn]] void PauseProducing(ExecNode* output, int32_t counter) override {
-    NoOutputs();
-  }
+  [[noreturn]] void ResumeProducing(ExecNode* output) override { NoOutputs(); }
+  [[noreturn]] void PauseProducing(ExecNode* output) override { NoOutputs(); }
   [[noreturn]] void StopProducing(ExecNode* output) override { NoOutputs(); }
-
-  void Pause() override { inputs_[0]->PauseProducing(this, ++backpressure_counter_); }
-
-  void Resume() override { inputs_[0]->ResumeProducing(this, ++backpressure_counter_); }
 
   void StopProducing() override {
     EVENT(span_, "StopProducing");
-    Finish(Status::Invalid("ExecPlan was stopped early"));
-    inputs_[0]->StopProducing(this);
+    if (input_counter_.Cancel()) {
+      Finish(Status::OK());
+    }
   }
 
   Future<> finished() override { return finished_; }
@@ -335,9 +204,8 @@ class ConsumingSinkNode : public ExecNode, public BackpressureControl {
   void InputReceived(ExecNode* input, ExecBatch batch) override {
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
     util::tracing::Span span;
-    START_COMPUTE_SPAN_WITH_PARENT(
-        span, span_, "InputReceived",
-        {{"node.label", label()}, {"batch.length", batch.length}});
+    START_SPAN_WITH_PARENT(span, span_, "InputReceived",
+                           {{"node.label", label()}, {"batch.length", batch.length}});
 
     DCHECK_EQ(input, inputs_[0]);
 
@@ -352,7 +220,6 @@ class ConsumingSinkNode : public ExecNode, public BackpressureControl {
       if (input_counter_.Cancel()) {
         Finish(std::move(consumption_status));
       }
-      inputs_[0]->StopProducing(this);
       return;
     }
 
@@ -368,8 +235,6 @@ class ConsumingSinkNode : public ExecNode, public BackpressureControl {
     if (input_counter_.Cancel()) {
       Finish(std::move(error));
     }
-
-    inputs_[0]->StopProducing(this);
   }
 
   void InputFinished(ExecNode* input, int total_batches) override {
@@ -380,7 +245,7 @@ class ConsumingSinkNode : public ExecNode, public BackpressureControl {
   }
 
  protected:
-  void Finish(const Status& finish_st) {
+  virtual void Finish(const Status& finish_st) {
     consumer_->Finish().AddCallback([this, finish_st](const Status& st) {
       // Prefer the plan error over the consumer error
       Status final_status = finish_st & st;
@@ -389,9 +254,8 @@ class ConsumingSinkNode : public ExecNode, public BackpressureControl {
   }
 
   AtomicCounter input_counter_;
+
   std::shared_ptr<SinkNodeConsumer> consumer_;
-  std::vector<std::string> names_;
-  int32_t backpressure_counter_ = 0;
 };
 
 /**
@@ -401,22 +265,15 @@ class ConsumingSinkNode : public ExecNode, public BackpressureControl {
  * enable this functionality.
  */
 
-struct TableSinkNodeConsumer : public SinkNodeConsumer {
+struct TableSinkNodeConsumer : public arrow::compute::SinkNodeConsumer {
  public:
-  TableSinkNodeConsumer(std::shared_ptr<Table>* out, MemoryPool* pool)
-      : out_(out), pool_(pool) {}
-
-  Status Init(const std::shared_ptr<Schema>& schema,
-              BackpressureControl* backpressure_control) override {
-    // If the user is collecting into a table then backpressure is meaningless
-    ARROW_UNUSED(backpressure_control);
-    schema_ = schema;
-    return Status::OK();
-  }
+  TableSinkNodeConsumer(std::shared_ptr<Table>* out,
+                        std::shared_ptr<Schema> output_schema, MemoryPool* pool)
+      : out_(out), output_schema_(std::move(output_schema)), pool_(pool) {}
 
   Status Consume(ExecBatch batch) override {
     std::lock_guard<std::mutex> guard(consume_mutex_);
-    ARROW_ASSIGN_OR_RAISE(auto rb, batch.ToRecordBatch(schema_, pool_));
+    ARROW_ASSIGN_OR_RAISE(auto rb, batch.ToRecordBatch(output_schema_, pool_));
     batches_.push_back(rb);
     return Status::OK();
   }
@@ -428,8 +285,8 @@ struct TableSinkNodeConsumer : public SinkNodeConsumer {
 
  private:
   std::shared_ptr<Table>* out_;
+  std::shared_ptr<Schema> output_schema_;
   MemoryPool* pool_;
-  std::shared_ptr<Schema> schema_;
   std::vector<std::shared_ptr<RecordBatch>> batches_;
   std::mutex consume_mutex_;
 };
@@ -440,8 +297,8 @@ static Result<ExecNode*> MakeTableConsumingSinkNode(
   RETURN_NOT_OK(ValidateExecNodeInputs(plan, inputs, 1, "TableConsumingSinkNode"));
   const auto& sink_options = checked_cast<const TableSinkNodeOptions&>(options);
   MemoryPool* pool = plan->exec_context()->memory_pool();
-  auto tb_consumer =
-      std::make_shared<TableSinkNodeConsumer>(sink_options.output_table, pool);
+  auto tb_consumer = std::make_shared<TableSinkNodeConsumer>(
+      sink_options.output_table, sink_options.output_schema, pool);
   auto consuming_sink_node_options = ConsumingSinkNodeOptions{tb_consumer};
   return MakeExecNode("consuming_sink", plan, inputs, consuming_sink_node_options);
 }
@@ -450,10 +307,10 @@ static Result<ExecNode*> MakeTableConsumingSinkNode(
 struct OrderBySinkNode final : public SinkNode {
   OrderBySinkNode(ExecPlan* plan, std::vector<ExecNode*> inputs,
                   std::unique_ptr<OrderByImpl> impl,
-                  AsyncGenerator<util::optional<ExecBatch>>* generator)
-      : SinkNode(plan, std::move(inputs), generator, /*backpressure=*/{},
-                 /*backpressure_monitor_out=*/nullptr),
-        impl_(std::move(impl)) {}
+                  AsyncGenerator<util::optional<ExecBatch>>* generator,
+                  util::BackpressureOptions backpressure)
+      : SinkNode(plan, std::move(inputs), generator, std::move(backpressure)),
+        impl_{std::move(impl)} {}
 
   const char* kind_name() const override { return "OrderBySinkNode"; }
 
@@ -463,30 +320,13 @@ struct OrderBySinkNode final : public SinkNode {
     RETURN_NOT_OK(ValidateExecNodeInputs(plan, inputs, 1, "OrderBySinkNode"));
 
     const auto& sink_options = checked_cast<const OrderBySinkNodeOptions&>(options);
-    if (sink_options.backpressure.should_apply_backpressure()) {
-      return Status::Invalid("Backpressure cannot be applied to an OrderBySinkNode");
-    }
-    RETURN_NOT_OK(ValidateOrderByOptions(sink_options));
     ARROW_ASSIGN_OR_RAISE(
         std::unique_ptr<OrderByImpl> impl,
         OrderByImpl::MakeSort(plan->exec_context(), inputs[0]->output_schema(),
                               sink_options.sort_options));
     return plan->EmplaceNode<OrderBySinkNode>(plan, std::move(inputs), std::move(impl),
-                                              sink_options.generator);
-  }
-
-  static Status ValidateCommonOrderOptions(const SinkNodeOptions& options) {
-    if (options.backpressure.should_apply_backpressure()) {
-      return Status::Invalid("Backpressure cannot be applied on an ordering sink node");
-    }
-    return ValidateOptions(options);
-  }
-
-  static Status ValidateOrderByOptions(const OrderBySinkNodeOptions& options) {
-    if (options.sort_options.sort_keys.empty()) {
-      return Status::Invalid("At least one sort key should be specified");
-    }
-    return ValidateCommonOrderOptions(options);
+                                              sink_options.generator,
+                                              sink_options.backpressure);
   }
 
   // A sink node that receives inputs and then compute top_k/bottom_k.
@@ -495,31 +335,20 @@ struct OrderBySinkNode final : public SinkNode {
     RETURN_NOT_OK(ValidateExecNodeInputs(plan, inputs, 1, "OrderBySinkNode"));
 
     const auto& sink_options = checked_cast<const SelectKSinkNodeOptions&>(options);
-    if (sink_options.backpressure.should_apply_backpressure()) {
-      return Status::Invalid("Backpressure cannot be applied to an OrderBySinkNode");
-    }
-    RETURN_NOT_OK(ValidateSelectKOptions(sink_options));
     ARROW_ASSIGN_OR_RAISE(
         std::unique_ptr<OrderByImpl> impl,
         OrderByImpl::MakeSelectK(plan->exec_context(), inputs[0]->output_schema(),
                                  sink_options.select_k_options));
     return plan->EmplaceNode<OrderBySinkNode>(plan, std::move(inputs), std::move(impl),
-                                              sink_options.generator);
-  }
-
-  static Status ValidateSelectKOptions(const SelectKSinkNodeOptions& options) {
-    if (options.select_k_options.k <= 0) {
-      return Status::Invalid("`k` must be > 0");
-    }
-    return ValidateCommonOrderOptions(options);
+                                              sink_options.generator,
+                                              sink_options.backpressure);
   }
 
   void InputReceived(ExecNode* input, ExecBatch batch) override {
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
     util::tracing::Span span;
-    START_COMPUTE_SPAN_WITH_PARENT(
-        span, span_, "InputReceived",
-        {{"node.label", label()}, {"batch.length", batch.length}});
+    START_SPAN_WITH_PARENT(span, span_, "InputReceived",
+                           {{"node.label", label()}, {"batch.length", batch.length}});
 
     DCHECK_EQ(input, inputs_[0]);
 
@@ -556,7 +385,7 @@ struct OrderBySinkNode final : public SinkNode {
 
   void Finish() override {
     util::tracing::Span span;
-    START_COMPUTE_SPAN_WITH_PARENT(span, span_, "Finish", {{"node.label", label()}});
+    START_SPAN_WITH_PARENT(span, span_, "Finish", {{"node.label", label()}});
     Status st = DoFinish();
     if (ErrorIfNotOk(st)) {
       producer_.Push(std::move(st));

@@ -98,7 +98,9 @@ class TestCsvFileFormat : public FileFormatFixtureMixin<CsvFormatHelper>,
   }
 
   RecordBatchIterator Batches(Fragment* fragment) {
-    EXPECT_OK_AND_ASSIGN(auto batch_gen, fragment->ScanBatchesAsync(opts_));
+    EXPECT_OK_AND_ASSIGN(
+        auto batch_gen,
+        fragment->ScanBatchesAsync(opts_, ::arrow::internal::GetCpuThreadPool()));
     return MakeGeneratorIterator(batch_gen);
   }
 };
@@ -397,7 +399,6 @@ TEST_P(TestCsvFileFormatScan, ScanRecordBatchReaderWithVirtualColumn) {
 TEST_P(TestCsvFileFormatScan, ScanRecordBatchReaderWithDuplicateColumnError) {
   TestScanWithDuplicateColumnError();
 }
-TEST_P(TestCsvFileFormatScan, ScanWithPushdownNulls) { TestScanWithPushdownNulls(); }
 
 INSTANTIATE_TEST_SUITE_P(TestScan, TestCsvFileFormatScan,
                          ::testing::ValuesIn(TestFormatParams::Values()),
