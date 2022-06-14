@@ -33,10 +33,6 @@
 namespace arrow {
 namespace compute {
 
-/// \defgroup expression-core Expressions to describe transformations in execution plans
-///
-/// @{
-
 /// An unbound expression which maps a single Datum to another Datum.
 /// An expression is one of
 /// - A literal Datum.
@@ -93,8 +89,7 @@ class ARROW_EXPORT Expression {
   /// Return true if this expression is literal and entirely null.
   bool IsNullLiteral() const;
 
-  /// Return true if this expression could evaluate to true. Will return true for any
-  /// unbound, non-boolean, or unsimplified Expressions
+  /// Return true if this expression could evaluate to true.
   bool IsSatisfiable() const;
 
   // XXX someday
@@ -109,7 +104,7 @@ class ARROW_EXPORT Expression {
 
   /// The type and shape to which this expression will evaluate
   ValueDescr descr() const;
-  const std::shared_ptr<DataType>& type() const;
+  std::shared_ptr<DataType> type() const { return descr().type; }
   // XXX someday
   // NullGeneralization::type nullable() const;
 
@@ -118,7 +113,7 @@ class ARROW_EXPORT Expression {
 
     // post-bind properties
     ValueDescr descr;
-    ::arrow::internal::SmallVector<int, 2> indices;
+    internal::SmallVector<int, 2> indices;
   };
   const Parameter* parameter() const;
 
@@ -172,15 +167,11 @@ std::vector<FieldRef> FieldsInExpression(const Expression&);
 ARROW_EXPORT
 bool ExpressionHasFieldRefs(const Expression&);
 
+/// Assemble a mapping from field references to known values.
 struct ARROW_EXPORT KnownFieldValues;
-
-/// Assemble a mapping from field references to known values. This derives known values
-/// from "equal" and "is_null" Expressions referencing a field and a literal.
 ARROW_EXPORT
 Result<KnownFieldValues> ExtractKnownFieldValues(
     const Expression& guaranteed_true_predicate);
-
-/// @}
 
 /// \defgroup expression-passes Functions for modification of Expressions
 ///
@@ -193,12 +184,50 @@ Result<KnownFieldValues> ExtractKnownFieldValues(
 /// guarantee on a field value, an Expression must be a call to "equal" with field_ref LHS
 /// and literal RHS. Flipping the arguments, "is_in" with a one-long value_set, ... or
 /// other semantically identical Expressions will not be recognized.
+///
+/// For any simplification, if no changes could be made the identical expression will be
+/// returned (`IsIdentical(old, new)` will be true).
 
 /// Weak canonicalization which establishes guarantees for subsequent passes. Even
 /// equivalent Expressions may result in different canonicalized expressions.
 /// TODO this could be a strong canonicalization
 ARROW_EXPORT
 Result<Expression> Canonicalize(Expression, ExecContext* = NULLPTR);
+
+/// An extensible registry for simplification passes over Expressions.
+class ARROW_EXPORT ExpressionSimplificationPassRegistry {
+ public:
+  /// A pass which can operate on a bound Expression independently.
+  /// Independent passes need not recurse into Call::arguments; all independent
+  /// passes will be applied to each argument before any is applied to the call.
+  /// Expressions will be canonicalized before each pass is run.
+  using IndependentPass = std::function<Result<Expression>(Expression, ExecContext*)>;
+
+  /// A pass which utilizes a guaranteed true predicate.
+  /// Guarantee passes are allowed to invalidate independent passes;
+  /// all independent passes will be applied when any guarantee pass makes a change.
+  /// Guarantee passes need not decompose conjunctions; they will be run for
+  /// each member of a guarantee conjunction.
+  /// Guarantee passes need not recurse into Call::arguments; all guarantee
+  /// passes will be applied to each argument before any is applied to the call.
+  /// Expressions will be canonicalized before each pass is run.
+  using GuaranteePass =
+      std::function<Result<Expression>(Expression, const Expression&, ExecContext*)>;
+
+  virtual ~ExpressionSimplificationPassRegistry() = default;
+
+  virtual void Add(IndependentPass) = 0;
+  virtual void Add(GuaranteePass) = 0;
+
+  virtual Result<Expression> RunIndependentPasses(Expression, ExecContext*) = 0;
+  virtual Result<Expression> RunAllPasses(Expression,
+                                          const Expression& guaranteed_true_predicate,
+                                          ExecContext*) = 0;
+};
+
+/// The default registry, which includes built-in simplification passes.
+ARROW_EXPORT
+ExpressionSimplificationPassRegistry* default_expression_simplification_registry();
 
 /// Simplify Expressions based on literal arguments (for example, add(null, x) will always
 /// be null so replace the call with a null literal). Includes early evaluation of all
@@ -248,9 +277,7 @@ Result<std::shared_ptr<Buffer>> Serialize(const Expression&);
 ARROW_EXPORT
 Result<Expression> Deserialize(std::shared_ptr<Buffer>);
 
-/// \defgroup expression-convenience Functions convenient expression creation
-///
-/// @{
+// Convenience aliases for factories
 
 ARROW_EXPORT Expression project(std::vector<Expression> values,
                                 std::vector<std::string> names);
@@ -276,8 +303,6 @@ ARROW_EXPORT Expression and_(const std::vector<Expression>&);
 ARROW_EXPORT Expression or_(Expression lhs, Expression rhs);
 ARROW_EXPORT Expression or_(const std::vector<Expression>&);
 ARROW_EXPORT Expression not_(Expression operand);
-
-/// @}
 
 }  // namespace compute
 }  // namespace arrow
