@@ -221,30 +221,6 @@ class DateField(IntegerField):
             ('unit', 'DAY' if self.unit == self.DAY else 'MILLISECOND')
         ])
 
-    def generate_range(self, size, lower, upper, name=None,
-                       include_extremes=False):
-        if self.unit == self.DAY:
-            return super().generate_range(size, lower, upper, name)
-
-        full_day_millis = 1000 * 60 * 60 * 24
-        lower = -1 * (abs(lower) // full_day_millis)
-        upper //= full_day_millis
-
-        values = [val * full_day_millis for val in np.random.randint(
-            lower, upper, size=size, dtype=np.int64)]
-        lower *= full_day_millis
-        upper *= full_day_millis
-
-        if include_extremes and size >= 2:
-            values[:2] = [lower, upper]
-        values = list(map(int if self.bit_width < 64 else str, values))
-
-        is_valid = self._make_is_valid(size)
-
-        if name is None:
-            name = self.name
-        return PrimitiveColumn(name, size, is_valid, values)
-
 
 TIMEUNIT_NAMES = {
     's': 'SECOND',
@@ -284,11 +260,6 @@ class TimeField(IntegerField):
             ('unit', TIMEUNIT_NAMES[self.unit]),
             ('bitWidth', self.bit_width)
         ])
-
-    def generate_column(self, size, name=None):
-        lower_bound, upper_bound = self._get_generated_data_bounds()
-        return self.generate_range(size, lower_bound, upper_bound,
-                                   name=name)
 
 
 class TimestampField(IntegerField):
@@ -1378,20 +1349,12 @@ def generate_datetime_case():
     return _generate_file("datetime", fields, batch_sizes)
 
 
-def generate_duration_case():
+def generate_interval_case():
     fields = [
         DurationIntervalField('f1', 's'),
         DurationIntervalField('f2', 'ms'),
         DurationIntervalField('f3', 'us'),
         DurationIntervalField('f4', 'ns'),
-    ]
-
-    batch_sizes = [7, 10]
-    return _generate_file("duration", fields, batch_sizes)
-
-
-def generate_interval_case():
-    fields = [
         YearMonthIntervalField('f5'),
         DayTimeIntervalField('f6'),
     ]
@@ -1438,9 +1401,8 @@ def generate_nested_case():
                            get_field('item', 'int32'), 4),
         StructField('struct_nullable', [get_field('f1', 'int32'),
                                         get_field('f2', 'utf8')]),
-        # Fails on Go (ARROW-8452)
-        # ListField('list_nonnullable', get_field('item', 'int32'),
-        #           nullable=False),
+        ListField('list_nonnullable', get_field('item', 'int32'),
+                  nullable=False),
     ]
 
     batch_sizes = [7, 10]
@@ -1515,16 +1477,12 @@ def generate_dictionary_unsigned_case():
     dict0 = Dictionary(0, StringField('dictionary0'), size=5, name='DICT0')
     dict1 = Dictionary(1, StringField('dictionary1'), size=5, name='DICT1')
     dict2 = Dictionary(2, StringField('dictionary2'), size=5, name='DICT2')
-
-    # TODO: JavaScript does not support uint64 dictionary indices, so disabled
-    # for now
-
-    # dict3 = Dictionary(3, StringField('dictionary3'), size=5, name='DICT3')
+    dict3 = Dictionary(3, StringField('dictionary3'), size=5, name='DICT3')
     fields = [
         DictionaryField('f0', get_field('', 'uint8'), dict0),
         DictionaryField('f1', get_field('', 'uint16'), dict1),
         DictionaryField('f2', get_field('', 'uint32'), dict2),
-        # DictionaryField('f3', get_field('', 'uint64'), dict3)
+        DictionaryField('f3', get_field('', 'uint64'), dict3)
     ]
     batch_sizes = [7, 10]
     return _generate_file("dictionary_unsigned", fields, batch_sizes,
@@ -1598,7 +1556,8 @@ def get_generated_json_files(tempdir=None):
         .skip_category('C#')
         .skip_category('JS'),   # TODO(ARROW-7900)
 
-        generate_decimal128_case(),
+        generate_decimal128_case()
+        .skip_category('Rust'),
 
         generate_decimal256_case()
         .skip_category('Go')  # TODO(ARROW-7948): Decimal + Go
@@ -1608,28 +1567,28 @@ def get_generated_json_files(tempdir=None):
         generate_datetime_case()
         .skip_category('C#'),
 
-        generate_duration_case()
-        .skip_category('C#')
-        .skip_category('JS'),  # TODO(ARROW-5239): Intervals + JS
-
         generate_interval_case()
         .skip_category('C#')
-        .skip_category('JS'),  # TODO(ARROW-5239): Intervals + JS
+        .skip_category('JS')  # TODO(ARROW-5239): Intervals + JS
+        .skip_category('Rust'),
 
         generate_month_day_nano_interval_case()
         .skip_category('C#')
         .skip_category('JS'),
 
         generate_map_case()
-        .skip_category('C#'),
+        .skip_category('C#')
+        .skip_category('Rust'),
 
         generate_non_canonical_map_case()
         .skip_category('C#')
         .skip_category('Java')   # TODO(ARROW-8715)
-        .skip_category('JS'),     # TODO(ARROW-8716)
+        .skip_category('JS')     # TODO(ARROW-8716)
+        .skip_category('Rust'),
 
         generate_nested_case()
-        .skip_category('C#'),
+        .skip_category('C#')
+        .skip_category('Go'),    # TODO(ARROW-8452)
 
         generate_recursive_nested_case()
         .skip_category('C#'),
@@ -1637,12 +1596,14 @@ def get_generated_json_files(tempdir=None):
         generate_nested_large_offsets_case()
         .skip_category('C#')
         .skip_category('Go')
-        .skip_category('JS'),
+        .skip_category('JS')
+        .skip_category('Rust'),
 
         generate_unions_case()
         .skip_category('C#')
         .skip_category('Go')
-        .skip_category('JS'),
+        .skip_category('JS')
+        .skip_category('Rust'),
 
         generate_custom_metadata_case()
         .skip_category('C#')
@@ -1653,22 +1614,31 @@ def get_generated_json_files(tempdir=None):
         .skip_category('Go')
         .skip_category('JS'),
 
-        # TODO(ARROW-3039, ARROW-5267): Dictionaries in GO
         generate_dictionary_case()
-        .skip_category('C#'),
+        .skip_category('C#')
+        # TODO(ARROW-3039, ARROW-5267): Dictionaries in GO
+        .skip_category('Go')
+        # TODO: JavaScript does not support uint64 dictionary indices, so disabled
+        # for now
+        .skip_category("JS"),
 
         generate_dictionary_unsigned_case()
         .skip_category('C#')
+        .skip_category('Go')     # TODO(ARROW-9378)
         .skip_category('Java'),  # TODO(ARROW-9377)
 
         generate_nested_dictionary_case()
         .skip_category('C#')
+        .skip_category('Go')
         .skip_category('Java')  # TODO(ARROW-7779)
-        .skip_category('JS'),
+        .skip_category('JS')
+        .skip_category('Rust'),
 
         generate_extension_case()
         .skip_category('C#')
-        .skip_category('JS'),
+        .skip_category('Go')  # TODO(ARROW-3039): requires dictionaries
+        .skip_category('JS')
+        .skip_category('Rust'),
     ]
 
     generated_paths = []
