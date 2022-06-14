@@ -81,14 +81,6 @@ using compute::project;
 
 using fs::internal::GetAbstractPathExtension;
 
-/// \brief Assert a dataset produces data with the schema
-void AssertDatasetHasSchema(std::shared_ptr<Dataset> ds, std::shared_ptr<Schema> schema) {
-  ASSERT_OK_AND_ASSIGN(auto scanner_builder, ds->NewScan());
-  ASSERT_OK_AND_ASSIGN(auto scanner, scanner_builder->Finish());
-  ASSERT_OK_AND_ASSIGN(auto table, scanner->ToTable());
-  ASSERT_EQ(*table->schema(), *schema);
-}
-
 class FileSourceFixtureMixin : public ::testing::Test {
  public:
   std::unique_ptr<FileSource> GetSource(std::shared_ptr<Buffer> buffer) {
@@ -166,7 +158,9 @@ class DatasetFixtureMixin : public ::testing::Test {
   /// record batches yielded by the data fragment.
   void AssertFragmentEquals(RecordBatchReader* expected, Fragment* fragment,
                             bool ensure_drained = true) {
-    ASSERT_OK_AND_ASSIGN(auto batch_gen, fragment->ScanBatchesAsync(options_));
+    ASSERT_OK_AND_ASSIGN(
+        auto batch_gen,
+        fragment->ScanBatchesAsync(options_, ::arrow::internal::GetCpuThreadPool()));
     AssertScanTaskEquals(expected, batch_gen);
 
     if (ensure_drained) {
@@ -589,7 +583,9 @@ class FileFormatScanMixin : public FileFormatFixtureMixin<FormatHelper>,
   // Scan the fragment directly, without using the scanner.
   RecordBatchIterator PhysicalBatches(std::shared_ptr<Fragment> fragment) {
     opts_->use_threads = GetParam().use_threads;
-    EXPECT_OK_AND_ASSIGN(auto batch_gen, fragment->ScanBatchesAsync(opts_));
+    EXPECT_OK_AND_ASSIGN(
+        auto batch_gen,
+        fragment->ScanBatchesAsync(opts_, ::arrow::internal::GetCpuThreadPool()));
     auto batch_it = MakeGeneratorIterator(std::move(batch_gen));
     return batch_it;
   }
@@ -861,27 +857,6 @@ class FileFormatScanMixin : public FileFormatFixtureMixin<FormatHelper>,
     ASSERT_RAISES(Invalid,
                   ProjectionDescr::FromNames({"i32"}, *this->opts_->dataset_schema));
   }
-  void TestScanWithPushdownNulls() {
-    // Regression test for ARROW-15312
-    auto i64 = field("i64", int64());
-    this->SetSchema({i64});
-    this->SetFilter(is_null(field_ref("i64")));
-
-    auto rb = RecordBatchFromJSON(schema({i64}), R"([
-      [null],
-      [32]
-    ])");
-    ASSERT_OK_AND_ASSIGN(auto reader, RecordBatchReader::Make({rb}));
-    auto source = this->GetFileSource(reader.get());
-
-    auto fragment = this->MakeFragment(*source);
-    int64_t row_count = 0;
-    for (auto maybe_batch : Batches(fragment)) {
-      ASSERT_OK_AND_ASSIGN(auto batch, maybe_batch);
-      row_count += batch->num_rows();
-    }
-    ASSERT_EQ(row_count, 1);
-  }
 
  protected:
   using FileFormatFixtureMixin<FormatHelper>::opts_;
@@ -909,7 +884,8 @@ class DummyFileFormat : public FileFormat {
   /// \brief Open a file for scanning (always returns an empty generator)
   Result<RecordBatchGenerator> ScanBatchesAsync(
       const std::shared_ptr<ScanOptions>& options,
-      const std::shared_ptr<FileFragment>& fragment) const override {
+      const std::shared_ptr<FileFragment>& fragment,
+      ::arrow::internal::Executor* cpu_executor) const override {
     return MakeEmptyGenerator<std::shared_ptr<RecordBatch>>();
   }
 
@@ -949,7 +925,8 @@ class JSONRecordBatchFileFormat : public FileFormat {
 
   Result<RecordBatchGenerator> ScanBatchesAsync(
       const std::shared_ptr<ScanOptions>& options,
-      const std::shared_ptr<FileFragment>& fragment) const override {
+      const std::shared_ptr<FileFragment>& fragment,
+      ::arrow::internal::Executor* cpu_executor) const override {
     ARROW_ASSIGN_OR_RAISE(auto file, fragment->source().Open());
     ARROW_ASSIGN_OR_RAISE(int64_t size, file->GetSize());
     ARROW_ASSIGN_OR_RAISE(auto buffer, file->Read(size));
@@ -1031,11 +1008,13 @@ struct MakeFileSystemDatasetMixin {
         continue;
       }
 
+      ASSERT_OK_AND_ASSIGN(partitions[i], partitions[i].Bind(*s));
       ASSERT_OK_AND_ASSIGN(auto fragment,
                            format->MakeFragment({info, fs_}, partitions[i]));
       fragments.push_back(std::move(fragment));
     }
 
+    ASSERT_OK_AND_ASSIGN(root_partition, root_partition.Bind(*s));
     ASSERT_OK_AND_ASSIGN(dataset_, FileSystemDataset::Make(s, root_partition, format, fs_,
                                                            std::move(fragments)));
   }
@@ -1086,6 +1065,9 @@ static std::vector<compute::Expression> PartitionExpressionsOf(
 void AssertFragmentsHavePartitionExpressions(std::shared_ptr<Dataset> dataset,
                                              std::vector<compute::Expression> expected) {
   ASSERT_OK_AND_ASSIGN(auto fragment_it, dataset->GetFragments());
+  for (auto& expr : expected) {
+    ASSERT_OK_AND_ASSIGN(expr, expr.Bind(*dataset->schema()));
+  }
   // Ordering is not guaranteed.
   EXPECT_THAT(PartitionExpressionsOf(IteratorToVector(std::move(fragment_it))),
               testing::UnorderedElementsAreArray(expected));

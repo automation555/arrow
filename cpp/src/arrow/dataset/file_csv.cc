@@ -19,7 +19,6 @@
 
 #include <algorithm>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -40,7 +39,6 @@
 #include "arrow/util/async_generator.h"
 #include "arrow/util/iterator.h"
 #include "arrow/util/logging.h"
-#include "arrow/util/tracing_internal.h"
 #include "arrow/util/utf8.h"
 
 namespace arrow {
@@ -48,7 +46,6 @@ namespace arrow {
 using internal::checked_cast;
 using internal::checked_pointer_cast;
 using internal::Executor;
-using internal::SerialExecutor;
 
 namespace dataset {
 
@@ -85,16 +82,6 @@ Result<std::unordered_set<std::string>> GetColumnNames(
   }
 
   std::unordered_set<std::string> column_names;
-
-  if (read_options.autogenerate_column_names) {
-    column_names.reserve(parser.num_cols());
-    for (int32_t i = 0; i < parser.num_cols(); ++i) {
-      std::stringstream ss;
-      ss << "f" << i;
-      column_names.emplace(ss.str());
-    }
-    return column_names;
-  }
 
   RETURN_NOT_OK(
       parser.VisitLastRow([&](const uint8_t* data, uint32_t size, bool quoted) -> Status {
@@ -179,14 +166,9 @@ static inline Result<csv::ReadOptions> GetReadOptions(
 static inline Future<std::shared_ptr<csv::StreamingReader>> OpenReaderAsync(
     const FileSource& source, const CsvFileFormat& format,
     const std::shared_ptr<ScanOptions>& scan_options, Executor* cpu_executor) {
-#ifdef ARROW_WITH_OPENTELEMETRY
-  auto tracer = arrow::internal::tracing::GetTracer();
-  auto span = tracer->StartSpan("arrow::dataset::CsvFileFormat::OpenReaderAsync");
-#endif
   ARROW_ASSIGN_OR_RAISE(auto reader_options, GetReadOptions(format, scan_options));
 
   ARROW_ASSIGN_OR_RAISE(auto input, source.OpenCompressed());
-  const auto& path = source.path();
   ARROW_ASSIGN_OR_RAISE(
       input, io::BufferedInputStream::Create(reader_options.block_size,
                                              default_memory_pool(), std::move(input)));
@@ -207,20 +189,11 @@ static inline Future<std::shared_ptr<csv::StreamingReader>> OpenReaderAsync(
       }));
   return reader_fut.Then(
       // Adds the filename to the error
-      [=](const std::shared_ptr<csv::StreamingReader>& reader)
-          -> Result<std::shared_ptr<csv::StreamingReader>> {
-#ifdef ARROW_WITH_OPENTELEMETRY
-        span->SetStatus(opentelemetry::trace::StatusCode::kOk);
-        span->End();
-#endif
-        return reader;
-      },
-      [=](const Status& err) -> Result<std::shared_ptr<csv::StreamingReader>> {
-#ifdef ARROW_WITH_OPENTELEMETRY
-        arrow::internal::tracing::MarkSpan(err, span.get());
-        span->End();
-#endif
-        return err.WithMessage("Could not open CSV input source '", path, "': ", err);
+      [](const std::shared_ptr<csv::StreamingReader>& reader)
+          -> Result<std::shared_ptr<csv::StreamingReader>> { return reader; },
+      [source](const Status& err) -> Result<std::shared_ptr<csv::StreamingReader>> {
+        return err.WithMessage("Could not open CSV input source '", source.path(),
+                               "': ", err);
       });
 }
 
@@ -271,15 +244,12 @@ Result<std::shared_ptr<Schema>> CsvFileFormat::Inspect(const FileSource& source)
 
 Result<RecordBatchGenerator> CsvFileFormat::ScanBatchesAsync(
     const std::shared_ptr<ScanOptions>& scan_options,
-    const std::shared_ptr<FileFragment>& file) const {
+    const std::shared_ptr<FileFragment>& file,
+    ::arrow::internal::Executor* cpu_executor) const {
   auto this_ = checked_pointer_cast<const CsvFileFormat>(shared_from_this());
   auto source = file->source();
-  auto reader_fut =
-      OpenReaderAsync(source, *this, scan_options, ::arrow::internal::GetCpuThreadPool());
-  auto generator = GeneratorFromReader(std::move(reader_fut), scan_options->batch_size);
-  WRAP_ASYNC_GENERATOR_WITH_CHILD_SPAN(
-      generator, "arrow::dataset::CsvFileFormat::ScanBatchesAsync::Next");
-  return generator;
+  auto reader_fut = OpenReaderAsync(source, *this, scan_options, cpu_executor);
+  return GeneratorFromReader(std::move(reader_fut), scan_options->batch_size);
 }
 
 Future<util::optional<int64_t>> CsvFileFormat::CountRows(

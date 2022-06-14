@@ -238,25 +238,6 @@ TEST(ExecPlanExecution, SourceSink) {
   }
 }
 
-TEST(ExecPlanExecution, UseSinkAfterExecution) {
-  AsyncGenerator<util::optional<ExecBatch>> sink_gen;
-  {
-    ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make());
-    auto basic_data = MakeBasicBatches();
-    ASSERT_OK(Declaration::Sequence(
-                  {
-                      {"source", SourceNodeOptions{basic_data.schema,
-                                                   basic_data.gen(/*parallel=*/false,
-                                                                  /*slow=*/false)}},
-                      {"sink", SinkNodeOptions{&sink_gen}},
-                  })
-                  .AddToPlan(plan.get()));
-    ASSERT_OK(plan->StartProducing());
-    ASSERT_FINISHES_OK(plan->finished());
-  }
-  ASSERT_FINISHES_AND_RAISES(Invalid, sink_gen());
-}
-
 TEST(ExecPlanExecution, TableSourceSink) {
   for (int batch_size : {1, 4}) {
     ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make());
@@ -297,56 +278,48 @@ TEST(ExecPlanExecution, TableSourceSinkError) {
 }
 
 TEST(ExecPlanExecution, SinkNodeBackpressure) {
-  util::optional<ExecBatch> batch =
-      ExecBatchFromJSON({int32(), boolean()},
-                        "[[4, false], [5, null], [6, false], [7, false], [null, true]]");
   constexpr uint32_t kPauseIfAbove = 4;
   constexpr uint32_t kResumeIfBelow = 2;
-  uint32_t pause_if_above_bytes =
-      kPauseIfAbove * static_cast<uint32_t>(batch->TotalBufferSize());
-  uint32_t resume_if_below_bytes =
-      kResumeIfBelow * static_cast<uint32_t>(batch->TotalBufferSize());
   EXPECT_OK_AND_ASSIGN(std::shared_ptr<ExecPlan> plan, ExecPlan::Make());
   PushGenerator<util::optional<ExecBatch>> batch_producer;
   AsyncGenerator<util::optional<ExecBatch>> sink_gen;
-  BackpressureMonitor* backpressure_monitor;
-  BackpressureOptions backpressure_options(resume_if_below_bytes, pause_if_above_bytes);
+  util::BackpressureOptions backpressure_options =
+      util::BackpressureOptions::Make(kResumeIfBelow, kPauseIfAbove);
   std::shared_ptr<Schema> schema_ = schema({field("data", uint32())});
   ARROW_EXPECT_OK(compute::Declaration::Sequence(
                       {
                           {"source", SourceNodeOptions(schema_, batch_producer)},
-                          {"sink", SinkNodeOptions{&sink_gen, backpressure_options,
-                                                   &backpressure_monitor}},
+                          {"sink", SinkNodeOptions{&sink_gen, backpressure_options}},
                       })
                       .AddToPlan(plan.get()));
-  ASSERT_TRUE(backpressure_monitor);
   ARROW_EXPECT_OK(plan->StartProducing());
 
-  ASSERT_FALSE(backpressure_monitor->is_paused());
+  EXPECT_OK_AND_ASSIGN(util::optional<ExecBatch> batch, ExecBatch::Make({MakeScalar(0)}));
+  ASSERT_TRUE(backpressure_options.toggle->IsOpen());
 
   // Should be able to push kPauseIfAbove batches without triggering back pressure
   for (uint32_t i = 0; i < kPauseIfAbove; i++) {
     batch_producer.producer().Push(batch);
   }
   SleepABit();
-  ASSERT_FALSE(backpressure_monitor->is_paused());
+  ASSERT_TRUE(backpressure_options.toggle->IsOpen());
 
   // One more batch should trigger back pressure
   batch_producer.producer().Push(batch);
-  BusyWait(10, [&] { return backpressure_monitor->is_paused(); });
-  ASSERT_TRUE(backpressure_monitor->is_paused());
+  BusyWait(10, [&] { return !backpressure_options.toggle->IsOpen(); });
+  ASSERT_FALSE(backpressure_options.toggle->IsOpen());
 
   // Reading as much as we can while keeping it paused
   for (uint32_t i = kPauseIfAbove; i >= kResumeIfBelow; i--) {
     ASSERT_FINISHES_OK(sink_gen());
   }
   SleepABit();
-  ASSERT_TRUE(backpressure_monitor->is_paused());
+  ASSERT_FALSE(backpressure_options.toggle->IsOpen());
 
   // Reading one more item should open up backpressure
   ASSERT_FINISHES_OK(sink_gen());
-  BusyWait(10, [&] { return !backpressure_monitor->is_paused(); });
-  ASSERT_FALSE(backpressure_monitor->is_paused());
+  BusyWait(10, [&] { return backpressure_options.toggle->IsOpen(); });
+  ASSERT_TRUE(backpressure_options.toggle->IsOpen());
 
   // Cleanup
   batch_producer.producer().Push(IterationEnd<util::optional<ExecBatch>>());
@@ -414,6 +387,8 @@ custom_sink_label:OrderBySinkNode{by={sort_keys=[FieldRef.Name(sum(multiply(i32,
         :FilterNode{filter=(i32 >= 0)}
           custom_source_label:SourceNode{}
 )a");
+
+  std::cout << plan->ToString() << '\n';
 
   ASSERT_OK_AND_ASSIGN(plan, ExecPlan::Make());
 
@@ -503,6 +478,11 @@ TEST(ExecPlanExecution, SourceSinkError) {
 
   ASSERT_THAT(StartAndCollect(plan.get(), sink_gen),
               Finishes(Raises(StatusCode::Invalid, HasSubstr("Artificial"))));
+  // Note: the plan may or may not be finished at this point.  When an error
+  // hits the sink node it starts to mark itself finished but before that it emits
+  // the error to the producer which will cause the above wait to finish (possibly
+  // before the plan has marked itself finished).  So we wait for the plan to finish.
+  ASSERT_FINISHES_OK(plan->finished());
 }
 
 TEST(ExecPlanExecution, SourceConsumingSink) {
@@ -517,11 +497,6 @@ TEST(ExecPlanExecution, SourceConsumingSink) {
       struct TestConsumer : public SinkNodeConsumer {
         TestConsumer(std::atomic<uint32_t>* batches_seen, Future<> finish)
             : batches_seen(batches_seen), finish(std::move(finish)) {}
-
-        Status Init(const std::shared_ptr<Schema>& schema,
-                    BackpressureControl* backpressure_control) override {
-          return Status::OK();
-        }
 
         Status Consume(ExecBatch batch) override {
           (*batches_seen)++;
@@ -557,7 +532,7 @@ TEST(ExecPlanExecution, SourceConsumingSink) {
   }
 }
 
-TEST(ExecPlanExecution, SourceTableConsumingSink) {
+TEST(ExecPlanExecution, SourceTableSink) {
   for (bool slow : {false, true}) {
     SCOPED_TRACE(slow ? "slowed" : "unslowed");
 
@@ -569,7 +544,7 @@ TEST(ExecPlanExecution, SourceTableConsumingSink) {
 
       auto basic_data = MakeBasicBatches();
 
-      TableSinkNodeOptions options{&out};
+      TableSinkNodeOptions options{&out, basic_data.schema};
 
       ASSERT_OK_AND_ASSIGN(
           auto source, MakeExecNode("source", plan.get(), {},
@@ -579,83 +554,28 @@ TEST(ExecPlanExecution, SourceTableConsumingSink) {
       ASSERT_OK(plan->StartProducing());
       // Source should finish fairly quickly
       ASSERT_FINISHES_OK(source->finished());
-      SleepABit();
-      ASSERT_OK_AND_ASSIGN(auto actual,
+      ASSERT_OK_AND_ASSIGN(auto expected,
                            TableFromExecBatches(basic_data.schema, basic_data.batches));
       ASSERT_EQ(5, out->num_rows());
-      AssertTablesEqual(*actual, *out);
+      ASSERT_OK_AND_ASSIGN(auto expected_sorted, SortTableOnAllFields(expected));
+      ASSERT_OK_AND_ASSIGN(auto out_sorted, SortTableOnAllFields(out));
+      AssertTablesEqual(*expected_sorted, *out_sorted);
       ASSERT_FINISHES_OK(plan->finished());
-    }
-  }
-}
-
-TEST(ExecPlanExecution, ConsumingSinkNames) {
-  struct SchemaKeepingConsumer : public SinkNodeConsumer {
-    std::shared_ptr<Schema> schema_;
-    Status Init(const std::shared_ptr<Schema>& schema,
-                BackpressureControl* backpressure_control) override {
-      schema_ = schema;
-      return Status::OK();
-    }
-    Status Consume(ExecBatch batch) override { return Status::OK(); }
-    Future<> Finish() override { return Future<>::MakeFinished(); }
-  };
-  std::vector<std::vector<std::string>> names_data = {{}, {"a", "b"}, {"a", "b", "c"}};
-  for (const auto& names : names_data) {
-    auto consumer = std::make_shared<SchemaKeepingConsumer>();
-    ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make());
-    auto basic_data = MakeBasicBatches();
-    ASSERT_OK(Declaration::Sequence(
-                  {{"source",
-                    SourceNodeOptions(basic_data.schema, basic_data.gen(false, false))},
-                   {"consuming_sink", ConsumingSinkNodeOptions(consumer, names)}})
-                  .AddToPlan(plan.get()));
-    ASSERT_OK_AND_ASSIGN(
-        auto source,
-        MakeExecNode("source", plan.get(), {},
-                     SourceNodeOptions(basic_data.schema, basic_data.gen(false, false))));
-    ASSERT_OK(MakeExecNode("consuming_sink", plan.get(), {source},
-                           ConsumingSinkNodeOptions(consumer, names)));
-    if (names.size() != 0 &&
-        names.size() != static_cast<size_t>(basic_data.batches[0].num_values())) {
-      ASSERT_RAISES(Invalid, plan->StartProducing());
-    } else {
-      auto expected_names = names.size() == 0 ? basic_data.schema->field_names() : names;
-      ASSERT_OK(plan->StartProducing());
-      ASSERT_FINISHES_OK(plan->finished());
-      ASSERT_EQ(expected_names, consumer->schema_->field_names());
     }
   }
 }
 
 TEST(ExecPlanExecution, ConsumingSinkError) {
-  struct InitErrorConsumer : public SinkNodeConsumer {
-    Status Init(const std::shared_ptr<Schema>& schema,
-                BackpressureControl* backpressure_control) override {
-      return Status::Invalid("XYZ");
-    }
-    Status Consume(ExecBatch batch) override { return Status::OK(); }
-    Future<> Finish() override { return Future<>::MakeFinished(); }
-  };
   struct ConsumeErrorConsumer : public SinkNodeConsumer {
-    Status Init(const std::shared_ptr<Schema>& schema,
-                BackpressureControl* backpressure_control) override {
-      return Status::OK();
-    }
     Status Consume(ExecBatch batch) override { return Status::Invalid("XYZ"); }
     Future<> Finish() override { return Future<>::MakeFinished(); }
   };
   struct FinishErrorConsumer : public SinkNodeConsumer {
-    Status Init(const std::shared_ptr<Schema>& schema,
-                BackpressureControl* backpressure_control) override {
-      return Status::OK();
-    }
     Status Consume(ExecBatch batch) override { return Status::OK(); }
     Future<> Finish() override { return Future<>::MakeFinished(Status::Invalid("XYZ")); }
   };
   std::vector<std::shared_ptr<SinkNodeConsumer>> consumers{
-      std::make_shared<InitErrorConsumer>(), std::make_shared<ConsumeErrorConsumer>(),
-      std::make_shared<FinishErrorConsumer>()};
+      std::make_shared<ConsumeErrorConsumer>(), std::make_shared<FinishErrorConsumer>()};
 
   for (auto& consumer : consumers) {
     ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make());
@@ -671,15 +591,33 @@ TEST(ExecPlanExecution, ConsumingSinkError) {
                      SourceNodeOptions(basic_data.schema, basic_data.gen(false, false))));
     ASSERT_OK(MakeExecNode("consuming_sink", plan.get(), {source},
                            ConsumingSinkNodeOptions(consumer)));
-    // If we fail at init we see it during StartProducing.  Other
-    // failures are not seen until we start running.
-    if (std::dynamic_pointer_cast<InitErrorConsumer>(consumer)) {
-      ASSERT_RAISES(Invalid, plan->StartProducing());
-    } else {
-      ASSERT_OK(plan->StartProducing());
-      ASSERT_FINISHES_AND_RAISES(Invalid, plan->finished());
-    }
+    ASSERT_OK(plan->StartProducing());
+    ASSERT_FINISHES_AND_RAISES(Invalid, plan->finished());
   }
+}
+
+TEST(ExecPlanExecution, ConsumingSinkErrorFinish) {
+  ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make());
+  struct FinishErrorConsumer : public SinkNodeConsumer {
+    Status Consume(ExecBatch batch) override { return Status::OK(); }
+    Future<> Finish() override { return Future<>::MakeFinished(Status::Invalid("XYZ")); }
+  };
+  std::shared_ptr<FinishErrorConsumer> consumer = std::make_shared<FinishErrorConsumer>();
+
+  auto basic_data = MakeBasicBatches();
+  ASSERT_OK(
+      Declaration::Sequence(
+          {{"source", SourceNodeOptions(basic_data.schema, basic_data.gen(false, false))},
+           {"consuming_sink", ConsumingSinkNodeOptions(consumer)}})
+          .AddToPlan(plan.get()));
+  ASSERT_OK_AND_ASSIGN(
+      auto source,
+      MakeExecNode("source", plan.get(), {},
+                   SourceNodeOptions(basic_data.schema, basic_data.gen(false, false))));
+  ASSERT_OK(MakeExecNode("consuming_sink", plan.get(), {source},
+                         ConsumingSinkNodeOptions(consumer)));
+  ASSERT_OK(plan->StartProducing());
+  ASSERT_FINISHES_AND_RAISES(Invalid, plan->finished());
 }
 
 TEST(ExecPlanExecution, StressSourceSink) {
@@ -924,11 +862,11 @@ TEST(ExecPlanExecution, SourceGroupedSum) {
                   })
                   .AddToPlan(plan.get()));
 
-    ASSERT_THAT(StartAndCollect(plan.get(), sink_gen),
+    ASSERT_THAT(StartAndCollectSortedByField(plan.get(), sink_gen, 0),
                 Finishes(ResultWith(UnorderedElementsAreArray({ExecBatchFromJSON(
                     {int64(), utf8()},
-                    parallel ? R"([[800, "alfa"], [1000, "beta"], [400, "gama"]])"
-                             : R"([[8, "alfa"], [10, "beta"], [4, "gama"]])")}))));
+                    parallel ? R"([[400, "gama"], [800, "alfa"], [1000, "beta"]])"
+                             : R"([[4, "gama"], [8, "alfa"], [10, "beta"]])")}))));
   }
 }
 
@@ -968,9 +906,9 @@ TEST(ExecPlanExecution, NestedSourceProjectGroupedSum) {
 
     auto input = MakeNestedBatches();
     auto expected = ExecBatchFromJSON({int64(), boolean()}, R"([
-      [null, true],
+      [5, null],
       [17, false],
-      [5, null]
+      [null, true]
 ])");
 
     ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make());
@@ -994,7 +932,7 @@ TEST(ExecPlanExecution, NestedSourceProjectGroupedSum) {
             })
             .AddToPlan(plan.get()));
 
-    ASSERT_THAT(StartAndCollect(plan.get(), sink_gen),
+    ASSERT_THAT(StartAndCollectSortedByField(plan.get(), sink_gen, 0),
                 Finishes(ResultWith(UnorderedElementsAreArray({expected}))));
   }
 }
@@ -1030,10 +968,10 @@ TEST(ExecPlanExecution, SourceFilterProjectGroupedSumFilter) {
             })
             .AddToPlan(plan.get()));
 
-    ASSERT_THAT(StartAndCollect(plan.get(), sink_gen),
+    ASSERT_THAT(StartAndCollectSortedByField(plan.get(), sink_gen, 0),
                 Finishes(ResultWith(UnorderedElementsAreArray({ExecBatchFromJSON(
-                    {int64(), utf8()}, parallel ? R"([[3600, "alfa"], [2000, "beta"]])"
-                                                : R"([[36, "alfa"], [20, "beta"]])")}))));
+                    {int64(), utf8()}, parallel ? R"([[2000, "beta"], [3600, "alfa"]])"
+                                                : R"([[20, "beta"], [36, "alfa"]])")}))));
   }
 }
 
@@ -1191,7 +1129,7 @@ TEST(ExecPlanExecution, AggregationPreservesOptions) {
               .AddToPlan(plan.get()));
     }
 
-    ASSERT_THAT(StartAndCollect(plan.get(), sink_gen),
+    ASSERT_THAT(StartAndCollectSortedByField(plan.get(), sink_gen, 1),
                 Finishes(ResultWith(UnorderedElementsAreArray({
                     ExecBatchFromJSON({int64(), utf8()},
                                       R"([[500, "alfa"], [200, "beta"], [200, "gama"]])"),
@@ -1279,7 +1217,7 @@ TEST(ExecPlanExecution, ScalarSourceGroupedSum) {
                 })
                 .AddToPlan(plan.get()));
 
-  ASSERT_THAT(StartAndCollect(plan.get(), sink_gen),
+  ASSERT_THAT(StartAndCollectSortedByField(plan.get(), sink_gen, 0),
               Finishes(ResultWith(UnorderedElementsAreArray({
                   ExecBatchFromJSON({int64(), boolean()}, R"([[6, true], [18, false]])"),
               }))));
@@ -1291,8 +1229,8 @@ TEST(ExecPlanExecution, SelfInnerHashJoinSink) {
 
     auto input = MakeGroupableBatches();
 
-    auto exec_ctx = arrow::internal::make_unique<ExecContext>(
-        default_memory_pool(), parallel ? arrow::internal::GetCpuThreadPool() : nullptr);
+    auto exec_ctx = arrow::internal::make_unique<ExecContext>(default_memory_pool());
+    exec_ctx->set_use_threads(parallel);
 
     ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make(exec_ctx.get()));
     AsyncGenerator<util::optional<ExecBatch>> sink_gen;
@@ -1348,8 +1286,8 @@ TEST(ExecPlanExecution, SelfOuterHashJoinSink) {
 
     auto input = MakeGroupableBatches();
 
-    auto exec_ctx = arrow::internal::make_unique<ExecContext>(
-        default_memory_pool(), parallel ? arrow::internal::GetCpuThreadPool() : nullptr);
+    auto exec_ctx = arrow::internal::make_unique<ExecContext>(default_memory_pool());
+    exec_ctx->set_use_threads(parallel);
 
     ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make(exec_ctx.get()));
     AsyncGenerator<util::optional<ExecBatch>> sink_gen;

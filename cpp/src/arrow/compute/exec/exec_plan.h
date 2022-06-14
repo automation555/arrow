@@ -194,34 +194,6 @@ class ARROW_EXPORT ExecNode {
   // - A method allows passing a ProductionHint asynchronously from an output node
   //   (replacing PauseProducing(), ResumeProducing(), StopProducing())
 
-  // Concurrent calls to PauseProducing and ResumeProducing can be hard to sequence
-  // as they may travel at different speeds through the plan.
-  //
-  // For example, consider a resume that comes quickly after a pause.  If the source
-  // receives the resume before the pause the source may think the destination is full
-  // and halt production which would lead to deadlock.
-  //
-  // To resolve this a counter is sent for all calls to pause/resume.  Only the call with
-  // the highest counter value is valid.  So if a call to PauseProducing(5) comes after
-  // a call to ResumeProducing(6) then the source should continue producing.
-  //
-  // If a node has multiple outputs it should emit a new counter value to its inputs
-  // whenever any of its outputs changes which means the counters sent to inputs may be
-  // larger than the counters received on its outputs.
-  //
-  // A node with multiple outputs will also need to ensure it is applying backpressure if
-  // any of its outputs is asking to pause
-
-  /// \brief Perform any needed initialization
-  ///
-  /// This hook performs any actions in between creation of ExecPlan and the call to
-  /// StartProducing. An example could be Bloom filter pushdown. The order of ExecNodes
-  /// that executes this method is undefined, but the calls are made synchronously.
-  ///
-  /// At this point a node can rely on all inputs & outputs (and the input schemas)
-  /// being well defined.
-  virtual Status PrepareToProduce() { return Status::OK(); }
-
   /// \brief Start producing
   ///
   /// This must only be called once.  If this fails, then other lifecycle
@@ -232,26 +204,22 @@ class ARROW_EXPORT ExecNode {
 
   /// \brief Pause producing temporarily
   ///
-  /// \param output Pointer to the output that is full
-  /// \param counter Counter used to sequence calls to pause/resume
-  ///
   /// This call is a hint that an output node is currently not willing
   /// to receive data.
   ///
   /// This may be called any number of times after StartProducing() succeeds.
   /// However, the node is still free to produce data (which may be difficult
   /// to prevent anyway if data is produced using multiple threads).
-  virtual void PauseProducing(ExecNode* output, int32_t counter) = 0;
+  virtual void PauseProducing(ExecNode* output) = 0;
 
   /// \brief Resume producing after a temporary pause
-  ///
-  /// \param output Pointer to the output that is now free
-  /// \param counter Counter used to sequence calls to pause/resume
   ///
   /// This call is a hint that an output node is willing to receive data again.
   ///
   /// This may be called any number of times after StartProducing() succeeds.
-  virtual void ResumeProducing(ExecNode* output, int32_t counter) = 0;
+  /// This may also be called concurrently with PauseProducing(), which suggests
+  /// the implementation may use an atomic counter.
+  virtual void ResumeProducing(ExecNode* output) = 0;
 
   /// \brief Stop producing definitively to a single output
   ///
@@ -302,10 +270,10 @@ class ARROW_EXPORT ExecNode {
 /// takes a batch in and returns a batch.  This simple parallel runner also needs an
 /// executor (use simple synchronous runner if there is no executor)
 
-class ARROW_EXPORT MapNode : public ExecNode {
+class MapNode : public ExecNode {
  public:
   MapNode(ExecPlan* plan, std::vector<ExecNode*> inputs,
-          std::shared_ptr<Schema> output_schema, bool async_mode);
+          std::shared_ptr<Schema> output_schema, bool use_threads);
 
   void ErrorReceived(ExecNode* input, Status error) override;
 
@@ -313,9 +281,9 @@ class ARROW_EXPORT MapNode : public ExecNode {
 
   Status StartProducing() override;
 
-  void PauseProducing(ExecNode* output, int32_t counter) override;
+  void PauseProducing(ExecNode* output) override;
 
-  void ResumeProducing(ExecNode* output, int32_t counter) override;
+  void ResumeProducing(ExecNode* output) override;
 
   void StopProducing(ExecNode* output) override;
 
@@ -326,13 +294,19 @@ class ARROW_EXPORT MapNode : public ExecNode {
  protected:
   void SubmitTask(std::function<Result<ExecBatch>(ExecBatch)> map_fn, ExecBatch batch);
 
-  virtual void Finish(Status finish_st = Status::OK());
+  void Finish(Status finish_st = Status::OK());
 
  protected:
   // Counter for the number of batches received
   AtomicCounter input_counter_;
 
-  ::arrow::internal::Executor* executor_;
+  // The task group for the corresponding batches
+  util::AsyncTaskGroup task_group_;
+
+  // If true then tasks will be spawned for each item
+  //
+  // If false the item will be processed immediately and synchronously
+  bool use_threads_;
 
   // Variable used to cancel remaining tasks in the executor
   StopSource stop_source_;

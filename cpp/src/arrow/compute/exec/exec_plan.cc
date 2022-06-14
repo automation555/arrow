@@ -81,15 +81,13 @@ struct ExecPlanImpl : public ExecPlan {
   }
 
   Status StartProducing() {
-    START_COMPUTE_SPAN(span_, "ExecPlan", {{"plan", ToString()}});
+    START_SPAN(span_, "ExecPlan", {{"plan", ToString()}});
 #ifdef ARROW_WITH_OPENTELEMETRY
     if (HasMetadata()) {
       auto pairs = metadata().get()->sorted_pairs();
-      opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> span =
-          ::arrow::internal::tracing::UnwrapSpan(span_.details.get());
       std::for_each(std::begin(pairs), std::end(pairs),
-                    [span](std::pair<std::string, std::string> const& pair) {
-                      span->SetAttribute(pair.first, pair.second);
+                    [this](std::pair<std::string, std::string> const& pair) {
+                      span_.Get().span->SetAttribute(pair.first, pair.second);
                     });
     }
 #endif
@@ -100,9 +98,6 @@ struct ExecPlanImpl : public ExecPlan {
 
     // producers precede consumers
     sorted_nodes_ = TopoSort();
-    for (ExecNode* node : sorted_nodes_) {
-      RETURN_NOT_OK(node->PrepareToProduce());
-    }
 
     std::vector<Future<>> futures;
 
@@ -365,16 +360,11 @@ bool ExecNode::ErrorIfNotOk(Status status) {
 }
 
 MapNode::MapNode(ExecPlan* plan, std::vector<ExecNode*> inputs,
-                 std::shared_ptr<Schema> output_schema, bool async_mode)
+                 std::shared_ptr<Schema> output_schema, bool use_threads)
     : ExecNode(plan, std::move(inputs), /*input_labels=*/{"target"},
                std::move(output_schema),
-               /*num_outputs=*/1) {
-  if (async_mode) {
-    executor_ = plan_->exec_context()->executor();
-  } else {
-    executor_ = nullptr;
-  }
-}
+               /*num_outputs=*/1),
+      use_threads_(use_threads) {}
 
 void MapNode::ErrorReceived(ExecNode* input, Status error) {
   DCHECK_EQ(input, inputs_[0]);
@@ -392,7 +382,7 @@ void MapNode::InputFinished(ExecNode* input, int total_batches) {
 }
 
 Status MapNode::StartProducing() {
-  START_COMPUTE_SPAN(
+  START_SPAN(
       span_, std::string(kind_name()) + ":" + label(),
       {{"node.label", label()}, {"node.detail", ToString()}, {"node.kind", kind_name()}});
   finished_ = Future<>::Make();
@@ -400,13 +390,9 @@ Status MapNode::StartProducing() {
   return Status::OK();
 }
 
-void MapNode::PauseProducing(ExecNode* output, int32_t counter) {
-  inputs_[0]->PauseProducing(this, counter);
-}
+void MapNode::PauseProducing(ExecNode* output) { EVENT(span_, "PauseProducing"); }
 
-void MapNode::ResumeProducing(ExecNode* output, int32_t counter) {
-  inputs_[0]->ResumeProducing(this, counter);
-}
+void MapNode::ResumeProducing(ExecNode* output) { EVENT(span_, "ResumeProducing"); }
 
 void MapNode::StopProducing(ExecNode* output) {
   DCHECK_EQ(output, outputs_[0]);
@@ -415,13 +401,14 @@ void MapNode::StopProducing(ExecNode* output) {
 
 void MapNode::StopProducing() {
   EVENT(span_, "StopProducing");
-  if (executor_) {
+  if (use_threads_) {
+    // If we are using tasks we may have a bunch of queued tasks that we should
+    // cancel
     this->stop_source_.RequestStop();
   }
   if (input_counter_.Cancel()) {
     this->Finish();
   }
-  inputs_[0]->StopProducing(this);
 }
 
 Future<> MapNode::finished() { return finished_; }
@@ -445,21 +432,42 @@ void MapNode::SubmitTask(std::function<Result<ExecBatch>(ExecBatch)> map_fn,
     return Status::OK();
   };
 
-  status = task();
-  if (!status.ok()) {
+  if (use_threads_) {
+    status = task_group_.AddTask([this, task]() -> Result<Future<>> {
+      return this->plan()->exec_context()->executor()->Submit(
+          this->stop_source_.token(), [this, task]() {
+            auto status = task();
+            if (this->input_counter_.Increment()) {
+              this->Finish(status);
+            }
+            return status;
+          });
+    });
+  } else {
+    status = task();
+    if (input_counter_.Increment()) {
+      this->Finish(status);
+    }
+  }
+  // If we get a cancelled status from AddTask it means this node was stopped
+  // or errored out already so we can just drop the task.
+  if (!status.ok() && !status.IsCancelled()) {
     if (input_counter_.Cancel()) {
       this->Finish(status);
     }
-    inputs_[0]->StopProducing(this);
     return;
-  }
-  if (input_counter_.Increment()) {
-    this->Finish();
   }
 }
 
 void MapNode::Finish(Status finish_st /*= Status::OK()*/) {
-  this->finished_.MarkFinished(finish_st);
+  if (use_threads_) {
+    task_group_.End().AddCallback([this, finish_st](const Status& st) {
+      Status final_status = finish_st & st;
+      this->finished_.MarkFinished(final_status);
+    });
+  } else {
+    this->finished_.MarkFinished(finish_st);
+  }
 }
 
 std::shared_ptr<RecordBatchReader> MakeGeneratorReader(
@@ -474,16 +482,6 @@ std::shared_ptr<RecordBatchReader> MakeGeneratorReader(
         ARROW_ASSIGN_OR_RAISE(*record_batch, batch->ToRecordBatch(schema_, pool_));
       } else {
         *record_batch = IterationEnd<std::shared_ptr<RecordBatch>>();
-      }
-      return Status::OK();
-    }
-
-    Status Close() override {
-      // reading from generator until end is reached.
-      std::shared_ptr<RecordBatch> batch;
-      RETURN_NOT_OK(ReadNext(&batch));
-      while (batch != NULLPTR) {
-        RETURN_NOT_OK(ReadNext(&batch));
       }
       return Status::OK();
     }

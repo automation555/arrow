@@ -112,26 +112,18 @@ class UnionNode : public ExecNode {
   }
 
   Status StartProducing() override {
-    START_COMPUTE_SPAN(span_, std::string(kind_name()) + ":" + label(),
-                       {{"node.label", label()},
-                        {"node.detail", ToString()},
-                        {"node.kind", kind_name()}});
+    START_SPAN(span_, std::string(kind_name()) + ":" + label(),
+               {{"node.label", label()},
+                {"node.detail", ToString()},
+                {"node.kind", kind_name()}});
     finished_ = Future<>::Make();
     END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
     return Status::OK();
   }
 
-  void PauseProducing(ExecNode* output, int32_t counter) override {
-    for (auto* input : inputs_) {
-      input->PauseProducing(this, counter);
-    }
-  }
+  void PauseProducing(ExecNode* output) override { EVENT(span_, "PauseProducing"); }
 
-  void ResumeProducing(ExecNode* output, int32_t counter) override {
-    for (auto* input : inputs_) {
-      input->ResumeProducing(this, counter);
-    }
-  }
+  void ResumeProducing(ExecNode* output) override { EVENT(span_, "ResumeProducing"); }
 
   void StopProducing(ExecNode* output) override {
     EVENT(span_, "StopProducing");
@@ -139,17 +131,11 @@ class UnionNode : public ExecNode {
     if (batch_count_.Cancel()) {
       finished_.MarkFinished();
     }
-    for (auto&& input : inputs_) {
-      input->StopProducing(this);
-    }
   }
 
   void StopProducing() override {
     if (batch_count_.Cancel()) {
       finished_.MarkFinished();
-    }
-    for (auto&& input : inputs_) {
-      input->StopProducing(this);
     }
   }
 
