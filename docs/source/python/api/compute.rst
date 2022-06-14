@@ -45,21 +45,6 @@ Aggregations
    tdigest
    variance
 
-Cumulative Functions
---------------------
-
-Cumulative functions are vector functions that perform a running total on their
-input and output an array containing the corresponding intermediate running values.
-By default these functions do not detect overflow. They are also
-available in an overflow-checking variant, suffixed ``_checked``, which
-throws an ``ArrowInvalid`` exception when overflow is detected.
-
-.. autosummary::
-   :toctree: ../generated/
-
-   cumulative_sum
-   cumulative_sum_checked
-
 Arithmetic Functions
 --------------------
 
@@ -163,12 +148,13 @@ variants which detect domain errors where appropriate.
 Comparisons
 -----------
 
-These functions expect two inputs of the same type. If one of the inputs is `null`
-they return ``null``.
+These functions expect two or three inputs of the same type. If one of the inputs is 
+``null`` they return ``null``.
 
 .. autosummary::
    :toctree: ../generated/
 
+   between
    equal
    greater
    greater_equal
@@ -374,7 +360,6 @@ Categorizations
    is_nan
    is_null
    is_valid
-   true_unless_null
 
 Selecting / Multiplexing
 ------------------------
@@ -517,7 +502,6 @@ Compute Options
    CastOptions
    CountOptions
    CountOptions
-   CumulativeSumOptions
    DayOfWeekOptions
    DictionaryEncodeOptions
    ElementWiseAggregateOptions
