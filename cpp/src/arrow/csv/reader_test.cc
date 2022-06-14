@@ -48,7 +48,8 @@ class StreamingReaderAsTableReader : public TableReader {
       : reader_(std::move(reader)) {}
   virtual ~StreamingReaderAsTableReader() = default;
   virtual Result<std::shared_ptr<Table>> Read() {
-    ARROW_ASSIGN_OR_RAISE(auto table, reader_->ToTable());
+    std::shared_ptr<Table> table;
+    RETURN_NOT_OK(reader_->ReadAll(&table));
     return table;
   }
   virtual Future<std::shared_ptr<Table>> ReadAsync() {
@@ -206,11 +207,13 @@ void TestInvalidRowsSkipped(TableReaderFactory reader_factory, bool async) {
   ASSERT_EQ(NINVALID, num_invalid_rows);
 }
 
-TableReaderFactory MakeSerialFactory() {
-  return [](std::shared_ptr<io::InputStream> input_stream, ParseOptions parse_options) {
+TableReaderFactory MakeSerialFactory(bool use_read_ahead = true) {
+  return [use_read_ahead](std::shared_ptr<io::InputStream> input_stream,
+                          ParseOptions parse_options) {
     auto read_options = ReadOptions::Defaults();
     read_options.block_size = 1 << 10;
     read_options.use_threads = false;
+    read_options.use_readahead = use_read_ahead;
     return TableReader::Make(io::default_io_context(), input_stream, read_options,
                              std::move(parse_options), ConvertOptions::Defaults());
   };
@@ -226,6 +229,12 @@ TEST(SerialReaderTests, NestedParallelism) {
 }
 TEST(SerialReaderTests, InvalidRowsSkipped) {
   TestInvalidRowsSkipped(MakeSerialFactory(), /*async=*/false);
+}
+TEST(SerialReaderTests, StressNoReadAhead) {
+  StressTableReader(MakeSerialFactory(false));
+}
+TEST(SerialReaderTests, StressInvalidNoReadAhead) {
+  StressInvalidTableReader(MakeSerialFactory(false));
 }
 
 Result<TableReaderFactory> MakeAsyncFactory(

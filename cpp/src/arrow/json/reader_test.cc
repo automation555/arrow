@@ -35,10 +35,24 @@ using util::string_view;
 
 using internal::checked_cast;
 
-class ReaderTest : public ::testing::TestWithParam<bool> {
+struct ReaderTestParams {
+  bool use_threads;
+  bool use_readahead;
+  ReaderTestParams(bool threads, bool readahead)
+      : use_threads(threads), use_readahead(readahead) {}
+
+  static std::vector<ReaderTestParams> Values() {
+    std::vector<ReaderTestParams> params{
+        {true, false}, {true, true}, {false, true}, {false, false}};
+    return params;
+  }
+};
+
+class ReaderTest : public ::testing::TestWithParam<ReaderTestParams> {
  public:
   void SetUpReader() {
-    read_options_.use_threads = GetParam();
+    read_options_.use_threads = GetParam().use_threads;
+    read_options_.use_readahead = GetParam().use_readahead;
     ASSERT_OK_AND_ASSIGN(reader_, TableReader::Make(default_memory_pool(), input_,
                                                     read_options_, parse_options_));
   }
@@ -64,7 +78,8 @@ class ReaderTest : public ::testing::TestWithParam<bool> {
   std::shared_ptr<Table> table_;
 };
 
-INSTANTIATE_TEST_SUITE_P(ReaderTest, ReaderTest, ::testing::Values(false, true));
+INSTANTIATE_TEST_SUITE_P(ReaderTest, ReaderTest,
+                         ::testing::ValuesIn(ReaderTestParams::Values()));
 
 TEST_P(ReaderTest, Empty) {
   SetUpReader("{}\n{}\n");
