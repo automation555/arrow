@@ -24,7 +24,7 @@ Using Arrow C++ in your own project
 
 This section assumes you already have the Arrow C++ libraries on your
 system, either after installing them using a package manager or after
-:ref:`building them yourself <building-arrow-cpp>`.
+:ref:`building them yourself <arrow:building-arrow-cpp>`.
 
 The recommended way to integrate the Arrow C++ libraries in your own
 C++ project is to use CMake's `find_package
@@ -160,29 +160,6 @@ the following guidelines:
 
 It may be easiest to depend on a version of Arrow built from source, where you
 can control the source of each dependency and whether it is statically or
-dynamically linked. See :doc:`/developers/cpp/building` for instructions. Or
+dynamically linked. See :ref:`arrow:building-arrow-cpp` for instructions. Or
 alternatively, use Arrow from a package manager such as Conda or vcpkg which
 will manage consistent versions of Arrow and its dependencies.
-
-
-.. _download-timezone-database:
-
-Runtime Dependencies
-====================
-
-While Arrow uses the OS-provided timezone database on Linux and macOS, it
-requires a user-provided database on Windows. You must download and extract the
-text version of the IANA timezone database and add the Windows timezone mapping
-XML. To download, you can use the following batch script:
-
-.. literalinclude:: ../../../ci/appveyor-cpp-setup.bat
-   :language: batch
-   :start-after: @rem (Doc section: Download timezone database)
-   :end-before: @rem (Doc section: Download timezone database)
-
-By default, the timezone database will be detected at ``%USERPROFILE%\Downloads\tzdata``,
-but you can set a custom path at runtime in :struct:`arrow::ArrowGlobalOptions`::
-
-   arrow::ArrowGlobalOptions options;
-   options.tz_db_path = "path/to/tzdata";
-   ARROW_RETURN_NOT_OK(arrow::Initialize(options));
