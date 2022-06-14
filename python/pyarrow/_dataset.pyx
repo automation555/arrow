@@ -36,6 +36,8 @@ from pyarrow._csv cimport (
     ConvertOptions, ParseOptions, ReadOptions, WriteOptions)
 from pyarrow.util import _is_iterable, _is_path_like, _stringify_path
 
+from pyarrow._ipc cimport RecordBatchReader
+
 
 def _forbid_instantiation(klass, subclasses_instead=True):
     msg = '{} is an abstract class thus cannot be initialized.'.format(
@@ -251,49 +253,22 @@ cdef class Dataset(_Weakrefable):
 
         Examples
         --------
-        >>> import pyarrow as pa
-        >>> table = pa.table({'year': [2020, 2022, 2021, 2022, 2019, 2021],
-        ...                   'n_legs': [2, 2, 4, 4, 5, 100],
-        ...                   'animal': ["Flamingo", "Parrot", "Dog", "Horse",
-        ...                              "Brittle stars", "Centipede"]})
-        >>> 
-        >>> import pyarrow.parquet as pq
-        >>> pq.write_table(table, "dataset_scanner.parquet")
-
         >>> import pyarrow.dataset as ds
-        >>> dataset = ds.dataset("dataset_scanner.parquet")
+        >>> dataset = ds.dataset("path/to/dataset")
 
         Selecting a subset of the columns:
 
-        >>> dataset.scanner(columns=["year", "n_legs"]).to_table()
-        pyarrow.Table
-        year: int64
-        n_legs: int64
-        ----
-        year: [[2020,2022,2021,2022,2019,2021]]
-        n_legs: [[2,2,4,4,5,100]]
+        >>> dataset.scanner(columns=["A", "B"]).to_table()
 
         Projecting selected columns using an expression:
 
         >>> dataset.scanner(columns={
-        ...     "n_legs_uint": ds.field("n_legs").cast("uint8"),
+        ...     "A_int": ds.field("A").cast("int64"),
         ... }).to_table()
-        pyarrow.Table
-        n_legs_uint: uint8
-        ----
-        n_legs_uint: [[2,2,4,4,5,100]]
 
         Filtering rows while scanning:
 
-        >>> dataset.scanner(filter=ds.field("year") > 2020).to_table()
-        pyarrow.Table
-        year: int64
-        n_legs: int64
-        animal: string
-        ----
-        year: [[2022,2021,2022,2021]]
-        n_legs: [[2,4,4,100]]
-        animal: [["Parrot","Dog","Horse","Centipede"]]
+        >>> dataset.scanner(filter=ds.field("A") > 0).to_table()
         """
         return Scanner.from_dataset(self, **kwargs)
 
@@ -766,8 +741,7 @@ cdef class FileFormat(_Weakrefable):
     cdef WrittenFile _finish_write(self, path, base_dir,
                                    CFileWriter* file_writer):
         parquet_metadata = None
-        size = GetResultValue(file_writer.GetBytesWritten())
-        return WrittenFile(path, parquet_metadata, size)
+        return WrittenFile(path, parquet_metadata)
 
     cdef inline shared_ptr[CFileFormat] unwrap(self):
         return self.wrapped
@@ -1469,8 +1443,8 @@ cdef class DirectoryPartitioning(KeyValuePartitioning):
     >>> from pyarrow.dataset import DirectoryPartitioning
     >>> partitioning = DirectoryPartitioning(
     ...     pa.schema([("year", pa.int16()), ("month", pa.int8())]))
-    >>> print(partitioning.parse("/2009/11/"))
-    ((year == 2009) and (month == 11))
+    >>> print(partitioning.parse("/2009/11"))
+    ((year == 2009:int16) and (month == 11:int8))
     """
 
     cdef:
@@ -1596,8 +1570,8 @@ cdef class HivePartitioning(KeyValuePartitioning):
     >>> from pyarrow.dataset import HivePartitioning
     >>> partitioning = HivePartitioning(
     ...     pa.schema([("year", pa.int16()), ("month", pa.int8())]))
-    >>> print(partitioning.parse("/year=2009/month=11/"))
-    ((year == 2009) and (month == 11))
+    >>> print(partitioning.parse("/year=2009/month=11"))
+    ((year == 2009:int16) and (month == 11:int8))
 
     """
 
@@ -1720,8 +1694,8 @@ cdef class FilenamePartitioning(KeyValuePartitioning):
     >>> from pyarrow.dataset import FilenamePartitioning
     >>> partitioning = FilenamePartitioning(
     ...     pa.schema([("year", pa.int16()), ("month", pa.int8())]))
-    >>> print(partitioning.parse("2009_11_data.parquet"))
-    ((year == 2009) and (month == 11))
+    >>> print(partitioning.parse("2009_11_"))
+    ((year == 2009:int16) and (month == 11:int8))
     """
 
     cdef:
@@ -2678,21 +2652,11 @@ cdef class WrittenFile(_Weakrefable):
     """
     Metadata information about files written as
     part of a dataset write operation
-
-    Parameters
-    ----------
-    path : str
-        Path to the file.
-    metadata : pyarrow.parquet.FileMetaData, optional
-        For Parquet files, the Parquet file metadata.
-    size : int
-        The size of the file in bytes.
     """
 
-    def __init__(self, path, metadata, size):
+    def __init__(self, path, metadata):
         self.path = path
         self.metadata = metadata
-        self.size = size
 
 
 cdef void _filesystemdataset_write_visitor(
