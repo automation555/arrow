@@ -42,15 +42,13 @@ namespace {
 
 template <typename SrcType, typename DestType>
 typename std::enable_if<SrcType::type_id == DestType::type_id, Status>::type
-CastListOffsets(KernelContext* ctx, const ArraySpan& in_array, ArrayData* out_array) {
+CastListOffsets(KernelContext* ctx, const ArrayData& in_array, ArrayData* out_array) {
   return Status::OK();
 }
 
-// TODO(wesm): memory could be preallocated here and it would make
-// things simpler
 template <typename SrcType, typename DestType>
 typename std::enable_if<SrcType::type_id != DestType::type_id, Status>::type
-CastListOffsets(KernelContext* ctx, const ArraySpan& in_array, ArrayData* out_array) {
+CastListOffsets(KernelContext* ctx, const ArrayData& in_array, ArrayData* out_array) {
   using src_offset_type = typename SrcType::offset_type;
   using dest_offset_type = typename DestType::offset_type;
 
@@ -70,14 +68,14 @@ struct CastList {
   static constexpr bool is_upcast = sizeof(src_offset_type) < sizeof(dest_offset_type);
   static constexpr bool is_downcast = sizeof(src_offset_type) > sizeof(dest_offset_type);
 
-  static Status Exec(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) {
+  static Status Exec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
     const CastOptions& options = CastState::Get(ctx);
 
     auto child_type = checked_cast<const DestType&>(*out->type()).value_type();
 
-    if (out->is_scalar()) {
+    if (out->kind() == Datum::SCALAR) {
       // The scalar case is simple, as only the underlying values must be cast
-      const auto& in_scalar = checked_cast<const BaseListScalar&>(*batch[0].scalar);
+      const auto& in_scalar = checked_cast<const BaseListScalar&>(*batch[0].scalar());
       auto out_scalar = checked_cast<BaseListScalar*>(out->scalar().get());
 
       DCHECK(!out_scalar->is_valid);
@@ -86,21 +84,28 @@ struct CastList {
                                                       options, ctx->exec_context()));
 
         out_scalar->is_valid = true;
+
+        if (is_fixed_size_list_type<DestType>::value) {
+          auto fsl_scalar = checked_cast<FixedSizeListScalar*>(out_scalar);
+          const auto& list_type = checked_cast<const BaseListType&>(*fsl_scalar->type);
+          fsl_scalar->type = std::make_shared<FixedSizeListType>(
+              list_type.value_type(), fsl_scalar->value->length());
+        }
       }
       return Status::OK();
     }
 
-    const ArraySpan& in_array = batch[0].array;
+    const ArrayData& in_array = *batch[0].array();
     auto offsets = in_array.GetValues<src_offset_type>(1);
+    Datum values = in_array.child_data[0];
 
-    ArrayData* out_array = out->array_data().get();
-    out_array->buffers[0] = in_array.GetBuffer(0);
-    out_array->buffers[1] = in_array.GetBuffer(1);
+    ArrayData* out_array = out->mutable_array();
+    out_array->buffers = in_array.buffers;
 
     // Shift bitmap in case the source offset is non-zero
-    if (in_array.offset != 0 && in_array.buffers[0].data != nullptr) {
+    if (in_array.offset != 0 && in_array.buffers[0]) {
       ARROW_ASSIGN_OR_RAISE(out_array->buffers[0],
-                            CopyBitmap(ctx->memory_pool(), in_array.buffers[0].data,
+                            CopyBitmap(ctx->memory_pool(), in_array.buffers[0]->data(),
                                        in_array.offset, in_array.length));
     }
 
@@ -118,8 +123,6 @@ struct CastList {
       }
     }
 
-    std::shared_ptr<ArrayData> values = in_array.child_data[0].ToArrayData();
-
     if (in_array.offset != 0) {
       ARROW_ASSIGN_OR_RAISE(
           out_array->buffers[1],
@@ -129,8 +132,7 @@ struct CastList {
       for (int64_t i = 0; i < in_array.length + 1; ++i) {
         shifted_offsets[i] = static_cast<dest_offset_type>(offsets[i] - offsets[0]);
       }
-
-      values = values->Slice(offsets[0], offsets[in_array.length]);
+      values = in_array.child_data[0]->Slice(offsets[0], offsets[in_array.length]);
     } else {
       RETURN_NOT_OK((CastListOffsets<SrcType, DestType>(ctx, in_array, out_array)));
     }
@@ -139,7 +141,7 @@ struct CastList {
     ARROW_ASSIGN_OR_RAISE(Datum cast_values,
                           Cast(values, child_type, options, ctx->exec_context()));
 
-    DCHECK(cast_values.is_array());
+    DCHECK_EQ(Datum::ARRAY, cast_values.kind());
     out_array->child_data.push_back(cast_values.array());
     return Status::OK();
   }
@@ -156,46 +158,40 @@ void AddListCast(CastFunction* func) {
 }
 
 struct CastStruct {
-  static Status Exec(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) {
+  static Status Exec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
     const CastOptions& options = CastState::Get(ctx);
-    const auto& in_type = checked_cast<const StructType&>(*batch[0].type());
-    const auto& out_type = checked_cast<const StructType&>(*out->type());
-    const int in_field_count = in_type.num_fields();
-    const int out_field_count = out_type.num_fields();
+    const StructType& in_type = checked_cast<const StructType&>(*batch[0].type());
+    const StructType& out_type = checked_cast<const StructType&>(*out->type());
+    const auto in_field_count = in_type.num_fields();
 
-    std::vector<int> fields_to_select(out_field_count, -1);
+    if (in_field_count != out_type.num_fields()) {
+      return Status::TypeError("struct field sizes do not match: ", in_type.ToString(),
+                               " ", out_type.ToString());
+    }
 
-    int out_field_index = 0;
-    for (int in_field_index = 0;
-         in_field_index < in_field_count && out_field_index < out_field_count;
-         ++in_field_index) {
-      const auto& in_field = in_type.field(in_field_index);
-      const auto& out_field = out_type.field(out_field_index);
-      if (in_field->name() == out_field->name()) {
-        if (in_field->nullable() && !out_field->nullable()) {
-          return Status::TypeError("cannot cast nullable field to non-nullable field: ",
-                                   in_type.ToString(), " ", out_type.ToString());
-        }
-        fields_to_select[out_field_index++] = in_field_index;
+    for (int i = 0; i < in_field_count; ++i) {
+      const auto in_field = in_type.field(i);
+      const auto out_field = out_type.field(i);
+      if (in_field->name() != out_field->name()) {
+        return Status::TypeError("struct field names do not match: ", in_type.ToString(),
+                                 " ", out_type.ToString());
+      }
+
+      if (in_field->nullable() && !out_field->nullable()) {
+        return Status::TypeError("cannot cast nullable struct to non-nullable struct: ",
+                                 in_type.ToString(), " ", out_type.ToString());
       }
     }
 
-    if (out_field_index < out_field_count) {
-      return Status::TypeError(
-          "struct fields don't match or are in the wrong order: Input fields: ",
-          in_type.ToString(), " output fields: ", out_type.ToString());
-    }
-
-    if (out->is_scalar()) {
-      const auto& in_scalar = checked_cast<const StructScalar&>(*batch[0].scalar);
+    if (out->kind() == Datum::SCALAR) {
+      const auto& in_scalar = checked_cast<const StructScalar&>(*batch[0].scalar());
       auto out_scalar = checked_cast<StructScalar*>(out->scalar().get());
 
       DCHECK(!out_scalar->is_valid);
       if (in_scalar.is_valid) {
-        out_field_index = 0;
-        for (int field_index : fields_to_select) {
-          const auto& values = in_scalar.value[field_index];
-          const auto& target_type = out->type()->field(out_field_index++)->type();
+        for (int i = 0; i < in_field_count; i++) {
+          auto values = in_scalar.value[i];
+          auto target_type = out->type()->field(i)->type();
           ARROW_ASSIGN_OR_RAISE(Datum cast_values,
                                 Cast(values, target_type, options, ctx->exec_context()));
           DCHECK_EQ(Datum::SCALAR, cast_values.kind());
@@ -206,25 +202,23 @@ struct CastStruct {
       return Status::OK();
     }
 
-    const ArraySpan& in_array = batch[0].array;
-    ArrayData* out_array = out->array_data().get();
+    const ArrayData& in_array = *batch[0].array();
+    ArrayData* out_array = out->mutable_array();
 
-    if (in_array.buffers[0].data != nullptr) {
+    if (in_array.buffers[0]) {
       ARROW_ASSIGN_OR_RAISE(out_array->buffers[0],
-                            CopyBitmap(ctx->memory_pool(), in_array.buffers[0].data,
+                            CopyBitmap(ctx->memory_pool(), in_array.buffers[0]->data(),
                                        in_array.offset, in_array.length));
     }
 
-    out_field_index = 0;
-    for (int field_index : fields_to_select) {
-      const auto& values = (in_array.child_data[field_index].ToArrayData()->Slice(
-          in_array.offset, in_array.length));
-      const auto& target_type = out->type()->field(out_field_index++)->type();
+    for (int i = 0; i < in_field_count; ++i) {
+      auto values = in_array.child_data[i]->Slice(in_array.offset, in_array.length);
+      auto target_type = out->type()->field(i)->type();
 
       ARROW_ASSIGN_OR_RAISE(Datum cast_values,
                             Cast(values, target_type, options, ctx->exec_context()));
 
-      DCHECK(cast_values.is_array());
+      DCHECK_EQ(Datum::ARRAY, cast_values.kind());
       out_array->child_data.push_back(cast_values.array());
     }
 
@@ -250,17 +244,22 @@ std::vector<std::shared_ptr<CastFunction>> GetNestedCasts() {
   AddCommonCasts(Type::LIST, kOutputTargetType, cast_list.get());
   AddListCast<ListType, ListType>(cast_list.get());
   AddListCast<LargeListType, ListType>(cast_list.get());
+  AddListCast<FixedSizeListType, ListType>(cast_list.get());
 
   auto cast_large_list =
       std::make_shared<CastFunction>("cast_large_list", Type::LARGE_LIST);
   AddCommonCasts(Type::LARGE_LIST, kOutputTargetType, cast_large_list.get());
   AddListCast<ListType, LargeListType>(cast_large_list.get());
   AddListCast<LargeListType, LargeListType>(cast_large_list.get());
+  AddListCast<FixedSizeListType, LargeListType>(cast_large_list.get());
 
   // FSL is a bit incomplete at the moment
   auto cast_fsl =
       std::make_shared<CastFunction>("cast_fixed_size_list", Type::FIXED_SIZE_LIST);
   AddCommonCasts(Type::FIXED_SIZE_LIST, kOutputTargetType, cast_fsl.get());
+  AddListCast<ListType, FixedSizeListType>(cast_fsl.get());
+  AddListCast<LargeListType, FixedSizeListType>(cast_fsl.get());
+  AddListCast<FixedSizeListType, FixedSizeListType>(cast_fsl.get());
 
   // So is struct
   auto cast_struct = std::make_shared<CastFunction>("cast_struct", Type::STRUCT);
