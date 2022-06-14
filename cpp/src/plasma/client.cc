@@ -276,6 +276,8 @@ class PlasmaClient::Impl : public std::enable_shared_from_this<PlasmaClient::Imp
 
   int64_t store_capacity() { return store_capacity_; }
 
+  Status Metrics(PlasmaMetrics* metrics);
+
  private:
   /// Check if store_fd has already been received from the store. If yes,
   /// return it. Otherwise, receive it from the store (see analogous logic
@@ -1038,7 +1040,7 @@ Status PlasmaClient::Impl::DecodeNotifications(const uint8_t* buffer,
   std::lock_guard<std::recursive_mutex> guard(client_mutex_);
   auto object_info = flatbuffers::GetRoot<fb::PlasmaNotification>(buffer);
 
-  for (flatbuffers::uoffset_t i = 0; i < object_info->object_info()->size(); ++i) {
+  for (size_t i = 0; i < object_info->object_info()->size(); ++i) {
     auto info = object_info->object_info()->Get(i);
     ObjectID id = ObjectID::from_binary(info->object_id()->str());
     object_ids->push_back(id);
@@ -1112,6 +1114,14 @@ std::string PlasmaClient::Impl::DebugString() {
     return "error parsing reply";
   }
   return debug_string;
+}
+
+Status PlasmaClient::Impl::Metrics(PlasmaMetrics* metrics) {
+  std::lock_guard<std::recursive_mutex> guard(client_mutex_);
+  RETURN_NOT_OK(SendMetricsRequest(store_conn_));
+  std::vector<uint8_t> buffer;
+  RETURN_NOT_OK(PlasmaReceive(store_conn_, MessageType::PlasmaMetricsReply, &buffer));
+  return ReadMetricsReply(buffer.data(), buffer.size(), metrics);
 }
 
 // ----------------------------------------------------------------------
@@ -1220,5 +1230,7 @@ bool PlasmaClient::IsInUse(const ObjectID& object_id) {
 }
 
 int64_t PlasmaClient::store_capacity() { return impl_->store_capacity(); }
+
+Status PlasmaClient::Metrics(PlasmaMetrics* metrics) { return impl_->Metrics(metrics); }
 
 }  // namespace plasma

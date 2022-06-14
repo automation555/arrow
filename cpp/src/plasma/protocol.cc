@@ -94,7 +94,7 @@ void ConvertToVector(const FlatbufferVectorPointer fbvector, std::vector<T>* out
                      const Converter& converter) {
   out->clear();
   out->reserve(fbvector->size());
-  for (flatbuffers::uoffset_t i = 0; i < fbvector->size(); ++i) {
+  for (size_t i = 0; i < fbvector->size(); ++i) {
     out->push_back(converter(*fbvector->Get(i)));
   }
 }
@@ -823,6 +823,37 @@ Status ReadRefreshLRUReply(const uint8_t* data, size_t size) {
   DCHECK(data);
   auto message = flatbuffers::GetRoot<fb::PlasmaRefreshLRUReply>(data);
   DCHECK(VerifyFlatbuffer(message, data, size));
+  return Status::OK();
+}
+
+// Metrics message
+Status SendMetricsRequest(int sock) {
+  flatbuffers::FlatBufferBuilder fbb;
+  auto message = fb::CreatePlasmaMetricsRequest(fbb);
+  return PlasmaSend(sock, MessageType::PlasmaMetricsRequest, &fbb, message);
+}
+
+Status ReadMetricsRequest(const uint8_t* data, size_t size) { return Status::OK(); }
+
+Status SendMetricsReply(int sock, const PlasmaMetrics* metrics) {
+  flatbuffers::FlatBufferBuilder fbb;
+  plasma::flatbuf::PlasmaMetricsSpec metrics_(
+      metrics->share_mem_total, metrics->share_mem_used, metrics->external_total,
+      metrics->external_used);
+  auto message = fb::CreatePlasmaMetricsReply(fbb, &metrics_);
+  fbb.Finish(message);
+  return PlasmaSend(sock, MessageType::PlasmaMetricsReply, &fbb, message);
+}
+
+Status ReadMetricsReply(const uint8_t* data, size_t size, PlasmaMetrics* metrics) {
+  DCHECK(data);
+  auto message = flatbuffers::GetRoot<fb::PlasmaMetricsReply>(data);
+  DCHECK(VerifyFlatbuffer(message, data, size));
+  const plasma::flatbuf::PlasmaMetricsSpec* metrics_ = message->metrics();
+  metrics->share_mem_total = metrics_->share_mem_total();
+  metrics->share_mem_used = metrics_->share_mem_used();
+  metrics->external_total = metrics_->external_total();
+  metrics->external_used = metrics_->external_used();
   return Status::OK();
 }
 
