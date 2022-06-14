@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <vector>
 
@@ -57,13 +58,19 @@ class GANDIVA_EXPORT LLVMTypes {
 
   llvm::PointerType* ptr_type(llvm::Type* type) { return type->getPointerTo(); }
 
+  llvm::PointerType* opaque_ptr_type() { return ptr_type(i8_type()); }
+
   llvm::PointerType* i8_ptr_type() { return ptr_type(i8_type()); }
+
+  llvm::PointerType* i16_ptr_type() { return ptr_type(i16_type()); }
 
   llvm::PointerType* i32_ptr_type() { return ptr_type(i32_type()); }
 
   llvm::PointerType* i64_ptr_type() { return ptr_type(i64_type()); }
 
   llvm::PointerType* i128_ptr_type() { return ptr_type(i128_type()); }
+
+  llvm::PointerType* i8_ptr_ptr_type() { return ptr_type(ptr_type(i8_type())); }
 
   template <typename ctype, size_t N = (sizeof(ctype) * CHAR_BIT)>
   llvm::Constant* int_constant(ctype val) {
@@ -89,6 +96,16 @@ class GANDIVA_EXPORT LLVMTypes {
 
   llvm::Constant* double_constant(double val) {
     return llvm::ConstantFP::get(double_type(), val);
+  }
+
+  llvm::Constant* opaque_ptr_constant(void* val) {
+    auto ptr_int = int_constant<uintptr_t>(reinterpret_cast<uintptr_t>(val));
+    return llvm::ConstantExpr::getIntToPtr(ptr_int, opaque_ptr_type());
+  }
+
+  llvm::Constant* i8_ptr_constant(int8_t* val) {
+    auto ptr_int = int_constant<uintptr_t>(reinterpret_cast<uintptr_t>(val));
+    return llvm::ConstantExpr::getIntToPtr(ptr_int, i8_ptr_type());
   }
 
   llvm::Constant* NullConstant(llvm::Type* type) {
