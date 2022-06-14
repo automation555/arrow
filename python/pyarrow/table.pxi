@@ -317,7 +317,9 @@ cdef class ChunkedArray(_PandasConvertible):
           [
             false,
             false,
-            false,
+            false
+          ],
+          [
             false,
             true,
             false
@@ -1404,6 +1406,24 @@ cdef _sanitize_arrays(arrays, names, schema, metadata,
             item = asarray(item, type=schema[i].type)
             converted_arrays.append(item)
     return converted_arrays
+
+
+cdef _truncate_array_string(arr_str, length):
+    delim_stack = []
+    partial_end = 0
+
+    for pos, char in enumerate(arr_str):
+        if char == "[":
+            delim_stack.append("]")
+            continue
+        elif char == "]":
+            assert delim_stack[-1] == "]"
+            delim_stack.pop()
+        elif char != ",":
+            continue
+
+        if pos >= length:
+            return arr_str[:(pos + 1)] + "...]" * len(delim_stack)
 
 
 cdef class RecordBatch(_PandasConvertible):
@@ -2724,7 +2744,7 @@ cdef class Table(_PandasConvertible):
         raise TypeError("Do not call Table's constructor directly, use one of "
                         "the `Table.from_*` functions instead.")
 
-    def to_string(self, *, show_metadata=False, preview_cols=0):
+    def to_string(self, *, show_metadata=False, preview_cols=0, cols_char_limit=120):
         """
         Return human-readable string representation of Table.
 
@@ -2734,6 +2754,8 @@ cdef class Table(_PandasConvertible):
             Display Field-level and Schema-level KeyValueMetadata.
         preview_cols : int, default 0
             Display values of the columns for the first N columns.
+        cols_char_limit : int, default 120
+            Max number of characters to show in each column preview
 
         Returns
         -------
@@ -2749,10 +2771,12 @@ cdef class Table(_PandasConvertible):
         if preview_cols:
             pieces.append('----')
             for i in range(min(self.num_columns, preview_cols)):
-                pieces.append('{}: {}'.format(
-                    self.field(i).name,
-                    self.column(i).to_string(indent=0, skip_new_lines=True)
-                ))
+                col_string = self.column(i).to_string(
+                    indent=0, skip_new_lines=True)
+                if len(col_string) > cols_char_limit:
+                    col_string = _truncate_array_string(
+                        col_string, cols_char_limit)
+                pieces.append('{}: {}'.format(self.field(i).name, col_string))
             if preview_cols < self.num_columns:
                 pieces.append('...')
         return '\n'.join(pieces)
@@ -2884,23 +2908,20 @@ cdef class Table(_PandasConvertible):
         """
         Select rows from the table.
 
-        The Table can be filtered based on a mask, which will be passed to
-        :func:`pyarrow.compute.filter` to perform the filtering, or it can
-        be filtered through a boolean :class:`.Expression`
+        See :func:`pyarrow.compute.filter` for full usage.
 
         Parameters
         ----------
-        mask : Array or array-like or .Expression
-            The boolean mask or the :class:`.Expression` to filter the table with.
+        mask : Array or array-like
+            The boolean mask to filter the table with.
         null_selection_behavior
-            How nulls in the mask should be handled, does nothing if
-            an :class:`.Expression` is used.
+            How nulls in the mask should be handled.
 
         Returns
         -------
         filtered : Table
             A table of the same schema, with only the rows selected
-            by applied filtering
+            by the boolean mask.
 
         Examples
         --------
@@ -2910,20 +2931,6 @@ cdef class Table(_PandasConvertible):
         ...                    'n_legs': [2, 4, 5, 100],
         ...                    'animals': ["Flamingo", "Horse", "Brittle stars", "Centipede"]})
         >>> table = pa.Table.from_pandas(df)
-
-        Define an expression and select rows:
-
-        >>> import pyarrow.compute as pc
-        >>> expr = pc.field("year") <= 2020
-        >>> table.filter(expr)
-        pyarrow.Table
-        year: int64
-        n_legs: int64
-        animals: string
-        ----
-        year: [[2020,2019]]
-        n_legs: [[2,5]]
-        animals: [["Flamingo","Brittle stars"]]
 
         Define a mask and select rows:
 
@@ -2947,11 +2954,7 @@ cdef class Table(_PandasConvertible):
         n_legs: [[2,4,null]]
         animals: [["Flamingo","Horse",null]]
         """
-        if isinstance(mask, _pc().Expression):
-            return _pc()._exec_plan._filter_table(self, mask,
-                                                  output_type=Table)
-        else:
-            return _pc().filter(self, mask, null_selection_behavior)
+        return _pc().filter(self, mask, null_selection_behavior)
 
     def take(self, object indices):
         """
@@ -3321,7 +3324,7 @@ cdef class Table(_PandasConvertible):
 
         Examples
         --------
-        >>> import pyarrow as pa
+        >>> import pyarrow as pa  
         >>> n_legs = pa.array([2, 2, 4, 4, 5, 100])
         >>> animals = pa.array(["Flamingo", "Parrot", "Dog", "Horse", "Brittle stars", "Centipede"])
         >>> names=["n_legs", "animals"]
@@ -3378,7 +3381,7 @@ cdef class Table(_PandasConvertible):
         n_legs: int64
         animals: string
         -- schema metadata --
-        pandas: '{"index_columns": [{"kind": "range", "name": null, "start": 0, ...
+        pandas: '{"index_columns": [{"kind": "range", "name": null, "start": 0, "' + 509
 
         Define new schema and cast table values:
 
@@ -3724,7 +3727,6 @@ cdef class Table(_PandasConvertible):
         >>> import pyarrow as pa
         >>> n_legs = pa.array([2, 4, 5, 100])
         >>> animals = pa.array(["Flamingo", "Horse", "Brittle stars", "Centipede"])
-        >>> names = ["n_legs", "animals"]
         >>> batch = pa.record_batch([n_legs, animals], names=names)
         >>> batch.to_pandas()
            n_legs        animals
@@ -3879,7 +3881,7 @@ cdef class Table(_PandasConvertible):
         n_legs: int64
         animals: string
         -- schema metadata --
-        pandas: '{"index_columns": [{"kind": "range", "name": null, "start": 0, ...
+        pandas: '{"index_columns": [{"kind": "range", "name": null, "start": 0, "' + 509
         >>> reader.read_all()
         pyarrow.Table
         n_legs: int64
@@ -4112,6 +4114,7 @@ cdef class Table(_PandasConvertible):
         Yields
         ------
         ChunkedArray
+        ChunkedArray
 
         Examples
         --------
@@ -4122,7 +4125,7 @@ cdef class Table(_PandasConvertible):
         >>> table = pa.Table.from_pandas(df)
         >>> for i in table.itercolumns():
         ...     print(i.null_count)
-        ...
+        ... 
         2
         1
         """
@@ -4646,7 +4649,7 @@ cdef class Table(_PandasConvertible):
             of the join operation left side.
         right_keys : str or list[str], default None
             The columns from the right_table that should be used as keys
-            on the join operation right side.
+            on the join operation right side. 
             When ``None`` use the same key names as the left table.
         join_type : str, default "left outer"
             The kind of join that should be performed, one of
@@ -5291,7 +5294,6 @@ list[tuple(str, str, FunctionOptions)]
 
         Examples
         --------
-        >>> import pyarrow as pa
         >>> t = pa.table([
         ...       pa.array(["a", "a", "b", "b", "c"]),
         ...       pa.array([1, 2, 3, 4, 5]),
