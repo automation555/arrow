@@ -21,7 +21,6 @@
 #include <utility>
 
 #include "gandiva/decimal_type_util.h"
-#include "gandiva/function_registry_common.h"
 #include "gandiva/gandiva_aliases.h"
 #include "gandiva/node.h"
 
@@ -106,6 +105,8 @@ NodePtr TreeExprBuilder::MakeNull(DataTypePtr data_type) {
       DecimalScalar128 literal(decimal_type->precision(), decimal_type->scale());
       return std::make_shared<LiteralNode>(data_type, LiteralHolder(literal), true);
     }
+    case arrow::Type::NA:
+      return std::make_shared<NullLiteralNode>();
     default:
       return nullptr;
   }
@@ -203,22 +204,22 @@ NodePtr TreeExprBuilder::MakeInExpressionDecimal(
                                                                        precision, scale);
 }
 
-#define MAKE_IN(NAME, ctype, type)                                        \
-  NodePtr TreeExprBuilder::MakeInExpression##NAME(                        \
-      NodePtr node, const std::unordered_set<ctype>& values) {            \
-    return std::make_shared<InExpressionNode<ctype>>(node, values, type); \
+#define MAKE_IN(NAME, ctype)                                        \
+  NodePtr TreeExprBuilder::MakeInExpression##NAME(                  \
+      NodePtr node, const std::unordered_set<ctype>& values) {      \
+    return std::make_shared<InExpressionNode<ctype>>(node, values); \
   }
 
-MAKE_IN(Int32, int32_t, int32());
-MAKE_IN(Int64, int64_t, int64());
-MAKE_IN(Date32, int32_t, date32());
-MAKE_IN(Date64, int64_t, date64());
-MAKE_IN(TimeStamp, int64_t, timestamp());
-MAKE_IN(Time32, int32_t, time32());
-MAKE_IN(Time64, int64_t, time64());
-MAKE_IN(Float, float, float32());
-MAKE_IN(Double, double, float64());
-MAKE_IN(String, std::string, utf8());
-MAKE_IN(Binary, std::string, binary());
+MAKE_IN(Int32, int32_t);
+MAKE_IN(Int64, int64_t);
+MAKE_IN(Date32, int32_t);
+MAKE_IN(Date64, int64_t);
+MAKE_IN(TimeStamp, int64_t);
+MAKE_IN(Time32, int32_t);
+MAKE_IN(Time64, int64_t);
+MAKE_IN(Float, float);
+MAKE_IN(Double, double);
+MAKE_IN(String, std::string);
+MAKE_IN(Binary, std::string);
 
 }  // namespace gandiva

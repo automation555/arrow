@@ -23,14 +23,13 @@
 #include <vector>
 
 #include "arrow/util/macros.h"
+
 #include "gandiva/annotator.h"
 #include "gandiva/compiled_expr.h"
 #include "gandiva/configuration.h"
 #include "gandiva/dex_visitor.h"
 #include "gandiva/engine.h"
 #include "gandiva/execution_context.h"
-#include "gandiva/expr_decomposer.h"
-#include "gandiva/expression_cache_key.h"
 #include "gandiva/function_registry.h"
 #include "gandiva/gandiva_aliases.h"
 #include "gandiva/llvm_types.h"
@@ -47,23 +46,18 @@ class FunctionHolder;
 class GANDIVA_EXPORT LLVMGenerator {
  public:
   /// \brief Factory method to initialize the generator.
-  static Status Make(std::shared_ptr<Configuration> config, bool cached,
+  static Status Make(std::shared_ptr<Configuration> config,
                      std::unique_ptr<LLVMGenerator>* llvm_generator);
 
-  /// \brief Get the cache to be used for LLVM ObjectCache.
-  static std::shared_ptr<Cache<ExpressionCacheKey, std::shared_ptr<llvm::MemoryBuffer>>>
-  GetCache();
-
-  /// \brief Set LLVM ObjectCache.
-  void SetLLVMObjectCache(GandivaObjectCache& object_cache);
-
-  /// \brief Build the code for the expression trees for default mode with a LLVM
-  /// ObjectCache. Each element in the vector represents an expression tree
+  /// \brief Build the code for the expression trees for default mode. Each
+  /// element in the vector represents an expression tree
   Status Build(const ExpressionVector& exprs, SelectionVector::Mode mode);
 
   /// \brief Build the code for the expression trees for default mode. Each
   /// element in the vector represents an expression tree
-  Status Build(const ExpressionVector& exprs);
+  Status Build(const ExpressionVector& exprs) {
+    return Build(exprs, SelectionVector::Mode::MODE_NONE);
+  }
 
   /// \brief Execute the built expression against the provided arguments for
   /// default mode.
@@ -82,7 +76,7 @@ class GANDIVA_EXPORT LLVMGenerator {
   std::string DumpIR() { return engine_->DumpIR(); }
 
  private:
-  explicit LLVMGenerator(bool cached);
+  LLVMGenerator();
 
   FRIEND_TEST(TestLLVMGenerator, VerifyPCFunctions);
   FRIEND_TEST(TestLLVMGenerator, TestAdd);
@@ -96,9 +90,8 @@ class GANDIVA_EXPORT LLVMGenerator {
    public:
     Visitor(LLVMGenerator* generator, llvm::Function* function,
             llvm::BasicBlock* entry_block, llvm::Value* arg_addrs,
-            llvm::Value* arg_local_bitmaps, llvm::Value* arg_holder_ptrs,
-            std::vector<llvm::Value*> slice_offsets, llvm::Value* arg_context_ptr,
-            llvm::Value* loop_var);
+            llvm::Value* arg_local_bitmaps, std::vector<llvm::Value*> slice_offsets,
+            llvm::Value* arg_context_ptr, llvm::Value* loop_var);
 
     void Visit(const VectorReadValidityDex& dex) override;
     void Visit(const VectorReadFixedLenValueDex& dex) override;
@@ -107,6 +100,7 @@ class GANDIVA_EXPORT LLVMGenerator {
     void Visit(const TrueDex& dex) override;
     void Visit(const FalseDex& dex) override;
     void Visit(const LiteralDex& dex) override;
+    void Visit(const NullLiteralDex& dex) override;
     void Visit(const NonNullableFuncDex& dex) override;
     void Visit(const NullableNeverFuncDex& dex) override;
     void Visit(const NullableInternalFuncDex& dex) override;
@@ -140,7 +134,7 @@ class GANDIVA_EXPORT LLVMGenerator {
     LValuePtr BuildValueAndValidity(const ValueValidityPair& pair);
 
     // Generate code to build the params.
-    std::vector<llvm::Value*> BuildParams(int holder_idx,
+    std::vector<llvm::Value*> BuildParams(FunctionHolder* holder,
                                           const ValueValidityPairVector& args,
                                           bool with_validity, bool with_context);
 
@@ -171,7 +165,6 @@ class GANDIVA_EXPORT LLVMGenerator {
     llvm::BasicBlock* entry_block_;
     llvm::Value* arg_addrs_;
     llvm::Value* arg_local_bitmaps_;
-    llvm::Value* arg_holder_ptrs_;
     std::vector<llvm::Value*> slice_offsets_;
     llvm::Value* arg_context_ptr_;
     llvm::Value* loop_var_;
@@ -200,7 +193,7 @@ class GANDIVA_EXPORT LLVMGenerator {
 
   /// Generate code for the value array of one expression.
   Status CodeGenExprValue(DexPtr value_expr, int num_buffers, FieldDescriptorPtr output,
-                          int suffix_idx, std::string& fn_name,
+                          int suffix_idx, llvm::Function** fn,
                           SelectionVector::Mode selection_vector_mode);
 
   /// Generate code to load the local bitmap specified index and cast it as bitmap.
@@ -249,7 +242,6 @@ class GANDIVA_EXPORT LLVMGenerator {
 
   std::unique_ptr<Engine> engine_;
   std::vector<std::unique_ptr<CompiledExpr>> compiled_exprs_;
-  bool cached_;
   FunctionRegistry function_registry_;
   Annotator annotator_;
   SelectionVector::Mode selection_vector_mode_;

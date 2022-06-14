@@ -64,6 +64,7 @@ class GANDIVA_EXPORT ExprDecomposer : public NodeVisitor {
   Status Visit(const FunctionNode& node) override;
   Status Visit(const IfNode& node) override;
   Status Visit(const LiteralNode& node) override;
+  Status Visit(const NullLiteralNode& node) override;
   Status Visit(const BooleanNode& node) override;
   Status Visit(const InExpressionNode<int32_t>& node) override;
   Status Visit(const InExpressionNode<int64_t>& node) override;
@@ -71,9 +72,6 @@ class GANDIVA_EXPORT ExprDecomposer : public NodeVisitor {
   Status Visit(const InExpressionNode<double>& node) override;
   Status Visit(const InExpressionNode<gandiva::DecimalScalar128>& node) override;
   Status Visit(const InExpressionNode<std::string>& node) override;
-
-  template <typename ctype>
-  Status VisitInGeneric(const InExpressionNode<ctype>& node);
 
   // Optimize a function node, if possible.
   const FunctionNode TryOptimize(const FunctionNode& node);
