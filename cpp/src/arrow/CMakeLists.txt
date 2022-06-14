@@ -393,12 +393,14 @@ if(ARROW_COMPUTE)
        compute/exec/key_encode.cc
        compute/exec/key_hash.cc
        compute/exec/key_map.cc
+       compute/exec/options.cc
        compute/exec/order_by_impl.cc
        compute/exec/partition_util.cc
        compute/exec/options.cc
        compute/exec/project_node.cc
        compute/exec/sink_node.cc
        compute/exec/source_node.cc
+       compute/exec/swiss_join.cc
        compute/exec/task_util.cc
        compute/exec/tpch_node.cc
        compute/exec/union_node.cc
@@ -437,7 +439,6 @@ if(ARROW_COMPUTE)
        compute/kernels/scalar_validity.cc
        compute/kernels/util_internal.cc
        compute/kernels/vector_array_sort.cc
-       compute/kernels/vector_cumulative_ops.cc
        compute/kernels/vector_hash.cc
        compute/kernels/vector_nested.cc
        compute/kernels/vector_replace.cc
@@ -452,6 +453,7 @@ if(ARROW_COMPUTE)
   append_avx2_src(compute/exec/key_encode_avx2.cc)
   append_avx2_src(compute/exec/key_hash_avx2.cc)
   append_avx2_src(compute/exec/key_map_avx2.cc)
+  append_avx2_src(compute/exec/swiss_join_avx2.cc)
   append_avx2_src(compute/exec/util_avx2.cc)
 
   list(APPEND ARROW_TESTING_SRCS compute/exec/test_util.cc)
@@ -622,15 +624,10 @@ if(ARROW_TESTING)
                 DEPENDENCIES
                 arrow_test_dependencies
                 SHARED_LINK_LIBS
-                arrow::flatbuffers
-                rapidjson::rapidjson
                 arrow_shared
                 GTest::gtest
                 STATIC_LINK_LIBS
-                arrow::flatbuffers
-                rapidjson::rapidjson
-                arrow_static
-                GTest::gtest)
+                arrow_static)
 
   add_custom_target(arrow_testing)
   add_dependencies(arrow_testing ${ARROW_TESTING_LIBRARIES})
@@ -754,6 +751,20 @@ endif()
 
 if(ARROW_FLIGHT)
   add_subdirectory(flight)
+
+  if(ARROW_WITH_UCX)
+    add_subdirectory(flight/transport/ucx)
+  endif()
+endif()
+
+if(ARROW_FLIGHT_SQL)
+  add_subdirectory(flight/sql)
+endif()
+
+if(ARROW_FLIGHT
+   AND ARROW_FLIGHT_SQL
+   AND ARROW_BUILD_INTEGRATION)
+  add_subdirectory(flight/integration_tests)
 endif()
 
 if(ARROW_HIVESERVER2)

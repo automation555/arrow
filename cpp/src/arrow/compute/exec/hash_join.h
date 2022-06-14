@@ -21,14 +21,13 @@
 #include <memory>
 #include <vector>
 
-#include "arrow/compute/exec/bloom_filter.h"
 #include "arrow/compute/exec/options.h"
 #include "arrow/compute/exec/schema_util.h"
 #include "arrow/compute/exec/task_util.h"
 #include "arrow/result.h"
 #include "arrow/status.h"
 #include "arrow/type.h"
-#include "arrow/util/tracing.h"
+#include "arrow/util/tracing_internal.h"
 
 namespace arrow {
 namespace compute {
@@ -58,8 +57,12 @@ class ARROW_EXPORT HashJoinSchema {
                                 const std::string& left_field_name_prefix,
                                 const std::string& right_field_name_prefix);
 
+  bool HasDictionaries() const;
+
+  bool HasLargeBinary() const;
+
   Result<Expression> BindFilter(Expression filter, const Schema& left_schema,
-                                const Schema& right_schema, ExecContext* exec_context);
+                                const Schema& right_schema);
   std::shared_ptr<Schema> MakeOutputSchema(const std::string& left_field_name_suffix,
                                            const std::string& right_field_name_suffix);
 
@@ -99,26 +102,23 @@ class ARROW_EXPORT HashJoinSchema {
 
 class HashJoinImpl {
  public:
-  using OutputBatchCallback = std::function<void(ExecBatch)>;
+  using OutputBatchCallback = std::function<void(int64_t, ExecBatch)>;
   using FinishedCallback = std::function<void(int64_t)>;
 
   virtual ~HashJoinImpl() = default;
   virtual Status Init(ExecContext* ctx, JoinType join_type, bool use_sync_execution,
-                      size_t num_threads, HashJoinSchema* schema_mgr,
+                      size_t num_threads, const HashJoinProjectionMaps* proj_map_left,
+                      const HashJoinProjectionMaps* proj_map_right,
                       std::vector<JoinKeyCmp> key_cmp, Expression filter,
                       OutputBatchCallback output_batch_callback,
                       FinishedCallback finished_callback,
-                      TaskScheduler::ScheduleImpl schedule_task_callback,
-                      HashJoinImpl* pushdown_target, std::vector<int> column_map) = 0;
-  virtual void ExpectBloomFilter() = 0;
-  virtual Status PushBloomFilter(size_t thread_index,
-                                 std::unique_ptr<BlockedBloomFilter> filter,
-                                 std::vector<int> column_map) = 0;
+                      TaskScheduler::ScheduleImpl schedule_task_callback) = 0;
   virtual Status InputReceived(size_t thread_index, int side, ExecBatch batch) = 0;
   virtual Status InputFinished(size_t thread_index, int side) = 0;
   virtual void Abort(TaskScheduler::AbortContinuationImpl pos_abort_callback) = 0;
 
   static Result<std::unique_ptr<HashJoinImpl>> MakeBasic();
+  static Result<std::unique_ptr<HashJoinImpl>> MakeSwiss();
 
  protected:
   util::tracing::Span span_;

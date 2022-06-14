@@ -22,7 +22,6 @@
 #include <algorithm>
 #include <cstdint>
 
-#include "arrow/compute/exec/key_encode.h"
 #include "arrow/util/bit_util.h"
 #include "arrow/util/ubsan.h"
 
@@ -457,12 +456,11 @@ void Hashing32::HashMultiColumn(const std::vector<KeyColumnArray>& cols,
   }
 }
 
-Status Hashing32::HashBatch(const ExecBatch& key_batch, uint32_t* hashes,
-                            int64_t hardware_flags, util::TempVectorStack* temp_stack,
-                            int64_t offset, int64_t length) {
-  std::vector<KeyColumnArray> column_arrays;
-  RETURN_NOT_OK(ColumnArraysFromExecBatch(key_batch, offset, length, &column_arrays));
-
+Status Hashing32::HashBatch(const ExecBatch& key_batch, int start_row, int num_rows,
+                            uint32_t* hashes, std::vector<KeyColumnArray>& column_arrays,
+                            int64_t hardware_flags, util::TempVectorStack* temp_stack) {
+  RETURN_NOT_OK(
+      ColumnArraysFromExecBatch(key_batch, start_row, num_rows, &column_arrays));
   KeyEncoder::KeyEncoderContext ctx;
   ctx.hardware_flags = hardware_flags;
   ctx.stack = temp_stack;
@@ -889,12 +887,11 @@ void Hashing64::HashMultiColumn(const std::vector<KeyColumnArray>& cols,
   }
 }
 
-Status Hashing64::HashBatch(const ExecBatch& key_batch, uint64_t* hashes,
-                            int64_t hardware_flags, util::TempVectorStack* temp_stack,
-                            int64_t offset, int64_t length) {
-  std::vector<KeyColumnArray> column_arrays;
-  RETURN_NOT_OK(ColumnArraysFromExecBatch(key_batch, offset, length, &column_arrays));
-
+Status Hashing64::HashBatch(const ExecBatch& key_batch, int start_row, int num_rows,
+                            uint64_t* hashes, std::vector<KeyColumnArray>& column_arrays,
+                            int64_t hardware_flags, util::TempVectorStack* temp_stack) {
+  RETURN_NOT_OK(
+      ColumnArraysFromExecBatch(key_batch, start_row, num_rows, &column_arrays));
   KeyEncoder::KeyEncoderContext ctx;
   ctx.hardware_flags = hardware_flags;
   ctx.stack = temp_stack;
